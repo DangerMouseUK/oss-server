@@ -50,3 +50,27 @@ fn asss_144_zone_configs_load() {
     assert!(groups.get("mod", "seemodchat").is_some());
     assert!(groups.get("default", "seemodchat").is_none());
 }
+
+#[test]
+fn asss_144_modules_conf_loads() {
+    let Some(dir) = zone_dir() else {
+        eprintln!("OSS_ASSS_ZONE_DIR not set; skipping");
+        return;
+    };
+    let zone = oss_server::runtime::ServerBuilder::new(&dir)
+        .build_zone()
+        .expect("zone builds");
+    let loaded: Vec<&str> = zone.modules.loaded().collect();
+    for m in [
+        "core",
+        "arenaman",
+        "capman",
+        "clientset",
+        "cmdman",
+        "chat",
+        "game",
+        "auth_file",
+    ] {
+        assert!(loaded.contains(&m), "{m} not loaded: {loaded:?}");
+    }
+}

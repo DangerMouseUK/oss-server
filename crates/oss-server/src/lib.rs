@@ -21,6 +21,7 @@ pub mod modules;
 pub mod net;
 pub mod ping;
 pub mod player;
+pub mod prng;
 pub mod registry;
 pub mod runtime;
 pub mod time;

@@ -339,6 +339,9 @@ impl ServerBuilder {
                 Err(ModuleError::Unknown(n)) => {
                     tracing::warn!(target: "modman", module = %n, "no such module, skipping");
                 }
+                Err(ModuleError::AlreadyLoaded(n)) => {
+                    tracing::warn!(target: "modman", module = %n, "listed twice, skipping");
+                }
                 Err(e) => return Err(e.into()),
             }
         }

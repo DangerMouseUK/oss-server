@@ -10,6 +10,7 @@ pub mod chat;
 pub mod clientset;
 pub mod cmdman;
 pub mod core;
+pub mod game;
 pub mod playercmd;
 
 use crate::module::ModuleCatalog;
@@ -25,6 +26,7 @@ pub const DEFAULT_MODULES: &[&str] = &[
     "clientset",
     "cmdman",
     "chat",
+    "game",
     "auth_file",
     "playercmd",
 ];
@@ -40,6 +42,7 @@ pub fn builtin_catalog() -> ModuleCatalog {
     c.register("clientset", &[], || clientset::ClientSetModule);
     c.register("cmdman", &[], || cmdman::CmdManModule);
     c.register("chat", &[], || chat::ChatModule);
+    c.register("game", &[], || game::GameModule);
     c.register("auth_file", &[], || auth_file::AuthFileModule);
     c.register("playercmd", &[], || playercmd::PlayerCmdModule);
     c

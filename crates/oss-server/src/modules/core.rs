@@ -154,6 +154,10 @@ pub trait Persist: Send + Sync {
 pub trait FreqManager: Send + Sync {
     /// Adjusts `ship`/`freq` for a player entering `arena`.
     fn initial_freq(&self, zone: &mut Zone, player: PlayerId, ship: &mut Ship, freq: &mut u16);
+    /// Adjusts a requested ship change (`ship` = requested, `freq` = current).
+    fn ship_change(&self, _zone: &mut Zone, _player: PlayerId, _ship: &mut Ship, _freq: &mut u16) {}
+    /// Adjusts a requested frequency change (`freq` = requested, `ship` = current).
+    fn freq_change(&self, _zone: &mut Zone, _player: PlayerId, _ship: &mut Ship, _freq: &mut u16) {}
 }
 
 /// What happened to a player (ASSS `PA_*`).

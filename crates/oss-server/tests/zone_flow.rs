@@ -327,3 +327,114 @@ fn hostile_packets_are_ignored() {
         auth_code::BAD_NAME
     );
 }
+
+#[test]
+fn ships_and_positions() {
+    use oss_proto::position::{C2SPosition, S2CPosition, S2CWeapon, WeaponInfo, weapon_type};
+    let mut h = H::new();
+    let (alice, _) = h.login("alice", "x");
+    let (bob, _) = h.login("bob", "secret");
+    h.enter(alice);
+    h.enter(bob);
+    h.take(alice);
+
+    // alice leaves spec: balanced freq 0, everyone is told
+    h.send(alice, &[c2s::kind::SET_SHIP, 0]);
+    let mine = h.take(alice);
+    let theirs = h.take(bob);
+    for pk in [&mine, &theirs] {
+        let sc = pk
+            .iter()
+            .find(|d| d[0] == s2c::kind::SHIP_CHANGE)
+            .expect("ship change");
+        let sc = s2c::ShipChange::decode(sc).expect("decode");
+        assert_eq!((sc.ship, sc.pid, sc.freq), (0, alice.0 as i16, 0));
+    }
+    assert_eq!(
+        h.zone.players.get(alice).map(|p| (p.ship.0, p.freq)),
+        Some((0, 0))
+    );
+    // bad ship numbers are ignored
+    h.send(alice, &[c2s::kind::SET_SHIP, 9]);
+    assert!(h.take(bob).is_empty());
+
+    // a plain position near bob (who sits at 0,0 in spec) is relayed as 0x28
+    let mut pos = C2SPosition {
+        rotation: 10,
+        time: h.t as u32,
+        x: 400,
+        y: 300,
+        bounty: 7,
+        energy: 1000,
+        ..Default::default()
+    };
+    let mut buf = Vec::new();
+    pos.encode(&mut buf);
+    assert_eq!(buf.len(), 22);
+    h.send(alice, &buf);
+    let got = h.take(bob);
+    let p28 = got.iter().find(|d| d[0] == 0x28).expect("position relayed");
+    let sp = S2CPosition::decode(p28).expect("decode");
+    assert_eq!(
+        (sp.x, sp.y, sp.player_id, sp.bounty),
+        (400, 300, alice.0 as u8, 7)
+    );
+    assert!(h.take(alice).is_empty(), "no echo to the sender");
+    assert_eq!(
+        h.zone.players.get(alice).map(|p| (p.pos.x, p.pos.y)),
+        Some((400, 300))
+    );
+
+    // a corrupted checksum is dropped
+    buf[10] ^= 0x55;
+    h.send(alice, &buf);
+    assert!(h.take(bob).is_empty());
+
+    // a bullet is relayed as 0x05 with a valid checksum
+    pos.time += 1;
+    let mut w = WeaponInfo::default();
+    w.set_kind(weapon_type::BULLET);
+    pos.weapon = w;
+    buf.clear();
+    pos.encode(&mut buf);
+    h.send(alice, &buf);
+    let got = h.take(bob);
+    let p05 = got.iter().find(|d| d[0] == 0x05).expect("weapon relayed");
+    let sw = S2CWeapon::decode(p05).expect("decode");
+    assert!(sw.checksum_ok());
+    assert_eq!(
+        (sw.player_id, sw.weapon.kind()),
+        (alice.0, weapon_type::BULLET)
+    );
+
+    // far away and not a weapon: only an occasional radar update, never in range
+    pos.time += 1;
+    pos.weapon = WeaponInfo::default();
+    pos.x = 16000;
+    pos.y = 16000;
+    buf.clear();
+    pos.encode(&mut buf);
+    h.send(alice, &buf);
+    assert!(h.take(bob).iter().all(|d| d[0] != 0x28));
+
+    // spectators' positions are never relayed
+    let spec_pos = C2SPosition {
+        time: h.t as u32,
+        x: 1,
+        y: 1,
+        ..Default::default()
+    };
+    buf.clear();
+    spec_pos.encode(&mut buf);
+    h.send(bob, &buf);
+    assert!(h.take(alice).is_empty());
+
+    // back to spec via the spectator frequency
+    let mut sf = Vec::new();
+    c2s::SetFreq { freq: 8025 }.encode(&mut sf);
+    h.send(alice, &sf);
+    assert_eq!(
+        h.zone.players.get(alice).map(|p| (p.ship.0, p.freq)),
+        Some((8, 8025))
+    );
+}

@@ -23,7 +23,8 @@ use oss_proto::s2c::{MapFile, MapFilename as MapFilenamePacket};
 use oss_proto::wire::FixedStr;
 
 use crate::arena::ArenaId;
-use crate::config::search::{LVL_SEARCH_PATH, LVZ_SEARCH_PATH, find_file_on_path};
+use crate::config::ConfSource;
+use crate::config::search::{LVL_SEARCH_PATH, LVZ_SEARCH_PATH};
 use crate::config::to_latin1;
 use crate::module::{Module, ModuleError};
 use crate::net::SendFlags;
@@ -90,8 +91,13 @@ fn packet(kind: u8, name: &str, body: &[u8]) -> Arc<[u8]> {
 }
 
 /// Loads a map (`compress`) or LVZ file into a download.
-pub fn load_download(path: &std::path::Path, compress: bool, optional: bool) -> Option<Download> {
-    let data = std::fs::read(path).ok()?;
+pub fn load_download(
+    src: &dyn ConfSource,
+    path: &std::path::Path,
+    compress: bool,
+    optional: bool,
+) -> Option<Download> {
+    let data = src.read(path)?;
     let name: String = path
         .file_name()?
         .to_string_lossy()
@@ -116,7 +122,6 @@ pub fn load_download(path: &std::path::Path, compress: bool, optional: bool) -> 
 /// ASSS `GetMapFilename`: resolves `name` (or the arena's `General:Map`) on
 /// the level search path (`.lvl`) or the LVZ search path (anything else).
 pub fn map_path(zone: &Zone, arena: ArenaId, name: Option<&str>) -> Option<PathBuf> {
-    let dir = zone.dir.as_ref()?;
     let a = zone.arenas.get(arena)?;
     let name = name
         .map(str::to_owned)
@@ -134,12 +139,14 @@ pub fn map_path(zone: &Zone, arena: ArenaId, name: Option<&str>) -> Option<PathB
     } else {
         LVZ_SEARCH_PATH
     };
-    find_file_on_path(dir.root(), path, &repls)
+    zone.cfg.source().find(path, &repls)
 }
 
 fn load_arena(zone: &mut Zone, arena: ArenaId) {
     let mut files = Vec::new();
-    match map_path(zone, arena, None).and_then(|p| load_download(&p, true, false)) {
+    match map_path(zone, arena, None)
+        .and_then(|p| load_download(zone.cfg.source(), &p, true, false))
+    {
         Some(d) => files.push(d),
         None => {
             tracing::warn!(target: "mapnewsdl", arena = arena.0, "can't load level file, falling back to tinymap.lvl");
@@ -171,7 +178,9 @@ fn load_arena(zone: &mut Zone, arena: ArenaId) {
             Some(n) => (true, n),
             None => (false, item),
         };
-        match map_path(zone, arena, Some(name)).and_then(|p| load_download(&p, false, optional)) {
+        match map_path(zone, arena, Some(name))
+            .and_then(|p| load_download(zone.cfg.source(), &p, false, optional))
+        {
             Some(d) => files.push(d),
             None => {
                 tracing::warn!(target: "mapnewsdl", arena = arena.0, file = name, "can't load LVZ file")
@@ -270,18 +279,25 @@ fn on_map_request(zone: &mut Zone, pid: PlayerId, pkt: &[u8]) {
 }
 
 fn refresh_news(zone: &mut Zone) {
+    let Some((path, last, have)) = zone
+        .res
+        .get::<News>()
+        .map(|n| (n.path.clone(), n.modified, n.packet.is_some()))
+    else {
+        return;
+    };
+    let src = zone.cfg.source();
+    let modified = src.modified(&path);
+    if have && modified.is_some() && modified == last {
+        return;
+    }
+    let raw = src.read(&path);
     let Some(news) = zone.res.get_mut::<News>() else {
         return;
     };
-    let modified = std::fs::metadata(&news.path)
-        .and_then(|m| m.modified())
-        .ok();
-    if modified.is_some() && modified == news.modified && news.packet.is_some() {
-        return;
-    }
-    let Ok(raw) = std::fs::read(&news.path) else {
+    let Some(raw) = raw else {
         if news.packet.take().is_some() || news.modified.is_none() {
-            tracing::warn!(target: "mapnewsdl", file = %news.path.display(), "news file not found");
+            tracing::warn!(target: "mapnewsdl", file = %path.display(), "news file not found");
         }
         news.modified = Some(std::time::UNIX_EPOCH);
         zone.res.insert(NewsChecksum(0));
@@ -327,7 +343,7 @@ impl Module for MapNewsDlModule {
             }
             _ => {}
         });
-        if let Some(dir) = zone.dir.as_ref() {
+        {
             let name = zone
                 .cfg
                 .global()
@@ -335,7 +351,7 @@ impl Module for MapNewsDlModule {
                 .unwrap_or("news.txt")
                 .to_owned();
             zone.res.insert(News {
-                path: dir.root().join(name),
+                path: PathBuf::from(name),
                 modified: None,
                 packet: None,
             });

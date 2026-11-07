@@ -780,22 +780,18 @@ pub struct CoreModule;
 
 impl Module for CoreModule {
     fn load(&self, zone: &mut Zone, me: Owner) -> Result<(), ModuleError> {
-        let checks = zone.dir.as_ref().map(|d| {
-            let exe = std::fs::read(d.root().join("clients/continuum.exe"))
-                .map_or(u32::MAX, |b| oss_proto::checksum::crc32(&b));
-            let code = std::fs::read(d.root().join("scrty"))
-                .ok()
-                .and_then(|b| {
-                    b.get(4..8)
-                        .map(|w| u32::from_le_bytes([w[0], w[1], w[2], w[3]]))
-                })
-                .unwrap_or(u32::MAX);
-            ContChecksums { exe, code }
-        });
-        zone.res.insert(checks.unwrap_or(ContChecksums {
-            exe: u32::MAX,
-            code: u32::MAX,
-        }));
+        let src = zone.cfg.source();
+        let exe = src
+            .read(std::path::Path::new("clients/continuum.exe"))
+            .map_or(u32::MAX, |b| oss_proto::checksum::crc32(&b));
+        let code = src
+            .read(std::path::Path::new("scrty"))
+            .and_then(|b| {
+                b.get(4..8)
+                    .map(|w| u32::from_le_bytes([w[0], w[1], w[2], w[3]]))
+            })
+            .unwrap_or(u32::MAX);
+        zone.res.insert(ContChecksums { exe, code });
         zone.on_packet(me, c2s::kind::LOGIN, on_login);
         zone.on_packet(me, c2s::kind::CONT_LOGIN, on_login);
         zone.set_timer(me, 1, 1, |z| {

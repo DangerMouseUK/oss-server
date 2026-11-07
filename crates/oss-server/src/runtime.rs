@@ -260,6 +260,11 @@ impl ServerBuilder {
         }
     }
 
+    /// A server for the bundled default zone (see [`crate::default_zone`]).
+    pub fn default_zone() -> Self {
+        Self::with_source(crate::default_zone::source())
+    }
+
     /// A server whose config comes from `source` instead of a directory
     /// (tests, embedded zones).
     pub fn with_source(source: impl ConfSource + Send + Sync + 'static) -> Self {
@@ -312,7 +317,7 @@ impl ServerBuilder {
         let (cfg, dir, names) = match (self.source.take(), &self.dir) {
             (Some(src), _) => {
                 let names = module::read_modules_conf(src.as_ref());
-                (ConfigManager::new(BoxedSource(src))?, None, names)
+                (ConfigManager::new(src)?, None, names)
             }
             (None, Some(d)) => {
                 let zd = ZoneDir::new(d);
@@ -513,12 +518,4 @@ async fn shutdown_signal() {
         }
     }
     let _ = tokio::signal::ctrl_c().await;
-}
-
-struct BoxedSource(Box<dyn ConfSource + Send + Sync>);
-
-impl ConfSource for BoxedSource {
-    fn open(&self, arena: Option<&str>, name: &str) -> Option<(PathBuf, Vec<u8>)> {
-        self.0.open(arena, name)
-    }
 }

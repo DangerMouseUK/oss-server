@@ -157,9 +157,13 @@ fn map_file_checksums_match_asss() {
     for line in vectors.lines() {
         let f: Vec<&str> = line.split_whitespace().collect();
         if let ["map", "asss", rel, _name, size, crc] = f.as_slice() {
-            let path = std::path::Path::new(&dir).join(rel);
-            let d = oss_server::modules::mapnewsdl::load_download(&path, true, false)
-                .expect("map loads");
+            let d = oss_server::modules::mapnewsdl::load_download(
+                &oss_server::config::ZoneDir::new(&dir),
+                std::path::Path::new(rel),
+                true,
+                false,
+            )
+            .expect("map loads");
             assert_eq!(d.raw_len, size.parse::<usize>().expect("size"));
             assert_eq!(
                 d.checksum,

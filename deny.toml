@@ -8,6 +8,9 @@ multiple-versions = "warn"
 
 [advisories]
 yanked = "deny"
+# advisories for unmaintained crates only fail for direct dependencies;
+# vulnerabilities fail at any depth
+unmaintained = "workspace"
 
 [sources]
 unknown-registry = "deny"

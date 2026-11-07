@@ -34,14 +34,6 @@ pub fn to_latin1(s: &str) -> Vec<u8> {
         .collect()
 }
 
-fn repls<'a>(arena: Option<&'a str>, name: &'a str) -> Vec<(char, &'a str)> {
-    let mut r = vec![('n', name)];
-    if let Some(a) = arena {
-        r.push(('b', a));
-    }
-    r
-}
-
 /// A zone directory on disk (the directory holding `conf/`, `arenas/`, `maps/`).
 #[derive(Debug, Clone)]
 pub struct ZoneDir {
@@ -66,15 +58,25 @@ impl ZoneDir {
 }
 
 impl ConfSource for ZoneDir {
-    fn open(&self, arena: Option<&str>, name: &str) -> Option<(PathBuf, Vec<u8>)> {
-        let path = self.find(search::CONFIG_SEARCH_PATH, &repls(arena, name))?;
-        let data = std::fs::read(&path).ok()?;
-        Some((path, data))
+    fn find(&self, search_path: &str, repls: &[(char, &str)]) -> Option<PathBuf> {
+        search::find_file_on_path(&self.root, search_path, repls)
+    }
+
+    fn read(&self, path: &Path) -> Option<Vec<u8>> {
+        std::fs::read(self.root.join(path)).ok()
+    }
+
+    fn modified(&self, path: &Path) -> Option<SystemTime> {
+        std::fs::metadata(self.root.join(path))
+            .and_then(|m| m.modified())
+            .ok()
     }
 
     fn append(&self, path: &Path, text: &[u8]) -> std::io::Result<bool> {
         use std::io::Write;
-        let mut f = std::fs::OpenOptions::new().append(true).open(path)?;
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(self.root.join(path))?;
         f.write_all(text)?;
         Ok(true)
     }
@@ -105,12 +107,13 @@ impl MemSource {
 }
 
 impl ConfSource for MemSource {
-    fn open(&self, arena: Option<&str>, name: &str) -> Option<(PathBuf, Vec<u8>)> {
-        let rel = search::find_on_path(search::CONFIG_SEARCH_PATH, &repls(arena, name), |p| {
-            self.files.contains_key(p)
-        })?;
-        let data = self.files.get(&rel)?.clone();
-        Some((PathBuf::from(rel), data))
+    fn find(&self, search_path: &str, repls: &[(char, &str)]) -> Option<PathBuf> {
+        search::find_on_path(search_path, repls, |p| self.files.contains_key(p)).map(PathBuf::from)
+    }
+
+    fn read(&self, path: &Path) -> Option<Vec<u8>> {
+        let key = path.to_string_lossy().replace('\\', "/");
+        self.files.get(&key).cloned()
     }
 }
 
@@ -121,11 +124,8 @@ struct Cached {
     stamps: Vec<Option<SystemTime>>,
 }
 
-fn stamps(files: &[PathBuf]) -> Vec<Option<SystemTime>> {
-    files
-        .iter()
-        .map(|p| std::fs::metadata(p).and_then(|m| m.modified()).ok())
-        .collect()
+fn stamps(src: &dyn ConfSource, files: &[PathBuf]) -> Vec<Option<SystemTime>> {
+    files.iter().map(|p| src.modified(p)).collect()
 }
 
 /// Opens and caches config files for the zone. Files are shared by resolved
@@ -165,6 +165,11 @@ impl ConfigManager {
         Ok(m)
     }
 
+    /// Where zone files come from (config, maps, news).
+    pub fn source(&self) -> &dyn ConfSource {
+        self.source.as_ref()
+    }
+
     /// The zone-wide `global.conf`.
     pub fn global(&self) -> &Arc<ConfigFile> {
         &self.global
@@ -195,7 +200,7 @@ impl ConfigManager {
         self.cache.insert(
             path,
             Cached {
-                stamps: stamps(file.sources()),
+                stamps: stamps(self.source.as_ref(), file.sources()),
                 file: file.clone(),
                 arena: arena.map(str::to_owned),
                 name: name.to_owned(),
@@ -218,7 +223,7 @@ impl ConfigManager {
             let Some(c) = self.cache.get(&path) else {
                 continue;
             };
-            if stamps(c.file.sources()) == c.stamps {
+            if stamps(self.source.as_ref(), c.file.sources()) == c.stamps {
                 continue;
             }
             let Some(new) = ConfigFile::load(self.source.as_ref(), c.arena.as_deref(), &c.name)
@@ -233,7 +238,7 @@ impl ConfigManager {
             self.cache.insert(
                 path,
                 Cached {
-                    stamps: stamps(new.sources()),
+                    stamps: stamps(self.source.as_ref(), new.sources()),
                     file: new.clone(),
                     arena: c.arena.clone(),
                     name: c.name.clone(),
@@ -283,7 +288,7 @@ impl ConfigManager {
                 esc(value)
             ));
             match self.source.append(&path, &to_latin1(&text)) {
-                Ok(_) => c.stamps = stamps(updated.sources()),
+                Ok(_) => c.stamps = stamps(self.source.as_ref(), updated.sources()),
                 Err(e) => {
                     tracing::warn!(target: "config", file = %path.display(), "failed to write setting: {e}");
                 }

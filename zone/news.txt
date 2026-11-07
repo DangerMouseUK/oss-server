@@ -1,0 +1,4 @@
+Welcome to an Open SubSpace zone.
+
+This zone runs oss-server with its bundled default configuration
+(the ASSS 1.4.4 sample zone). Type ?help for commands.

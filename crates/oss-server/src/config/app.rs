@@ -29,15 +29,58 @@ pub const MAX_INCLUDE_DEPTH: usize = 50;
 /// Somewhere config files can be found: a zone directory on disk, or an
 /// in-memory set of files in tests.
 pub trait ConfSource {
+    /// Finds the first file on an ASSS search path (`%n`, `%b`, `%m` macros
+    /// in `repls`), returning the path it is known by.
+    fn find(&self, search_path: &str, repls: &[(char, &str)]) -> Option<PathBuf>;
+
+    /// Reads a file returned by [`ConfSource::find`] (or any zone-relative
+    /// path for in-memory sources).
+    fn read(&self, path: &std::path::Path) -> Option<Vec<u8>>;
+
+    /// When the file last changed, if the source can tell (for reloading).
+    fn modified(&self, _path: &std::path::Path) -> Option<std::time::SystemTime> {
+        None
+    }
+
     /// Locates `name` on the config search path for `arena` (or the global
     /// path when `arena` is `None`) and returns its resolved path and bytes.
-    fn open(&self, arena: Option<&str>, name: &str) -> Option<(PathBuf, Vec<u8>)>;
+    fn open(&self, arena: Option<&str>, name: &str) -> Option<(PathBuf, Vec<u8>)> {
+        let mut repls = vec![('n', name)];
+        if let Some(a) = arena {
+            repls.push(('b', a));
+        }
+        let path = self.find(super::search::CONFIG_SEARCH_PATH, &repls)?;
+        let data = self.read(&path)?;
+        Some((path, data))
+    }
 
     /// Appends text to a file previously returned by [`ConfSource::open`] (used
     /// to write changed settings back, as ASSS does). Sources that can't be
     /// written return `Ok(false)`.
     fn append(&self, _path: &std::path::Path, _text: &[u8]) -> std::io::Result<bool> {
         Ok(false)
+    }
+}
+
+impl<T: ConfSource + ?Sized> ConfSource for Box<T> {
+    fn find(&self, search_path: &str, repls: &[(char, &str)]) -> Option<PathBuf> {
+        (**self).find(search_path, repls)
+    }
+
+    fn read(&self, path: &std::path::Path) -> Option<Vec<u8>> {
+        (**self).read(path)
+    }
+
+    fn modified(&self, path: &std::path::Path) -> Option<std::time::SystemTime> {
+        (**self).modified(path)
+    }
+
+    fn open(&self, arena: Option<&str>, name: &str) -> Option<(PathBuf, Vec<u8>)> {
+        (**self).open(arena, name)
+    }
+
+    fn append(&self, path: &std::path::Path, text: &[u8]) -> std::io::Result<bool> {
+        (**self).append(path, text)
     }
 }
 

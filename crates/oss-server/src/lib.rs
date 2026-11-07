@@ -15,6 +15,7 @@ pub mod arena;
 pub mod clientset;
 pub mod commands;
 pub mod config;
+pub mod default_zone;
 pub mod logging;
 pub mod module;
 pub mod modules;

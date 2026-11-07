@@ -20,6 +20,15 @@ cd oss-server
 cargo run --release
 ```
 
+With no arguments the server runs its bundled default zone (the ASSS 1.4.4
+sample zone, compiled into the binary; see `zone/README.md`) on UDP port 5000.
+
+```
+oss-server --zone <dir>        # run an ASSS-style zone directory unchanged
+oss-server --init-zone <dir>   # write the default zone to disk to customise it
+oss-server --bind 0.0.0.0:6000 --log "info,net=debug" --json
+```
+
 ## Licence
 
 GPL-2.0-or-later (see `LICENSE`), matching ASSS, whose behaviour this server follows.

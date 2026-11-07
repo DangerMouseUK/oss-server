@@ -802,6 +802,22 @@ impl Module for CoreModule {
             process_player_states(z);
             true
         });
+        // ASSS SendKeepalive: every 5 s, S2C 0x27 to everyone playing, so idle
+        // clients keep seeing traffic
+        zone.set_timer(me, 500, 500, |z| {
+            let ids: Vec<PlayerId> = z
+                .players
+                .iter()
+                .filter(|p| p.status == PlayerStatus::Playing)
+                .map(|p| p.id)
+                .collect();
+            z.send_many(
+                ids,
+                &[oss_proto::s2c::kind::KEEP_ALIVE],
+                SendFlags::UNRELIABLE,
+            );
+            true
+        });
         Ok(())
     }
 }

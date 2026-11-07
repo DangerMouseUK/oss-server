@@ -143,3 +143,31 @@ fn position_checksums_match_asss() {
     }
     assert!(n > 10);
 }
+
+/// The S2C 0x29 map checksum (CRC-32 of the file) matches ASSS for the maps
+/// shipped with the ASSS zone.
+#[test]
+fn map_file_checksums_match_asss() {
+    let Some(dir) = std::env::var_os("OSS_ASSS_ZONE_DIR") else {
+        eprintln!("OSS_ASSS_ZONE_DIR not set; skipping");
+        return;
+    };
+    let vectors = include_str!("fixtures/asss-vectors/map-checksum.txt");
+    let mut n = 0;
+    for line in vectors.lines() {
+        let f: Vec<&str> = line.split_whitespace().collect();
+        if let ["map", "asss", rel, _name, size, crc] = f.as_slice() {
+            let path = std::path::Path::new(&dir).join(rel);
+            let d = oss_server::modules::mapnewsdl::load_download(&path, true, false)
+                .expect("map loads");
+            assert_eq!(d.raw_len, size.parse::<usize>().expect("size"));
+            assert_eq!(
+                d.checksum,
+                u32::from_str_radix(crc, 16).expect("crc"),
+                "{rel}"
+            );
+            n += 1;
+        }
+    }
+    assert!(n >= 1);
+}

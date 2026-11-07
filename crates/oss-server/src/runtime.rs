@@ -350,7 +350,24 @@ impl ServerBuilder {
     }
 
     /// Builds everything and runs until shutdown (Ctrl-C / SIGTERM). Blocks.
-    pub fn run(mut self) -> Result<(), ServerError> {
+    pub fn run(self) -> Result<(), ServerError> {
+        let server = self.start()?;
+        let mut done = server.done.clone();
+        server.rt.block_on(async {
+            tokio::select! {
+                _ = shutdown_signal() => {
+                    tracing::info!(target: "core", "shutdown signal received");
+                }
+                _ = done.wait_for(|d| *d) => {}
+            }
+        });
+        server.stop();
+        Ok(())
+    }
+
+    /// Builds the zone, binds the sockets and starts the game thread and I/O
+    /// tasks, returning immediately. Use [`RunningServer::stop`] to shut down.
+    pub fn start(mut self) -> Result<RunningServer, ServerError> {
         let mut zone = self.build_zone()?;
         let port = u16::try_from(zone.cfg.global().get_int("Listen", "Port", 5000)).unwrap_or(5000);
         let bind = self
@@ -359,10 +376,14 @@ impl ServerBuilder {
         let game = UdpSocket::bind(bind)?;
         game.set_nonblocking(true)?;
         let mut ping_addr = bind;
-        ping_addr.set_port(bind.port().wrapping_add(1));
+        if bind.port() != 0 {
+            ping_addr.set_port(bind.port().wrapping_add(1));
+        }
         let ping = UdpSocket::bind(ping_addr)?;
         ping.set_nonblocking(true)?;
-        tracing::info!(target: "net", game = %game.local_addr()?, ping = %ping.local_addr()?, "listening");
+        let game_addr = game.local_addr()?;
+        let ping_addr = ping.local_addr()?;
+        tracing::info!(target: "net", game = %game_addr, ping = %ping_addr, "listening");
 
         let transport = match self.transport.take() {
             Some(f) => f(&mut zone),
@@ -381,16 +402,16 @@ impl ServerBuilder {
             .thread_name("oss-io")
             .enable_all()
             .build()?;
-        let (done_tx, done_rx) = tokio::sync::oneshot::channel::<()>();
+        let (done_tx, done) = tokio::sync::watch::channel(false);
         let game_thread = std::thread::Builder::new()
             .name("game".into())
             .spawn(move || {
                 let zone = game_loop.run();
-                let _ = done_tx.send(());
+                let _ = done_tx.send(true);
                 zone
             })?;
 
-        rt.block_on(async move {
+        let tasks = rt.block_on(async {
             let game = tokio::net::UdpSocket::from_std(game)?;
             let ping = tokio::net::UdpSocket::from_std(ping)?;
             let recv_handle = handle.clone();
@@ -403,6 +424,7 @@ impl ServerBuilder {
                                 break;
                             }
                         }
+                        // e.g. ICMP port unreachable reported on Windows
                         Err(e) => tracing::trace!(target: "net", "recv: {e}"),
                     }
                 }
@@ -419,22 +441,62 @@ impl ServerBuilder {
                     }
                 }
             });
-            let mut done_rx = done_rx;
-            tokio::select! {
-                _ = shutdown_signal() => {
-                    tracing::info!(target: "core", "shutdown signal received");
-                    handle.shutdown();
-                    let _ = (&mut done_rx).await;
-                }
-                _ = &mut done_rx => {}
-            }
-            recv.abort();
-            pinger.abort();
-            Ok::<(), std::io::Error>(())
+            Ok::<_, std::io::Error>(vec![recv, pinger])
         })?;
-        let _ = game_thread.join();
-        rt.shutdown_timeout(Duration::from_secs(1));
-        Ok(())
+        Ok(RunningServer {
+            rt,
+            handle,
+            game_thread,
+            tasks,
+            done,
+            game_addr,
+            ping_addr,
+        })
+    }
+}
+
+/// A server started with [`ServerBuilder::start`].
+pub struct RunningServer {
+    rt: tokio::runtime::Runtime,
+    handle: ZoneHandle,
+    game_thread: std::thread::JoinHandle<Zone>,
+    tasks: Vec<tokio::task::JoinHandle<()>>,
+    done: tokio::sync::watch::Receiver<bool>,
+    game_addr: SocketAddr,
+    ping_addr: SocketAddr,
+}
+
+impl RunningServer {
+    /// The bound game port.
+    pub fn game_addr(&self) -> SocketAddr {
+        self.game_addr
+    }
+
+    /// The bound ping port.
+    pub fn ping_addr(&self) -> SocketAddr {
+        self.ping_addr
+    }
+
+    /// A handle for running closures on the game thread.
+    pub fn handle(&self) -> ZoneHandle {
+        self.handle.clone()
+    }
+
+    /// True once the game loop has stopped.
+    pub fn is_stopped(&self) -> bool {
+        *self.done.borrow()
+    }
+
+    /// Shuts down gracefully and returns the final zone state, if the game
+    /// thread finished cleanly.
+    pub fn stop(self) -> Option<Zone> {
+        self.handle.shutdown();
+        let zone = self.game_thread.join().ok();
+        for t in &self.tasks {
+            t.abort();
+        }
+        self.rt.shutdown_timeout(Duration::from_secs(1));
+        zone
     }
 }
 

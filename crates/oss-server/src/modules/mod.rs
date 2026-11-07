@@ -11,6 +11,7 @@ pub mod clientset;
 pub mod cmdman;
 pub mod core;
 pub mod game;
+pub mod mapnewsdl;
 pub mod playercmd;
 
 use crate::module::ModuleCatalog;
@@ -27,6 +28,7 @@ pub const DEFAULT_MODULES: &[&str] = &[
     "cmdman",
     "chat",
     "game",
+    "mapnewsdl",
     "auth_file",
     "playercmd",
 ];
@@ -43,18 +45,19 @@ pub fn builtin_catalog() -> ModuleCatalog {
     c.register("cmdman", &[], || cmdman::CmdManModule);
     c.register("chat", &[], || chat::ChatModule);
     c.register("game", &[], || game::GameModule);
+    c.register("mapnewsdl", &[], || mapnewsdl::MapNewsDlModule);
     c.register("auth_file", &[], || auth_file::AuthFileModule);
     c.register("playercmd", &[], || playercmd::PlayerCmdModule);
     c
 }
 
 /// The transport used when the builder isn't given one.
-pub fn default_transport(_zone: &mut Zone) -> Box<dyn Transport> {
-    Box::new(NullTransport)
+pub fn default_transport(zone: &mut Zone) -> Box<dyn Transport> {
+    Box::new(crate::transport::SubspaceTransport::new(zone))
 }
 
-/// Accepts no connections (placeholder until the `oss-net` transport lands).
-struct NullTransport;
+/// Accepts no connections.
+pub struct NullTransport;
 
 impl Transport for NullTransport {
     fn on_datagram(

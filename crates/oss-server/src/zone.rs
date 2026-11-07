@@ -165,6 +165,11 @@ impl Zone {
         );
     }
 
+    /// Queues a large payload as a sized transfer (see [`Outbox::send_sized`]).
+    pub fn send_sized(&mut self, to: PlayerId, data: Arc<[u8]>) {
+        self.outbox.send_sized(to, data);
+    }
+
     /// Asks the transport to drop a player's connection.
     pub fn disconnect(&mut self, player: PlayerId, reason: impl Into<String>) {
         let addr = self.players.get(player).and_then(|p| p.addr);

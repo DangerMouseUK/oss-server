@@ -75,6 +75,7 @@ pub struct Outbox {
     buf: Vec<u8>,
     items: Vec<Outgoing>,
     disconnects: Vec<Disconnect>,
+    sized: Vec<(PlayerId, std::sync::Arc<[u8]>)>,
 }
 
 impl Outbox {
@@ -151,9 +152,21 @@ impl Outbox {
         &self.disconnects
     }
 
+    /// Queues a large payload (a map or file) as a sized transfer (`00 0A`),
+    /// which the client reassembles before handling it as one game packet.
+    /// The bytes are shared, so many players can download one map cheaply.
+    pub fn send_sized(&mut self, to: PlayerId, data: std::sync::Arc<[u8]>) {
+        self.sized.push((to, data));
+    }
+
+    /// Queued sized transfers.
+    pub fn sized(&self) -> &[(PlayerId, std::sync::Arc<[u8]>)] {
+        &self.sized
+    }
+
     /// True if nothing is queued.
     pub fn is_empty(&self) -> bool {
-        self.items.is_empty() && self.disconnects.is_empty()
+        self.items.is_empty() && self.disconnects.is_empty() && self.sized.is_empty()
     }
 
     /// Empties the queue, keeping its capacity.
@@ -161,6 +174,7 @@ impl Outbox {
         self.buf.clear();
         self.items.clear();
         self.disconnects.clear();
+        self.sized.clear();
     }
 }
 
@@ -206,6 +220,12 @@ impl Loopback {
                 .entry(item.to)
                 .or_default()
                 .push((out.bytes(item).to_vec(), item.flags));
+        }
+        for (to, data) in out.sized() {
+            self.sent
+                .entry(*to)
+                .or_default()
+                .push((data.to_vec(), SendFlags::RELIABLE));
         }
         self.dropped.extend(out.disconnects().iter().cloned());
         zone.return_outbox(out);

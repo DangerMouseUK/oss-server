@@ -201,6 +201,7 @@ fn login_enter_chat_leave() {
             s2c::kind::PLAYER_ID,
             s2c::kind::SETTINGS,
             s2c::kind::PLAYER_ENTERING,
+            s2c::kind::MAP_FILENAME,
             s2c::kind::BRICK,
             s2c::kind::ENTERING_ARENA
         ]
@@ -437,4 +438,34 @@ fn ships_and_positions() {
         h.zone.players.get(alice).map(|p| (p.ship.0, p.freq)),
         Some((8, 8025))
     );
+}
+
+#[test]
+fn map_download_without_a_zone_dir_uses_tinymap() {
+    let mut h = H::new();
+    let (p, _) = h.login("mapper", "x");
+    let pkts = h.enter(p);
+    let mf = pkts
+        .iter()
+        .find(|d| d[0] == s2c::kind::MAP_FILENAME)
+        .expect("0x29");
+    assert_eq!(mf.len(), 21);
+    match s2c::MapFilename::decode(mf).expect("decode") {
+        s2c::MapFilename::Single { name, checksum } => {
+            assert_eq!(name.as_bytes(), b"tinymap.lvl");
+            assert_eq!(checksum, 0x5643_ef8a);
+        }
+        other => panic!("{other:?}"),
+    }
+    h.send(p, &[c2s::kind::MAP_REQUEST]);
+    let got = h.take(p);
+    let md = got
+        .iter()
+        .find(|d| d[0] == s2c::kind::MAP_DATA)
+        .expect("0x2A");
+    assert_eq!(md.len(), 29);
+    // bad lengths and unknown LVZ indexes are ignored
+    h.send(p, &[c2s::kind::MAP_REQUEST, 5]);
+    h.send(p, &[c2s::kind::MAP_REQUEST, 5, 0]);
+    assert!(h.take(p).iter().all(|d| d[0] != s2c::kind::MAP_DATA));
 }

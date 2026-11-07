@@ -1,0 +1,112 @@
+# Map security checksum vectors from ASSS 1.4.4 src/core/mapdata.c (load_from_file + GetChecksum,
+# compiled unmodified). Tiles counted: 1..160 and 171 (safe); big objects expanded as ASSS does.
+# Keys >= 0x80000000 are negative as int: ASSS then starts x/y at negative offsets and its sparse
+# array wraps coordinates mod 1024. Whether Continuum does the same is unconfirmed.
+# map <label> <file name> <file size> <crc32 of file (zlib; the S2C 0x29 map checksum)>
+# tiles <non-zero tiles after expansion> <turf flags> <out-of-range tile records>
+# checksum <key> <map checksum>
+map asss maps/smallmap.lvl smallmap.lvl 4944 b2fb5159
+tiles 1236 0 0
+checksum 00000000 000000ab
+checksum 00000001 000001e0
+checksum 0000001f 00000140
+checksum 00000020 000000fd
+checksum 12345678 2468ad4b
+checksum 7fffffff fffffe6d
+checksum 80000000 8000010d
+checksum deadbeef deadbeef
+checksum ffffffff fffffee0
+checksum 210ba697 42174d7c
+checksum 26910f0c 26910f0c
+checksum 7482f9fc 7482f9fc
+checksum a0c945ce 41928b33
+checksum 19ac2485 335848b3
+checksum b04bf585 6097eab3
+checksum 43392cf0 43392cf0
+checksum bc50e2aa 78a1c4ab
+checksum 0065ba9c 00cb74d3
+checksum 162499f0 2c49334b
+checksum 4eababf9 4eababf9
+checksum 1284114f 378c3470
+checksum 67e92b15 cfd256d3
+checksum 719cfaeb 719cfaeb
+checksum 14293ed4 3c7bbbd2
+checksum a58e7048 a58e7048
+checksum 487a3ad0 90f4754b
+checksum 8434339c 086866d3
+checksum 1da37a17 58ea6f38
+checksum fd22ec09 f768c54d
+checksum 3fd7caf0 3fd7caf0
+checksum f2f67d71 f2f67d71
+checksum 33dab561 33dab561
+checksum ce68e7b8 ce68e7b8
+map asss arenas/scf/scf.lvl scf.lvl 144958 3ba1feae
+tiles 23972 0 0
+checksum 00000000 000006d6
+checksum 00000001 000007bc
+checksum 0000001f 00000440
+checksum 00000020 0000064a
+checksum 12345678 a2b3c2f8
+checksum 7fffffff fffffa3e
+checksum 80000000 00000bfa
+checksum deadbeef eadbec7e
+checksum ffffffff fffff7b7
+checksum 210ba697 f80bfa8e
+checksum 26910f0c 9d996dd7
+checksum 7482f9fc be53511c
+checksum a0c945ce 0c945a4a
+checksum 19ac2485 b46e6f4b
+checksum b04bf585 484ede3a
+checksum 43392cf0 83b0ab6b
+checksum bc50e2aa 815f0f8f
+checksum 0065ba9c 0b206971
+checksum 162499f0 ae6e9e81
+checksum 4eababf9 d6bdbf38
+checksum 1284114f 72515895
+checksum 67e92b15 4e650aa9
+checksum 719cfaeb 8b6ca700
+checksum 14293ed4 cfb4a26a
+checksum a58e7048 499256fa
+checksum 487a3ad0 a98c954d
+checksum 8434339c 75b5a571
+checksum 1da37a17 157e981e
+checksum fd22ec09 c6ba7401
+checksum 3fd7caf0 fc3b01f1
+checksum f2f67d71 7097636f
+checksum 33dab561 105bb46a
+checksum ce68e7b8 8b6ccf31
+map subgame _bzw.lvl _bzw.lvl 123612 70a2e636
+tiles 31031 0 0
+checksum 00000000 00000299
+checksum 00000001 00000441
+checksum 0000001f 00000644
+checksum 00000020 00000234
+checksum 12345678 7d27cd12
+checksum 7fffffff 7ffffbba
+checksum 80000000 80000326
+checksum deadbeef 019c2279
+checksum ffffffff fffff993
+checksum 210ba697 10ba6a86
+checksum 26910f0c ab90d8a8
+checksum 7482f9fc 189ac66d
+checksum a0c945ce 7ea9a298
+checksum 19ac2485 9ac24bf6
+checksum b04bf585 e7b6f5f7
+checksum 43392cf0 76cbf777
+checksum bc50e2aa 8a1c5536
+checksum 0065ba9c 03f94bd4
+checksum 162499f0 fd49cf8c
+checksum 4eababf9 381e2114
+checksum 1284114f d5579bde
+checksum 67e92b15 55f2e2ba
+checksum 719cfaeb 6bb03e54
+checksum 14293ed4 4293ebcf
+checksum a58e7048 dfcc1a6a
+checksum 487a3ad0 cb7582ca
+checksum 8434339c 2a0a05d4
+checksum 1da37a17 8c0c8096
+checksum fd22ec09 acf4c15e
+checksum 3fd7caf0 fc3b005a
+checksum f2f67d71 85ec3179
+checksum 33dab561 3dab5407
+checksum ce68e7b8 7a07ce29

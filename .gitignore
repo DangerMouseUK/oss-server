@@ -1,0 +1,9 @@
+/target/
+CLAUDE.local.md
+.claude/settings.local.json
+/local/
+*.pcap
+*.pcapng
+# Continuum/SubSpace game assets are never redistributed from this repo
+*.bm2
+*.wa2

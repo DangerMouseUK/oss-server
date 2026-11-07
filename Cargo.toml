@@ -1,0 +1,26 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+license = "GPL-2.0-or-later"
+repository = "https://github.com/DangerMouseUK/oss-server"
+
+[workspace.dependencies]
+# Shared crates from the sibling oss-core checkout (see README "Building").
+oss-proto = { path = "../oss-core/crates/oss-proto" }
+oss-net = { path = "../oss-core/crates/oss-net" }
+oss-formats = { path = "../oss-core/crates/oss-formats" }
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

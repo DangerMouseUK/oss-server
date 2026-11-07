@@ -1,0 +1,53 @@
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+# oss-core is consumed as a sibling path dependency (../oss-core), so both repos
+# are checked out side by side.
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: oss-server
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: oss-server
+      - uses: actions/checkout@v4
+        with:
+          repository: DangerMouseUK/oss-core
+          path: oss-core
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: oss-server
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo test --workspace
+
+  deny:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: oss-server
+      - uses: actions/checkout@v4
+        with:
+          repository: DangerMouseUK/oss-core
+          path: oss-core
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          manifest-path: oss-server/Cargo.toml

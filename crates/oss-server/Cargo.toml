@@ -1,0 +1,16 @@
+[package]
+name = "oss-server"
+description = "Open SubSpace zone server, compatible with SubSpace/Continuum clients"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+oss-proto.workspace = true
+oss-net.workspace = true
+oss-formats.workspace = true
+
+[lints]
+workspace = true

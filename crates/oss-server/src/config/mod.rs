@@ -1,0 +1,261 @@
+//! ASSS-compatible configuration.
+//!
+//! Zone directories are read unchanged: `conf/global.conf`,
+//! `arenas/<name>/arena.conf`, `#include` trees, `groupdef.conf`, ... The
+//! parsing rules (preprocessor directives, sections, escapes, case-insensitive
+//! keys, "last definition wins", `strtol`-style integers) follow ASSS 1.4.4's
+//! `app.c` and `config.c`; see [`app`] and [`file`] for the details and the few
+//! deliberate divergences.
+//!
+//! Text is decoded as Latin-1, so every byte of a config value survives and can
+//! be sent to clients unchanged with [`to_latin1`].
+
+pub mod app;
+pub mod file;
+pub mod search;
+
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::SystemTime;
+
+pub use app::{ConfSource, Preprocessor};
+pub use file::{ConfigFile, config_int, strtol32};
+
+/// Decodes bytes as Latin-1 (every byte maps to the code point of the same value).
+pub fn latin1(bytes: &[u8]) -> String {
+    bytes.iter().map(|&b| char::from(b)).collect()
+}
+
+/// Encodes a string as Latin-1; characters above U+00FF become `?`.
+pub fn to_latin1(s: &str) -> Vec<u8> {
+    s.chars()
+        .map(|c| u8::try_from(u32::from(c)).unwrap_or(b'?'))
+        .collect()
+}
+
+fn repls<'a>(arena: Option<&'a str>, name: &'a str) -> Vec<(char, &'a str)> {
+    let mut r = vec![('n', name)];
+    if let Some(a) = arena {
+        r.push(('b', a));
+    }
+    r
+}
+
+/// A zone directory on disk (the directory holding `conf/`, `arenas/`, `maps/`).
+#[derive(Debug, Clone)]
+pub struct ZoneDir {
+    root: PathBuf,
+}
+
+impl ZoneDir {
+    /// Wraps a zone root directory.
+    pub fn new(root: impl Into<PathBuf>) -> Self {
+        Self { root: root.into() }
+    }
+
+    /// The zone root.
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    /// Finds a file on an arbitrary ASSS search path relative to the zone root.
+    pub fn find(&self, search_path: &str, repls: &[(char, &str)]) -> Option<PathBuf> {
+        search::find_file_on_path(&self.root, search_path, repls)
+    }
+}
+
+impl ConfSource for ZoneDir {
+    fn open(&self, arena: Option<&str>, name: &str) -> Option<(PathBuf, Vec<u8>)> {
+        let path = self.find(search::CONFIG_SEARCH_PATH, &repls(arena, name))?;
+        let data = std::fs::read(&path).ok()?;
+        Some((path, data))
+    }
+}
+
+/// In-memory files keyed by zone-relative path; resolves exactly like
+/// [`ZoneDir`]. Intended for tests and embedded configurations.
+#[derive(Debug, Clone, Default)]
+pub struct MemSource {
+    files: HashMap<String, Vec<u8>>,
+}
+
+impl MemSource {
+    /// Builds a source from `(relative path, contents)` pairs.
+    pub fn new<P: Into<String>, D: AsRef<[u8]>>(files: impl IntoIterator<Item = (P, D)>) -> Self {
+        Self {
+            files: files
+                .into_iter()
+                .map(|(p, d)| (p.into(), d.as_ref().to_vec()))
+                .collect(),
+        }
+    }
+
+    /// Adds or replaces a file.
+    pub fn insert(&mut self, path: impl Into<String>, data: impl AsRef<[u8]>) {
+        self.files.insert(path.into(), data.as_ref().to_vec());
+    }
+}
+
+impl ConfSource for MemSource {
+    fn open(&self, arena: Option<&str>, name: &str) -> Option<(PathBuf, Vec<u8>)> {
+        let rel = search::find_on_path(search::CONFIG_SEARCH_PATH, &repls(arena, name), |p| {
+            self.files.contains_key(p)
+        })?;
+        let data = self.files.get(&rel)?.clone();
+        Some((PathBuf::from(rel), data))
+    }
+}
+
+struct Cached {
+    file: Arc<ConfigFile>,
+    arena: Option<String>,
+    name: String,
+    stamps: Vec<Option<SystemTime>>,
+}
+
+fn stamps(files: &[PathBuf]) -> Vec<Option<SystemTime>> {
+    files
+        .iter()
+        .map(|p| std::fs::metadata(p).and_then(|m| m.modified()).ok())
+        .collect()
+}
+
+/// Opens and caches config files for the zone. Files are shared by resolved
+/// path, as in ASSS (two arenas whose `arena.conf` resolves to the same file
+/// share one parse).
+///
+/// Loaded files are immutable [`Arc`]s; a reload builds a new one and the
+/// caller distributes it (see `ConfigChanged` events in the zone core).
+pub struct ConfigManager {
+    source: Box<dyn ConfSource + Send + Sync>,
+    cache: HashMap<PathBuf, Cached>,
+    global: Arc<ConfigFile>,
+}
+
+/// The base file a config open asked for could not be found.
+#[derive(Debug, thiserror::Error)]
+#[error("config file not found: arena {arena:?}, name {name:?}")]
+pub struct NotFound {
+    /// Arena the lookup was for.
+    pub arena: Option<String>,
+    /// File name looked up.
+    pub name: String,
+}
+
+impl ConfigManager {
+    /// Opens the zone's `global.conf` from `source`.
+    pub fn new(source: impl ConfSource + Send + Sync + 'static) -> Result<Self, NotFound> {
+        let mut m = Self {
+            source: Box::new(source),
+            cache: HashMap::new(),
+            global: Arc::new(ConfigFile::default()),
+        };
+        m.global = m.open(None, "global.conf")?;
+        Ok(m)
+    }
+
+    /// The zone-wide `global.conf`.
+    pub fn global(&self) -> &Arc<ConfigFile> {
+        &self.global
+    }
+
+    /// Opens `name` for `arena` (`None` = global search path), sharing an
+    /// already-loaded parse of the same resolved file.
+    pub fn open(&mut self, arena: Option<&str>, name: &str) -> Result<Arc<ConfigFile>, NotFound> {
+        let not_found = || NotFound {
+            arena: arena.map(str::to_owned),
+            name: name.to_owned(),
+        };
+        // resolve first so that the cache is keyed by the actual file
+        let (path, _) = self.source.open(arena, name).ok_or_else(not_found)?;
+        if let Some(c) = self.cache.get(&path) {
+            return Ok(c.file.clone());
+        }
+        let file = ConfigFile::load(self.source.as_ref(), arena, name).ok_or_else(not_found)?;
+        for w in file.warnings() {
+            tracing::warn!(target: "config", file = %path.display(), "{w}");
+        }
+        let file = Arc::new(file);
+        self.cache.insert(
+            path,
+            Cached {
+                stamps: stamps(file.sources()),
+                file: file.clone(),
+                arena: arena.map(str::to_owned),
+                name: name.to_owned(),
+            },
+        );
+        Ok(file)
+    }
+
+    /// Opens an arena's `arena.conf` (looked up for the arena's base name).
+    pub fn open_arena(&mut self, arena_base: &str) -> Result<Arc<ConfigFile>, NotFound> {
+        self.open(Some(arena_base), "arena.conf")
+    }
+
+    /// Re-reads files whose base file or any include changed on disk. Returns
+    /// the reloaded files as `(old, new)` pairs so callers can swap handles.
+    pub fn reload_changed(&mut self) -> Vec<(Arc<ConfigFile>, Arc<ConfigFile>)> {
+        let mut changed = Vec::new();
+        let paths: Vec<PathBuf> = self.cache.keys().cloned().collect();
+        for path in paths {
+            let Some(c) = self.cache.get(&path) else {
+                continue;
+            };
+            if stamps(c.file.sources()) == c.stamps {
+                continue;
+            }
+            let Some(new) = ConfigFile::load(self.source.as_ref(), c.arena.as_deref(), &c.name)
+            else {
+                continue;
+            };
+            let new = Arc::new(new);
+            let old = c.file.clone();
+            if Arc::ptr_eq(&old, &self.global) {
+                self.global = new.clone();
+            }
+            self.cache.insert(
+                path,
+                Cached {
+                    stamps: stamps(new.sources()),
+                    file: new.clone(),
+                    arena: c.arena.clone(),
+                    name: c.name.clone(),
+                },
+            );
+            changed.push((old, new));
+        }
+        changed
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn manager_shares_by_resolved_path() {
+        let src = MemSource::new([
+            ("conf/global.conf", "[General]\nName = x\n"),
+            ("arenas/(default)/arena.conf", "[Misc]\nA = 1\n"),
+            (
+                "arenas/turf/arena.conf",
+                "#include arenas/(default)/arena.conf\n[Misc]\nA = 2\n",
+            ),
+        ]);
+        let mut m = ConfigManager::new(src).expect("global");
+        assert_eq!(m.global().get("General", "Name"), Some("x"));
+        let turf = m.open_arena("turf").expect("turf");
+        let pb = m.open_arena("pb").expect("pb falls back to (default)");
+        let other = m.open_arena("other").expect("other");
+        assert_eq!(turf.get_int("Misc", "A", 0), 2);
+        assert_eq!(pb.get_int("Misc", "A", 0), 1);
+        assert!(Arc::ptr_eq(&pb, &other));
+    }
+
+    #[test]
+    fn missing_global_is_an_error() {
+        assert!(ConfigManager::new(MemSource::default()).is_err());
+    }
+}

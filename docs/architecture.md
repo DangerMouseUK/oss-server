@@ -148,11 +148,16 @@ channel, clustering, big/sized transfers, VIE encryption). Tests use
 `zone.handle_packet` and read what was sent from the loopback.
 
 The Continuum encryption and security checks are not part of this repository.
-A private build registers them as ordinary modules: the cipher via the
-encryption interface the transport consults when a client connects, and the
-security checks as a module handling the security packets (it can use
-`clientset::SettingsBlock::checksum` for the settings checksum). No code here
-needs to change for that.
+A private build registers them as ordinary modules. In `load`, a module calls
+`transport::register_acceptor(zone, Arc::new(MyAcceptor))` with an
+`oss_net::Acceptor` that recognises the client's first datagram (`00 11` for
+Continuum) and returns its `oss_net::Cipher`; registered acceptors are asked
+before the built-in VIE one. The security checks are a module handling the
+security packets (`clientset::ClientSettings::checksum` gives the settings
+checksum). No code here needs to change for either.
+
+Players on a `00 01` connection are VIE clients and on `00 11` Continuum
+clients, as in ASSS; this decides the expected login packet length.
 
 ## Config
 

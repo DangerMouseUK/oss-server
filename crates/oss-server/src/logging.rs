@@ -12,7 +12,8 @@ pub fn init(json: bool, filter: Option<&str>) -> bool {
     };
     let builder = tracing_subscriber::fmt()
         .with_env_filter(filter)
-        .with_target(true);
+        .with_target(true)
+        .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stdout()));
     if json {
         builder.json().try_init().is_ok()
     } else {

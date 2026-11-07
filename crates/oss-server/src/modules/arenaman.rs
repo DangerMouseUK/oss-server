@@ -68,6 +68,9 @@ pub trait SendSettings: Send + Sync {
     fn send_settings(&self, zone: &mut Zone, player: PlayerId);
 }
 
+/// Marks a player who has been sent the arena response for this arena.
+struct Responded(ArenaId);
+
 #[derive(Default)]
 struct ArenaData {
     resurrect: bool,
@@ -392,6 +395,9 @@ pub fn leave_arena(zone: &mut Zone, player: PlayerId) {
             true
         }
     };
+    if let Some(p) = zone.players.get_mut(player) {
+        p.ext.remove::<Responded>();
+    }
     if notify {
         let mut buf = Vec::with_capacity(3);
         PlayerLeaving {
@@ -462,8 +468,15 @@ pub fn send_arena_response(zone: &mut Zone, player: PlayerId) {
         .players
         .in_arena(arena)
         .filter(|o| o.id != player)
+        // players entering in the same tick are already Playing; only pair up
+        // with those that got their own response, so nobody hears of anyone
+        // twice (ASSS sends duplicates in this case)
+        .filter(|o| o.ext.get::<Responded>().is_some_and(|r| r.0 == arena))
         .map(|o| (o.id, enter_bytes(o)))
         .collect();
+    if let Some(p) = zone.players.get_mut(player) {
+        p.ext.insert(Responded(arena));
+    }
     for (oid, theirs) in &others {
         zone.send(*oid, &me, SendFlags::RELIABLE);
         zone.send(player, theirs, SendFlags::RELIABLE);

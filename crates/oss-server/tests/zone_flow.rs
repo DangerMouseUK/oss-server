@@ -469,3 +469,45 @@ fn map_download_without_a_zone_dir_uses_tinymap() {
     h.send(p, &[c2s::kind::MAP_REQUEST, 5, 0]);
     assert!(h.take(p).iter().all(|d| d[0] != s2c::kind::MAP_DATA));
 }
+
+#[test]
+fn simultaneous_entries_are_announced_once() {
+    let mut h = H::new();
+    let ids: Vec<PlayerId> = ["p1", "p2", "p3"]
+        .iter()
+        .map(|n| h.login(n, "x").0)
+        .collect();
+    // all three ask in the same tick
+    for &p in &ids {
+        let go = GoArena {
+            ship: 8,
+            x_res: 1024,
+            y_res: 768,
+            arena_type: -1,
+            ..Default::default()
+        };
+        let mut buf = Vec::new();
+        go.encode(&mut buf);
+        h.send(p, &buf);
+    }
+    h.tick(10);
+    for &p in &ids {
+        let mut names: Vec<Vec<u8>> = h
+            .take(p)
+            .iter()
+            .filter(|d| d[0] == s2c::kind::PLAYER_ENTERING)
+            .map(|d| {
+                s2c::PlayerEntering::decode(d).expect("0x03").players[0]
+                    .name
+                    .as_bytes()
+                    .to_vec()
+            })
+            .collect();
+        names.sort();
+        assert_eq!(
+            names,
+            vec![b"p1".to_vec(), b"p2".to_vec(), b"p3".to_vec()],
+            "for {p:?}"
+        );
+    }
+}

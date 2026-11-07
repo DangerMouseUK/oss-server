@@ -55,3 +55,19 @@ fn settings_match_asss() {
         "golden file looks truncated ({checked} checks)"
     );
 }
+
+/// The packet decodes with `oss-proto`'s client-side codec, re-encodes to the
+/// same bytes, and both crates agree on the security checksum.
+#[test]
+fn settings_round_trip_through_oss_proto() {
+    let s = clientset::load(&ConfigFile::from_text(CONF));
+    let bytes = s.block.as_bytes();
+    let decoded = oss_proto::ClientSettings::decode(bytes).expect("decode");
+    assert_eq!(decoded.to_bytes(), bytes.to_vec());
+    for key in [0, 1, 0x9e37_79b9, u32::MAX] {
+        assert_eq!(
+            s.block.checksum(key),
+            oss_proto::checksum::settings_checksum(key, bytes)
+        );
+    }
+}

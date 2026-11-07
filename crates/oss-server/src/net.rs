@@ -62,6 +62,9 @@ pub struct Outgoing {
 pub struct Disconnect {
     /// The player.
     pub player: PlayerId,
+    /// The player's address when the disconnect was queued, so a transport
+    /// never drops a newer connection that reused the id.
+    pub addr: Option<SocketAddr>,
     /// Reason, for logs.
     pub reason: String,
 }
@@ -119,9 +122,15 @@ impl Outbox {
     }
 
     /// Asks the transport to drop a player's connection.
-    pub fn disconnect(&mut self, player: PlayerId, reason: impl Into<String>) {
+    pub fn disconnect(
+        &mut self,
+        player: PlayerId,
+        addr: Option<SocketAddr>,
+        reason: impl Into<String>,
+    ) {
         self.disconnects.push(Disconnect {
             player,
+            addr,
             reason: reason.into(),
         });
     }

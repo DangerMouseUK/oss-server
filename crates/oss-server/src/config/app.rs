@@ -32,6 +32,13 @@ pub trait ConfSource {
     /// Locates `name` on the config search path for `arena` (or the global
     /// path when `arena` is `None`) and returns its resolved path and bytes.
     fn open(&self, arena: Option<&str>, name: &str) -> Option<(PathBuf, Vec<u8>)>;
+
+    /// Appends text to a file previously returned by [`ConfSource::open`] (used
+    /// to write changed settings back, as ASSS does). Sources that can't be
+    /// written return `Ok(false)`.
+    fn append(&self, _path: &std::path::Path, _text: &[u8]) -> std::io::Result<bool> {
+        Ok(false)
+    }
 }
 
 struct OpenFile {

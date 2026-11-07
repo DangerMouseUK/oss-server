@@ -136,6 +136,26 @@ pub struct Player {
     pub connected_at: Ticks,
     /// Players with this flag don't get position packets relayed to them.
     pub ignore_weapons: bool,
+    /// Logged in with a verified password (billing or password file).
+    pub authenticated: bool,
+    /// State to move to once the player is back at `LoggedIn` (used by kicks).
+    pub when_logged_in: Option<PlayerStatus>,
+    /// Client version from the login packet.
+    pub client_version: u16,
+    /// Machine id from the login packet.
+    pub machine_id: u32,
+    /// Permission id from the login packet.
+    pub permission_id: u32,
+    /// Screen size from the arena request.
+    pub resolution: (i16, i16),
+    /// Accepts voice messages.
+    pub accept_audio: bool,
+    /// Wants the obscenity filter.
+    pub obscenity_filter: bool,
+    /// Wants optional LVZ files.
+    pub want_all_lvz: bool,
+    /// Human-readable client description.
+    pub client_name: String,
     /// Module-owned per-player data.
     pub ext: Extensions,
 }
@@ -156,6 +176,16 @@ impl Player {
             pos: Position::default(),
             connected_at: now,
             ignore_weapons: false,
+            authenticated: false,
+            when_logged_in: None,
+            client_version: 0,
+            machine_id: 0,
+            permission_id: 0,
+            resolution: (0, 0),
+            accept_audio: false,
+            obscenity_filter: false,
+            want_all_lvz: false,
+            client_name: String::new(),
             ext: Extensions::default(),
         }
     }
@@ -239,8 +269,14 @@ impl Players {
     }
 
     /// Finds a player by name (ASCII case-insensitive).
+    /// Players on their way out of the zone are skipped (ASSS `FindPlayer`).
     pub fn find_by_name(&self, name: &str) -> Option<&Player> {
-        self.iter().find(|p| p.name.eq_ignore_ascii_case(name))
+        let leaving = |s: Option<PlayerStatus>| s.is_some_and(|s| s >= PlayerStatus::LeavingZone);
+        self.iter().find(|p| {
+            p.name.eq_ignore_ascii_case(name)
+                && !leaving(Some(p.status))
+                && !leaving(p.when_logged_in)
+        })
     }
 
     /// Players fully in `arena`.

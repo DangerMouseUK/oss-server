@@ -167,7 +167,8 @@ impl Zone {
 
     /// Asks the transport to drop a player's connection.
     pub fn disconnect(&mut self, player: PlayerId, reason: impl Into<String>) {
-        self.outbox.disconnect(player, reason);
+        let addr = self.players.get(player).and_then(|p| p.addr);
+        self.outbox.disconnect(player, addr, reason);
     }
 
     /// Takes the outbox (transports do this when flushing). Pair with

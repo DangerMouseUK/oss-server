@@ -71,6 +71,13 @@ impl ConfSource for ZoneDir {
         let data = std::fs::read(&path).ok()?;
         Some((path, data))
     }
+
+    fn append(&self, path: &Path, text: &[u8]) -> std::io::Result<bool> {
+        use std::io::Write;
+        let mut f = std::fs::OpenOptions::new().append(true).open(path)?;
+        f.write_all(text)?;
+        Ok(true)
+    }
 }
 
 /// In-memory files keyed by zone-relative path; resolves exactly like
@@ -130,6 +137,8 @@ fn stamps(files: &[PathBuf]) -> Vec<Option<SystemTime>> {
 pub struct ConfigManager {
     source: Box<dyn ConfSource + Send + Sync>,
     cache: HashMap<PathBuf, Cached>,
+    /// (arena, lowercased name) -> resolved path, so repeated opens don't touch disk
+    resolved: HashMap<(Option<String>, String), PathBuf>,
     global: Arc<ConfigFile>,
 }
 
@@ -149,6 +158,7 @@ impl ConfigManager {
         let mut m = Self {
             source: Box::new(source),
             cache: HashMap::new(),
+            resolved: HashMap::new(),
             global: Arc::new(ConfigFile::default()),
         };
         m.global = m.open(None, "global.conf")?;
@@ -167,8 +177,13 @@ impl ConfigManager {
             arena: arena.map(str::to_owned),
             name: name.to_owned(),
         };
+        let req = (arena.map(str::to_owned), name.to_ascii_lowercase());
+        if let Some(c) = self.resolved.get(&req).and_then(|p| self.cache.get(p)) {
+            return Ok(c.file.clone());
+        }
         // resolve first so that the cache is keyed by the actual file
         let (path, _) = self.source.open(arena, name).ok_or_else(not_found)?;
+        self.resolved.insert(req, path.clone());
         if let Some(c) = self.cache.get(&path) {
             return Ok(c.file.clone());
         }
@@ -228,6 +243,54 @@ impl ConfigManager {
         }
         changed
     }
+
+    /// ASSS `SetStr`: changes `section:key` in the loaded file `file` (as
+    /// returned by [`ConfigManager::open`]) and returns the updated file. With
+    /// `permanent`, the change is also appended to the base file on disk as
+    /// `; info` + `Section:Key = value`, the way ASSS writes dirty values.
+    pub fn set(
+        &mut self,
+        file: &Arc<ConfigFile>,
+        section: &str,
+        key: &str,
+        value: &str,
+        info: Option<&str>,
+        permanent: bool,
+    ) -> Arc<ConfigFile> {
+        let path = file.path().to_path_buf();
+        let Some(c) = self.cache.get_mut(&path) else {
+            return file.clone();
+        };
+        if c.file.get(section, key) == Some(value) {
+            return c.file.clone();
+        }
+        let mut updated = (*c.file).clone();
+        updated.set(section, key, value);
+        let updated = Arc::new(updated);
+        if Arc::ptr_eq(&c.file, &self.global) {
+            self.global = updated.clone();
+        }
+        c.file = updated.clone();
+        if permanent {
+            let esc = |s: &str| s.replace('\\', "\\\\").replace('=', "\\=");
+            let mut text = String::new();
+            if let Some(i) = info {
+                text.push_str(&format!("; {i}\n"));
+            }
+            text.push_str(&format!(
+                "{} = {}\n\n",
+                esc(&format!("{section}:{key}")),
+                esc(value)
+            ));
+            match self.source.append(&path, &to_latin1(&text)) {
+                Ok(_) => c.stamps = stamps(updated.sources()),
+                Err(e) => {
+                    tracing::warn!(target: "config", file = %path.display(), "failed to write setting: {e}");
+                }
+            }
+        }
+        updated
+    }
 }
 
 #[cfg(test)]
@@ -257,5 +320,33 @@ mod tests {
     #[test]
     fn missing_global_is_an_error() {
         assert!(ConfigManager::new(MemSource::default()).is_err());
+    }
+}
+
+#[cfg(test)]
+mod write_tests {
+    use super::*;
+
+    #[test]
+    fn set_writes_back_and_rereads_identically() {
+        let dir = std::env::temp_dir().join(format!("oss-cfg-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("conf")).expect("mkdir");
+        std::fs::write(dir.join("conf/global.conf"), "").expect("global");
+        std::fs::write(dir.join("conf/passwd.conf"), "[Users]\nold = any\n").expect("passwd");
+        let mut m = ConfigManager::new(ZoneDir::new(&dir)).expect("mgr");
+        let f = m.open(None, "passwd.conf").expect("passwd");
+        let name = r"we=ird\name";
+        let f2 = m.set(&f, "Users", name, "hash", Some("set by test"), true);
+        assert_eq!(f2.get("users", name), Some("hash"));
+        assert!(Arc::ptr_eq(
+            &m.open(None, "passwd.conf").expect("again"),
+            &f2
+        ));
+        assert!(m.reload_changed().is_empty());
+        let reread = ConfigFile::load(&ZoneDir::new(&dir), None, "passwd.conf").expect("reread");
+        assert_eq!(reread.get("Users", name), Some("hash"));
+        assert_eq!(reread.get("Users", "old"), Some("any"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

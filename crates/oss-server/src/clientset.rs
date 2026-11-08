@@ -421,6 +421,17 @@ pub struct PrizeWeights {
 }
 
 impl PrizeWeights {
+    /// Running totals for the 28 `PrizeWeight` values (prize 1 first).
+    pub fn from_weights(weights: &[u8; 28]) -> Self {
+        let mut sums = [0u16; 28];
+        let mut total = 0u16;
+        for (s, &w) in sums.iter_mut().zip(weights) {
+            total = total.wrapping_add(u16::from(w));
+            *s = total;
+        }
+        Self { sums }
+    }
+
     /// Total weight.
     pub fn total(&self) -> u16 {
         self.sums[27]

@@ -100,8 +100,10 @@ impl Module for PointsFlagModule {
             let Some(cfg) = z.arenas.get(ev.arena).map(|a| a.cfg.clone()) else {
                 return;
             };
-            let mut points =
-                players * players * i64::from(cfg.get_int("Flag", "FlagReward", 5000)) / 1000;
+            let mut points = i64::from(warzone_reward(
+                players as i32,
+                cfg.get_int("Flag", "FlagReward", 5000),
+            ));
             if let Some(jp) = z.iface::<dyn Jackpot>() {
                 points += i64::from(jp.get(z, ev.arena));
             }
@@ -116,4 +118,11 @@ impl Module for PointsFlagModule {
         });
         Ok(())
     }
+}
+
+/// ASSS `points_flag.c`: `players² × Flag:FlagReward / 1000` in 32-bit
+/// integer arithmetic, where `players` is everyone in the arena who is in a
+/// ship (not just the winning team).
+pub fn warzone_reward(players: i32, flag_reward: i32) -> i32 {
+    players.wrapping_mul(players).wrapping_mul(flag_reward) / 1000
 }

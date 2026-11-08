@@ -55,12 +55,17 @@ impl PeriodicPoints for Basic {
             .arenas
             .get(arena)
             .map_or(100, |a| a.cfg.get_int("Periodic", "RewardPoints", 100));
-        let flags = flags as i32;
-        if rw > 0 {
-            flags * rw
-        } else {
-            flags * -rw * total as i32
-        }
+        periodic_points(rw, flags as i32, total as i32)
+    }
+}
+
+/// ASSS `points_periodic.c`: `flags × RewardPoints` when positive, else
+/// `flags × -RewardPoints × players in the arena`.
+pub fn periodic_points(reward_points: i32, flags: i32, total_players: i32) -> i32 {
+    if reward_points > 0 {
+        flags * reward_points
+    } else {
+        flags * -reward_points * total_players
     }
 }
 

@@ -108,9 +108,9 @@ pub fn find_brick_endpoints(
     dy: i32,
     rotation: i32,
     length: i32,
-    rng: &mut Prng,
+    coin: u32,
 ) -> Option<Vec<(i32, i32, i32, i32)>> {
-    let solid = |x: i32, y: i32| map.tile(x, y) != 0;
+    let solid = |x: i32, y: i32| map.tile_wrapped(x, y) != 0;
     if solid(dx, dy) {
         return None;
     }
@@ -133,7 +133,7 @@ pub fn find_brick_endpoints(
             }
             if best.0 == length {
                 // no wall nearby: a line through the drop point
-                if rng.next_u32() & 1 == 1 {
+                if coin & 1 == 1 {
                     (Dir::Left, dx - length / 2, dy)
                 } else {
                     (Dir::Up, dx, dy - length / 2)
@@ -189,7 +189,7 @@ pub fn find_brick_endpoints(
 }
 
 fn cage(map: &ArenaMap, dx: i32, dy: i32, length: i32) -> Vec<(i32, i32, i32, i32)> {
-    let solid = |x: i32, y: i32| map.tile(x, y) != 0;
+    let solid = |x: i32, y: i32| map.tile_wrapped(x, y) != 0;
     let sx = (dx - length / 2).max(0);
     let sy = (dy - length / 2).max(0);
     let ex = (dx + (length + 1) / 2).min(1023);
@@ -312,17 +312,8 @@ fn on_brick(zone: &mut Zone, pid: PlayerId, pkt: &[u8]) {
     let Some(map) = arena_map(zone, a).cloned() else {
         return;
     };
-    let mut rng = std::mem::take(zone.res.get_or_default::<Prng>());
-    let segs = find_brick_endpoints(
-        &map,
-        mode,
-        req.x.into(),
-        req.y.into(),
-        rotation,
-        span,
-        &mut rng,
-    );
-    *zone.res.get_or_default::<Prng>() = rng;
+    let coin = zone.res.get_or_default::<Prng>().next_u32();
+    let segs = find_brick_endpoints(&map, mode, req.x.into(), req.y.into(), rotation, span, coin);
     for seg in segs.unwrap_or_default() {
         drop_brick(zone, a, freq, seg);
     }
@@ -410,25 +401,21 @@ mod tests {
         // from the tile next to the wall
         let wall: Vec<(u32, u32)> = (0..200).map(|y| (100, y)).collect();
         let m = map(&wall);
-        let mut rng = Prng::new(1);
-        let segs =
-            find_brick_endpoints(&m, BrickMode::Vie, 97, 50, 0, 10, &mut rng).expect("drops");
+        let segs = find_brick_endpoints(&m, BrickMode::Vie, 97, 50, 0, 10, 1).expect("drops");
         assert_eq!(segs, vec![(90, 50, 99, 50)]);
         // solid drop point: nothing
-        assert!(find_brick_endpoints(&m, BrickMode::Vie, 100, 50, 0, 10, &mut rng).is_none());
+        assert!(find_brick_endpoints(&m, BrickMode::Vie, 100, 50, 0, 10, 1).is_none());
     }
 
     #[test]
     fn ahead_and_cage() {
         let m = map(&[]);
-        let mut rng = Prng::new(1);
         // rotation 0 = up: a line from the drop point upwards
-        let s =
-            find_brick_endpoints(&m, BrickMode::Ahead, 500, 500, 0, 5, &mut rng).expect("drops");
+        let s = find_brick_endpoints(&m, BrickMode::Ahead, 500, 500, 0, 5, 1).expect("drops");
         assert_eq!(s.len(), 1);
         let (x1, _, x2, _) = s[0];
         assert_eq!(x1, x2);
-        let c = find_brick_endpoints(&m, BrickMode::Cage, 500, 500, 0, 4, &mut rng).expect("drops");
+        let c = find_brick_endpoints(&m, BrickMode::Cage, 500, 500, 0, 4, 1).expect("drops");
         assert_eq!(
             c,
             vec![

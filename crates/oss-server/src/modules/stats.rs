@@ -312,21 +312,21 @@ impl Module for PointsKillModule {
             else {
                 return;
             };
+            let s = KillSettings::load(&cfg);
+            let carried = killer.flags_carried;
+            let killer_bounty = i32::from(killer.pos.bounty);
             let team_kill = killer.freq == killed.freq;
-            let fixed = cfg.get_int("Kill", "FixedKillReward", -1);
-            let mut pts = if fixed != -1 {
-                fixed
-            } else {
-                i32::from(k.bounty)
-            };
-            if i32::from(killer.pos.bounty) >= cfg.get_int("Kill", "FlagMinimumBounty", 0)
-                && k.flags > 0
-            {
-                pts += i32::from(k.flags) * cfg.get_int("Kill", "PointsPerKilledFlag", 0);
-            }
-            if team_kill && cfg.get_int("Misc", "TeamKillPoints", 0) == 0 {
-                pts = 0;
-            }
+            let team_flags =
+                super::flagcore::count_freq_flags(z, k.arena, killer.freq as i16) as i32;
+            let pts = kill_points(
+                i32::from(k.bounty),
+                i32::from(k.flags),
+                i32::from(carried),
+                team_flags,
+                team_kill,
+                killer_bounty,
+                &s,
+            );
             k.points.set(k.points.get() + pts);
         });
         Ok(())
@@ -403,4 +403,69 @@ pub(crate) fn register_ball_stats(zone: &mut Zone, me: Owner) {
             st.increment(z, ev.player, stat::BALL_GOALS, 1);
         }
     });
+}
+
+/// The `Kill:*` settings points_kill uses.
+#[derive(Debug, Clone, Copy)]
+pub struct KillSettings {
+    /// `Kill:FixedKillReward` (-1 = use the bounty).
+    pub fixed_reward: i32,
+    /// `Kill:FlagMinimumBounty`.
+    pub flag_min_bounty: i32,
+    /// `Kill:PointsPerKilledFlag` (ASSS's code default is 0, despite its help text).
+    pub per_killed_flag: i32,
+    /// `Kill:PointsPerCarriedFlag`.
+    pub per_carried_flag: i32,
+    /// `Kill:PointsPerTeamFlag`.
+    pub per_team_flag: i32,
+    /// `Misc:TeamKillPoints`.
+    pub team_kill_points: bool,
+}
+
+impl KillSettings {
+    /// Reads the settings from an arena config.
+    pub fn load(cfg: &crate::config::ConfigFile) -> Self {
+        Self {
+            fixed_reward: cfg.get_int("Kill", "FixedKillReward", -1),
+            flag_min_bounty: cfg.get_int("Kill", "FlagMinimumBounty", 0),
+            per_killed_flag: cfg.get_int("Kill", "PointsPerKilledFlag", 0),
+            per_carried_flag: cfg.get_int("Kill", "PointsPerCarriedFlag", 0),
+            per_team_flag: cfg.get_int("Kill", "PointsPerTeamFlag", 0),
+            team_kill_points: cfg.get_int("Misc", "TeamKillPoints", 0) != 0,
+        }
+    }
+}
+
+/// ASSS `points_kill.c`: points for a kill. The flag bonuses are gated on
+/// the killer's current position bounty; a team kill scores 0 (bonuses too)
+/// unless `Misc:TeamKillPoints`.
+pub fn kill_points(
+    bounty: i32,
+    transferred_flags: i32,
+    killer_carried: i32,
+    team_flags: i32,
+    team_kill: bool,
+    killer_bounty: i32,
+    s: &KillSettings,
+) -> i32 {
+    let mut pts = if s.fixed_reward != -1 {
+        s.fixed_reward
+    } else {
+        bounty
+    };
+    if killer_bounty >= s.flag_min_bounty {
+        if transferred_flags != 0 {
+            pts += transferred_flags * s.per_killed_flag;
+        }
+        if killer_carried != 0 {
+            pts += killer_carried * s.per_carried_flag;
+        }
+        if team_flags != 0 {
+            pts += team_flags * s.per_team_flag;
+        }
+    }
+    if team_kill && !s.team_kill_points {
+        pts = 0;
+    }
+    pts
 }

@@ -48,6 +48,13 @@ impl ArenaMap {
         }
     }
 
+    /// The tile at `(x, y)` with coordinates wrapped mod 1024, the way ASSS's
+    /// sparse tile array looks them up.
+    pub fn tile_wrapped(&self, x: i32, y: i32) -> u8 {
+        self.grid
+            .get(x.rem_euclid(1024) as u32, y.rem_euclid(1024) as u32)
+    }
+
     /// The tile at `(x, y)` (0 outside the map).
     pub fn tile(&self, x: i32, y: i32) -> u8 {
         if (0..1024).contains(&x) && (0..1024).contains(&y) {
@@ -135,7 +142,7 @@ impl ArenaMap {
                 }
                 remaining = upto;
             }
-            if self.tile(cx, cy) != 0 {
+            if self.tile_wrapped(cx, cy) != 0 {
                 if upto < 35 {
                     continue;
                 }

@@ -24,6 +24,10 @@ use crate::ping::PingSnapshot;
 use crate::time::Ticks;
 use crate::zone::{Zone, ZoneStarted, ZoneStopping};
 
+/// The address the game socket is bound to (set when the server starts).
+#[derive(Debug, Clone, Copy)]
+pub struct GameAddr(pub SocketAddr);
+
 /// Capacity of the inbound queue; datagrams beyond it are dropped like UDP loss.
 pub const INBOUND_CAPACITY: usize = 16 * 1024;
 /// Most inbound items handled before the loop checks the clock again.
@@ -389,6 +393,7 @@ impl ServerBuilder {
         let game_addr = game.local_addr()?;
         let ping_addr = ping.local_addr()?;
         tracing::info!(target: "net", game = %game_addr, ping = %ping_addr, "listening");
+        zone.res.insert(GameAddr(game_addr));
 
         let transport = match self.transport.take() {
             Some(f) => f(&mut zone),

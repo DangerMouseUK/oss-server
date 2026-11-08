@@ -35,8 +35,25 @@ pub struct Zone {
     /// Loaded modules.
     pub modules: ModuleManager,
     outbox: Outbox,
+    text: TextOutbox,
     now: Ticks,
     shutdown: bool,
+}
+
+/// Packets for players on a text protocol (chatnet), kept apart from the
+/// game transport's outbox so a text transport can translate them.
+#[derive(Default)]
+struct TextOutbox {
+    flags: Vec<bool>,
+    count: usize,
+    items: Vec<(PlayerId, Vec<u8>)>,
+    disconnects: Vec<PlayerId>,
+}
+
+impl TextOutbox {
+    fn is_text(&self, p: PlayerId) -> bool {
+        self.count > 0 && self.flags.get(usize::from(p.0)).copied().unwrap_or(false)
+    }
 }
 
 impl Zone {
@@ -53,6 +70,7 @@ impl Zone {
             commands: Commands::default(),
             modules: ModuleManager::new(catalog),
             outbox: Outbox::default(),
+            text: TextOutbox::default(),
             now: Ticks(0),
             shutdown: false,
         }
@@ -131,6 +149,12 @@ impl Zone {
 
     /// Queues a game packet for a player.
     pub fn send(&mut self, to: PlayerId, data: &[u8], flags: SendFlags) {
+        if self.text.is_text(to) {
+            if !data.is_empty() {
+                self.text.items.push((to, data.to_vec()));
+            }
+            return;
+        }
         self.outbox.send(to, data, flags);
     }
 
@@ -141,7 +165,33 @@ impl Zone {
         data: &[u8],
         flags: SendFlags,
     ) {
-        self.outbox.send_many(to, data, flags);
+        let Zone { outbox, text, .. } = self;
+        send_split(outbox, text, to, data, flags);
+    }
+
+    /// Marks `p` as a text-protocol player (or not): packets for them go to
+    /// [`Zone::take_text_output`] instead of the game transport.
+    pub fn set_text_player(&mut self, p: PlayerId, on: bool) {
+        let i = usize::from(p.0);
+        if self.text.flags.len() <= i {
+            self.text.flags.resize(i + 1, false);
+        }
+        if self.text.flags[i] != on {
+            self.text.flags[i] = on;
+            if on {
+                self.text.count += 1;
+            } else {
+                self.text.count -= 1;
+            }
+        }
+    }
+
+    /// Takes the packets and disconnects queued for text-protocol players.
+    pub fn take_text_output(&mut self) -> (Vec<(PlayerId, Vec<u8>)>, Vec<PlayerId>) {
+        (
+            std::mem::take(&mut self.text.items),
+            std::mem::take(&mut self.text.disconnects),
+        )
     }
 
     /// Queues a packet for everyone playing in `arena`, optionally except one player.
@@ -153,9 +203,14 @@ impl Zone {
         flags: SendFlags,
     ) {
         let Zone {
-            players, outbox, ..
+            players,
+            outbox,
+            text,
+            ..
         } = self;
-        outbox.send_many(
+        send_split(
+            outbox,
+            text,
             players
                 .in_arena(arena)
                 .map(|p| p.id)
@@ -167,11 +222,17 @@ impl Zone {
 
     /// Queues a large payload as a sized transfer (see [`Outbox::send_sized`]).
     pub fn send_sized(&mut self, to: PlayerId, data: Arc<[u8]>) {
-        self.outbox.send_sized(to, data);
+        if !self.text.is_text(to) {
+            self.outbox.send_sized(to, data);
+        }
     }
 
     /// Asks the transport to drop a player's connection.
     pub fn disconnect(&mut self, player: PlayerId, reason: impl Into<String>) {
+        if self.text.is_text(player) {
+            self.text.disconnects.push(player);
+            return;
+        }
         let addr = self.players.get(player).and_then(|p| p.addr);
         self.outbox.disconnect(player, addr, reason);
     }
@@ -240,6 +301,30 @@ impl Event for ZoneStarted {}
 #[derive(Debug)]
 pub struct ZoneStopping;
 impl Event for ZoneStopping {}
+
+/// `send_many` with text-protocol recipients split off.
+fn send_split(
+    outbox: &mut Outbox,
+    text: &mut TextOutbox,
+    to: impl IntoIterator<Item = PlayerId>,
+    data: &[u8],
+    flags: SendFlags,
+) {
+    if text.count == 0 {
+        outbox.send_many(to, data, flags);
+        return;
+    }
+    let to: Vec<PlayerId> = to.into_iter().collect();
+    if data.is_empty() {
+        return;
+    }
+    for p in &to {
+        if text.is_text(*p) {
+            text.items.push((*p, data.to_vec()));
+        }
+    }
+    outbox.send_many(to.into_iter().filter(|p| !text.is_text(*p)), data, flags);
+}
 
 #[cfg(test)]
 mod tests {

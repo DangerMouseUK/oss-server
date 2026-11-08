@@ -450,6 +450,7 @@ pub fn send_arena_response(zone: &mut Zone, player: PlayerId) {
         return;
     };
     let standard = matches!(p.kind, ClientKind::Vie | ClientKind::Continuum);
+    let chat = p.kind == ClientKind::Chat;
     let me = enter_bytes(p);
     tracing::info!(target: "arenaman", pid = player.0, name = %p.name, arena = arena.0, "entering arena");
     if standard {
@@ -463,6 +464,16 @@ pub fn send_arena_response(zone: &mut Zone, player: PlayerId) {
         if let Some(cs) = zone.iface_in::<dyn SendSettings>(arena) {
             cs.send_settings(zone, player);
         }
+    }
+    if chat {
+        let (name, freq) = (
+            zone.arenas
+                .get(arena)
+                .map(|a| a.name.clone())
+                .unwrap_or_default(),
+            zone.players.get(player).map_or(0, |p| p.freq),
+        );
+        super::chatnet::send_line(zone, player, &format!("INARENA:{name}:{freq}"));
     }
     let others: Vec<(PlayerId, Vec<u8>)> = zone
         .players
@@ -479,7 +490,15 @@ pub fn send_arena_response(zone: &mut Zone, player: PlayerId) {
     }
     for (oid, theirs) in &others {
         zone.send(*oid, &me, SendFlags::RELIABLE);
-        zone.send(player, theirs, SendFlags::RELIABLE);
+        if chat {
+            // chat clients get the players already here as PLAYER lines
+            if let Some(o) = zone.players.get(*oid) {
+                let line = format!("PLAYER:{}:{}:{}", o.name, o.ship.0, o.freq);
+                super::chatnet::send_line(zone, player, &line);
+            }
+        } else {
+            zone.send(player, theirs, SendFlags::RELIABLE);
+        }
     }
     if standard {
         zone.send(player, &me, SendFlags::RELIABLE);

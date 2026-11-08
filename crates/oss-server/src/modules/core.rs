@@ -389,10 +389,11 @@ fn cstr(b: &[u8], max: usize) -> &[u8] {
 }
 
 fn fail_login(zone: &mut Zone, player: PlayerId, code: u8, text: Option<&str>, why: &str) {
+    // Continuum and chat clients can show a custom reason
     let is_cont = zone
         .players
         .get(player)
-        .is_some_and(|p| p.kind == ClientKind::Continuum);
+        .is_some_and(|p| matches!(p.kind, ClientKind::Continuum | ClientKind::Chat));
     let mut auth = AuthData::default();
     match text {
         Some(t) if is_cont => {
@@ -412,7 +413,8 @@ fn on_login(zone: &mut Zone, player: PlayerId, pkt: &[u8]) {
     };
     let (kind, st) = (p.kind, p.status);
     let want = match kind {
-        ClientKind::Vie => Login::VIE_LEN,
+        // chatnet builds a VIE-sized login from its LOGIN line
+        ClientKind::Vie | ClientKind::Chat => Login::VIE_LEN,
         ClientKind::Continuum => Login::CONT_LEN,
         _ => {
             tracing::warn!(target: "core", pid = player.0, ?kind, "login packet from wrong client type");
@@ -488,6 +490,8 @@ fn on_login(zone: &mut Zone, player: PlayerId, pkt: &[u8]) {
         p.client_version = req.client_version;
         p.client_name = match kind {
             ClientKind::Continuum => format!("<continuum, v. {}>", req.client_version),
+            // chatnet names chat clients itself
+            ClientKind::Chat => p.client_name.clone(),
             _ => format!("<ss/vie client, v. {}>", req.client_version),
         };
         p.status = PlayerStatus::NeedAuth;
@@ -508,6 +512,22 @@ fn send_login_response(zone: &mut Zone, player: PlayerId) {
     let Some(kind) = zone.players.get(player).map(|p| p.kind) else {
         return;
     };
+    if kind == ClientKind::Chat {
+        let line = if auth_code::is_ok(auth.code) {
+            let name = zone
+                .players
+                .get(player)
+                .map(|p| p.name.clone())
+                .unwrap_or_default();
+            format!("LOGINOK:{name}")
+        } else if auth.code == auth_code::CUSTOM_TEXT {
+            format!("LOGINBAD:{}", auth.custom_text)
+        } else {
+            format!("LOGINBAD:{}", auth_code_message(auth.code))
+        };
+        super::chatnet::send_line(zone, player, &line);
+        return;
+    }
     if !matches!(kind, ClientKind::Vie | ClientKind::Continuum) {
         return;
     }
@@ -564,6 +584,32 @@ fn send_login_response(zone: &mut Zone, player: PlayerId) {
     buf.clear();
     lr.encode(&mut buf);
     zone.send(player, &buf, SendFlags::RELIABLE);
+}
+
+/// ASSS `get_auth_code_msg`: login results as chat clients see them.
+pub fn auth_code_message(code: u8) -> &'static str {
+    match code {
+        auth_code::OK => "ok",
+        auth_code::NEW_NAME => "new user",
+        auth_code::BAD_PASSWORD => "incorrect password",
+        auth_code::ARENA_FULL => "arena full",
+        auth_code::LOCKED_OUT => "you have been locked out",
+        auth_code::NO_PERMISSION => "no permission",
+        auth_code::SPEC_ONLY => "you can spec only",
+        auth_code::TOO_MANY_POINTS => "you have too many points",
+        auth_code::TOO_SLOW => "too slow (?)",
+        auth_code::NO_PERMISSION2 => "no permission (2)",
+        auth_code::NO_NEW_CONN => "the server is not accepting new connections",
+        auth_code::BAD_NAME => "bad player name",
+        auth_code::OFFENSIVE_NAME => "offensive player name",
+        auth_code::NO_SCORES => "the server is not recordng scores",
+        auth_code::SERVER_BUSY => "the server is busy",
+        auth_code::TOO_LOW_USAGE => "too low usage",
+        auth_code::NO_NAME => "no name sent",
+        auth_code::TOO_MANY_DEMO => "too many demo players",
+        auth_code::NO_DEMO => "no demo players allowed",
+        _ => "???",
+    }
 }
 
 /// CRC-32 of the news file, set by the map/news module (0 = no news).

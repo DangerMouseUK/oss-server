@@ -11,6 +11,7 @@ pub mod billing_ssc;
 pub mod bricks;
 pub mod capman;
 pub mod chat;
+pub mod chatnet;
 pub mod clientset;
 pub mod cmdman;
 pub mod core;
@@ -88,6 +89,7 @@ pub fn builtin_catalog() -> ModuleCatalog {
     c.register("clientset", &[], || clientset::ClientSetModule);
     c.register("cmdman", &[], || cmdman::CmdManModule);
     c.register("chat", &[], || chat::ChatModule);
+    c.register("chatnet", &[], || chatnet::ChatNetModule);
     c.register("obscene", &[], || obscene::ObsceneModule);
     c.register("game", &[], || game::GameModule);
     c.register("mapdata", &[], || mapdata::MapDataModule);

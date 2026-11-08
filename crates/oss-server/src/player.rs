@@ -135,6 +135,8 @@ pub struct Player {
     pub squad: String,
     /// Remote address, for network players.
     pub addr: Option<SocketAddr>,
+    /// The virtual server (`Listen:ConnectAs`) the player connected through.
+    pub connect_as: Option<String>,
     /// Current arena.
     pub arena: Option<ArenaId>,
     /// Arena the player asked to enter, while entering.
@@ -191,6 +193,7 @@ impl Player {
             name: String::new(),
             squad: String::new(),
             addr: None,
+            connect_as: None,
             arena: None,
             new_arena: None,
             ship: Ship::SPEC,

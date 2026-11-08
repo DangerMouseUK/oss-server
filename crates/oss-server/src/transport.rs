@@ -18,7 +18,7 @@ use std::time::Instant;
 use oss_net::{Acceptor, Config, Event, Server, VieAcceptor};
 
 use crate::modules::core as core_mod;
-use crate::net::{DatagramIo, Transport};
+use crate::net::{DatagramIo, ListenSpec, Listeners, Transport};
 use crate::player::{ClientKind, PlayerId};
 use crate::zone::Zone;
 
@@ -40,13 +40,17 @@ impl Acceptor for Shared {
     }
 }
 
+/// A remote address on one of the listen sockets.
+type Endpoint = (usize, SocketAddr);
+
 /// Transport over the SubSpace core protocol.
 pub struct SubspaceTransport {
-    server: Server<SocketAddr>,
+    server: Server<Endpoint>,
     start: Instant,
-    kinds: HashMap<SocketAddr, ClientKind>,
-    players: HashMap<SocketAddr, PlayerId>,
-    addrs: HashMap<PlayerId, SocketAddr>,
+    kinds: HashMap<Endpoint, ClientKind>,
+    players: HashMap<Endpoint, PlayerId>,
+    addrs: HashMap<PlayerId, Endpoint>,
+    listeners: Vec<ListenSpec>,
     last_lag: u64,
 }
 
@@ -58,6 +62,11 @@ impl SubspaceTransport {
         if let Ok(ms) = u64::try_from(g.get_int("Net", "DropTimeout", 3000)) {
             // ASSS: Net:DropTimeout in ticks
             cfg.timeout_ms = ms.saturating_mul(10).max(1000);
+        }
+        // ASSS Net:MaxOutlistSize: a connection whose outgoing queue grows past
+        // this is dropped (oss-net's max_queue does exactly that)
+        if let Ok(n) = usize::try_from(g.get_int("Net", "MaxOutlistSize", 500)) {
+            cfg.max_queue = n.max(16);
         }
         let mut server = Server::new(cfg);
         if let Ok(n) = usize::try_from(g.get_int("Net", "MaxPlayers", 1024)) {
@@ -80,6 +89,7 @@ impl SubspaceTransport {
             kinds: HashMap::new(),
             players: HashMap::new(),
             addrs: HashMap::new(),
+            listeners: Listeners::of(zone),
             last_lag: 0,
         }
     }
@@ -98,14 +108,21 @@ impl SubspaceTransport {
             match ev {
                 Event::Connected => {
                     let kind = self.kinds.remove(&addr).unwrap_or(ClientKind::Vie);
-                    match core_mod::new_connection(zone, kind, Some(addr)) {
+                    match core_mod::new_connection(zone, kind, Some(addr.1)) {
                         Some(pid) => {
-                            tracing::info!(target: "net", %addr, pid = pid.0, ?kind, "client connected");
+                            let connect_as = self
+                                .listeners
+                                .get(addr.0)
+                                .and_then(|l| l.connect_as.clone());
+                            if let Some(p) = zone.players.get_mut(pid) {
+                                p.connect_as = connect_as;
+                            }
+                            tracing::info!(target: "net", addr = %addr.1, listen = addr.0, pid = pid.0, ?kind, "client connected");
                             self.players.insert(addr, pid);
                             self.addrs.insert(pid, addr);
                         }
                         None => {
-                            tracing::warn!(target: "net", %addr, "player table full");
+                            tracing::warn!(target: "net", addr = %addr.1, "player table full");
                             self.server.disconnect(&addr);
                         }
                     }
@@ -119,7 +136,7 @@ impl SubspaceTransport {
                     self.kinds.remove(&addr);
                     if let Some(pid) = self.players.remove(&addr) {
                         self.addrs.remove(&pid);
-                        tracing::info!(target: "net", %addr, pid = pid.0, ?reason, "connection closed");
+                        tracing::info!(target: "net", addr = %addr.1, pid = pid.0, ?reason, "connection closed");
                         core_mod::kick(zone, pid);
                     }
                 }
@@ -129,14 +146,22 @@ impl SubspaceTransport {
     }
 
     fn transmit(&mut self, io: &dyn DatagramIo) {
-        while let Some((addr, d)) = self.server.poll_transmit() {
-            io.send_to(&d, addr);
+        while let Some(((listen, addr), d)) = self.server.poll_transmit() {
+            io.send_to(listen, &d, addr);
         }
     }
 }
 
 impl Transport for SubspaceTransport {
-    fn on_datagram(&mut self, zone: &mut Zone, io: &dyn DatagramIo, from: SocketAddr, data: &[u8]) {
+    fn on_datagram(
+        &mut self,
+        zone: &mut Zone,
+        io: &dyn DatagramIo,
+        listen: usize,
+        from: SocketAddr,
+        data: &[u8],
+    ) {
+        let from = (listen, from);
         if data.len() >= 2
             && data[0] == 0
             && (data[1] == 0x01 || data[1] == 0x11)
@@ -147,6 +172,15 @@ impl Transport for SubspaceTransport {
             } else {
                 ClientKind::Vie
             };
+            // Listen:AllowVIE / AllowCont: refuse silently, as ASSS does
+            let allowed = self.listeners.get(listen).is_none_or(|l| match kind {
+                ClientKind::Continuum => l.allow_cont,
+                _ => l.allow_vie,
+            });
+            if !allowed {
+                tracing::debug!(target: "net", addr = %from.1, listen, ?kind, "client type not allowed on this port");
+                return;
+            }
             self.kinds.insert(from, kind);
         }
         let now = self.now();
@@ -164,7 +198,7 @@ impl Transport for SubspaceTransport {
     fn flush(&mut self, zone: &mut Zone, io: &dyn DatagramIo) {
         let now = self.now();
         let out = zone.take_outbox();
-        let mut touched: std::collections::HashSet<SocketAddr> = std::collections::HashSet::new();
+        let mut touched: std::collections::HashSet<Endpoint> = std::collections::HashSet::new();
         for item in out.items() {
             if let Some(addr) = self.addrs.get(&item.to)
                 && self.server.send(addr, out.bytes(item), item.flags.reliable)
@@ -184,10 +218,10 @@ impl Transport for SubspaceTransport {
             let Some(&addr) = self.addrs.get(&d.player) else {
                 continue;
             };
-            if d.addr.is_some_and(|a| a != addr) {
+            if d.addr.is_some_and(|a| a != addr.1) {
                 continue;
             }
-            tracing::debug!(target: "net", %addr, pid = d.player.0, reason = %d.reason, "dropping connection");
+            tracing::debug!(target: "net", addr = %addr.1, pid = d.player.0, reason = %d.reason, "dropping connection");
             self.addrs.remove(&d.player);
             self.players.remove(&addr);
             self.server.disconnect(&addr);
@@ -198,7 +232,7 @@ impl Transport for SubspaceTransport {
             if let Some(c) = self.server.connection_mut(&addr) {
                 c.flush(now);
                 while let Some(d) = c.poll_transmit() {
-                    io.send_to(&d, addr);
+                    io.send_to(addr.0, &d, addr.1);
                 }
             }
         }
@@ -231,7 +265,7 @@ impl Transport for SubspaceTransport {
 
     fn shutdown(&mut self, zone: &mut Zone, io: &dyn DatagramIo) {
         self.flush(zone, io);
-        let addrs: Vec<SocketAddr> = self.server.addresses().copied().collect();
+        let addrs: Vec<Endpoint> = self.server.addresses().copied().collect();
         for a in addrs {
             self.server.disconnect(&a);
         }

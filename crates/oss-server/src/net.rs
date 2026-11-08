@@ -178,17 +178,98 @@ impl Outbox {
     }
 }
 
-/// Sends raw datagrams. Implemented over the UDP socket by the runtime.
+/// One configured game listen socket (ASSS `[Listen]`, `[Listen1]` ..
+/// `[Listen9]`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ListenSpec {
+    /// Where to bind (`BindAddress`, default all interfaces, and `Port`).
+    pub addr: SocketAddr,
+    /// `AllowVIE`: SubSpace 1.34 / VIE-protocol clients may connect.
+    pub allow_vie: bool,
+    /// `AllowCont`: Continuum clients may connect.
+    pub allow_cont: bool,
+    /// `ConnectAs`: the virtual server this socket presents, if any. Its
+    /// players start in the arena of that name, and its population and
+    /// directory entry are counted separately.
+    pub connect_as: Option<String>,
+}
+
+/// The listen sockets `global.conf` asks for (ASSS `net.c`): `[Listen]` and
+/// `[Listen1]`..`[Listen9]`, each needing a `Port`.
+pub fn listen_specs(g: &crate::config::ConfigFile) -> Vec<ListenSpec> {
+    let mut out = Vec::new();
+    for i in 0..10 {
+        let sec = if i == 0 {
+            "Listen".to_owned()
+        } else {
+            format!("Listen{i}")
+        };
+        let port = g.get_int(&sec, "Port", -1);
+        let Ok(port) = u16::try_from(port) else {
+            if i == 0 && g.get(&sec, "Port").is_none() {
+                // no [Listen] Port at all: ASSS's sample zone uses 5000
+                out.push(ListenSpec {
+                    addr: SocketAddr::from(([0, 0, 0, 0], 5000)),
+                    allow_vie: true,
+                    allow_cont: true,
+                    connect_as: None,
+                });
+            }
+            continue;
+        };
+        let ip = g
+            .get(&sec, "BindAddress")
+            .and_then(|a| a.trim().parse::<std::net::IpAddr>().ok())
+            .unwrap_or(std::net::IpAddr::from([0, 0, 0, 0]));
+        out.push(ListenSpec {
+            addr: SocketAddr::new(ip, port),
+            allow_vie: g.get_int(&sec, "AllowVIE", 1) != 0,
+            allow_cont: g.get_int(&sec, "AllowCont", 1) != 0,
+            connect_as: g
+                .get(&sec, "ConnectAs")
+                .map(str::trim)
+                .filter(|c| !c.is_empty())
+                .map(str::to_owned),
+        });
+    }
+    out
+}
+
+/// The listen sockets a running server bound, in config order (index =
+/// the `listen` argument of [`Transport::on_datagram`]). Set by the
+/// runtime; zones that never start have the configured specs instead.
+#[derive(Debug, Clone, Default)]
+pub struct Listeners(pub Vec<ListenSpec>);
+
+impl Listeners {
+    /// The listeners: bound ones if the server started, else the config.
+    pub fn of(zone: &Zone) -> Vec<ListenSpec> {
+        match zone.res.get::<Listeners>() {
+            Some(l) if !l.0.is_empty() => l.0.clone(),
+            _ => listen_specs(zone.cfg.global()),
+        }
+    }
+}
+
+/// Sends raw datagrams. Implemented over the UDP sockets by the runtime.
 pub trait DatagramIo: Send + Sync {
-    /// Sends one datagram; failures (full buffers) are dropped like UDP loss.
-    fn send_to(&self, data: &[u8], to: SocketAddr);
+    /// Sends one datagram from listen socket `listen`; failures (full
+    /// buffers) are dropped like UDP loss.
+    fn send_to(&self, listen: usize, data: &[u8], to: SocketAddr);
 }
 
 /// Turns datagrams into game packets and back. Owned by the game loop and
 /// driven on the game thread, so it may borrow the zone mutably.
 pub trait Transport: Send {
-    /// A datagram arrived from `from`.
-    fn on_datagram(&mut self, zone: &mut Zone, io: &dyn DatagramIo, from: SocketAddr, data: &[u8]);
+    /// A datagram arrived from `from` on listen socket `listen`.
+    fn on_datagram(
+        &mut self,
+        zone: &mut Zone,
+        io: &dyn DatagramIo,
+        listen: usize,
+        from: SocketAddr,
+        data: &[u8],
+    );
 
     /// Moves the zone's outbox onto the wire. Called after each batch of
     /// input and every tick.
@@ -243,7 +324,8 @@ impl Loopback {
 }
 
 impl Transport for Loopback {
-    fn on_datagram(&mut self, _: &mut Zone, _: &dyn DatagramIo, _: SocketAddr, _: &[u8]) {}
+    fn on_datagram(&mut self, _: &mut Zone, _: &dyn DatagramIo, _: usize, _: SocketAddr, _: &[u8]) {
+    }
 
     fn flush(&mut self, zone: &mut Zone, _: &dyn DatagramIo) {
         self.collect(zone);

@@ -153,6 +153,7 @@ impl Transport for NullTransport {
         &mut self,
         _: &mut Zone,
         _: &dyn crate::net::DatagramIo,
+        _: usize,
         from: std::net::SocketAddr,
         data: &[u8],
     ) {

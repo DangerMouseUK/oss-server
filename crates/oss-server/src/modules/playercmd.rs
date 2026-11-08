@@ -48,6 +48,28 @@ fn c_help(zone: &mut Zone, inv: &Invocation<'_>) {
     }
 }
 
+/// ASSS `?sheep`: `Misc:SheepMessage`, with sound 24, to the sender.
+fn c_sheep(zone: &mut Zone, inv: &Invocation<'_>) {
+    let crate::commands::Target::Arena(a) = inv.target else {
+        return;
+    };
+    let text = zone
+        .arenas
+        .get(a)
+        .and_then(|x| x.cfg.get("Misc", "SheepMessage").map(str::to_owned))
+        .unwrap_or_else(|| "Sheep successfully cloned -- hello Dolly".to_owned());
+    if let Some(c) = zone.iface::<dyn super::chat::Chat>() {
+        c.send_any_message(
+            zone,
+            &[inv.sender],
+            oss_proto::common::chat_type::ARENA,
+            24,
+            -1,
+            &text,
+        );
+    }
+}
+
 fn c_version(zone: &mut Zone, inv: &Invocation<'_>) {
     message(
         zone,
@@ -82,6 +104,7 @@ impl Module for PlayerCmdModule {
             Some("Module: playercmd\nTargets: none\nArgs: none\nShows the server version.\n"),
             c_version,
         );
+        zone.add_command(me, "sheep", None, None, c_sheep);
         Ok(())
     }
 }

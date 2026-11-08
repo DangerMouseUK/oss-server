@@ -91,11 +91,9 @@ pub fn local_addr(zone: &Zone) -> Option<SocketAddr> {
 fn listen_addr(zone: &Zone) -> Option<SocketAddr> {
     let g = zone.cfg.global();
     // the game socket's port (as ASSS uses its first listen port)
-    let game_port = zone
-        .res
-        .get::<crate::runtime::GameAddr>()
-        .map(|a| a.0.port())
-        .unwrap_or_else(|| u16::try_from(g.get_int("Listen", "Port", 5000)).unwrap_or(5000));
+    let game_port = crate::net::Listeners::of(zone)
+        .first()
+        .map_or(5000, |l| l.addr.port());
     match g.get("Net", "ChatListen").map(str::trim) {
         None | Some("") => Some(SocketAddr::from(([0, 0, 0, 0], game_port))),
         Some(spec) => match spec.split_once(':') {

@@ -10,6 +10,11 @@
 //! from the payload and ping the registered port + 1 at the sender's address,
 //! so the zone's ping responder must be reachable there.
 //!
+//! A zone with several listen sockets sends one datagram per socket. A
+//! virtual server (`Listen:ConnectAs`) reads `Name` and `Description` from a
+//! `[Directory-<connectas>]` section first, and reports only its own
+//! population (the players in arenas named after it).
+//!
 //! Nothing is sent unless servers are configured; the bundled zone lists
 //! none.
 
@@ -93,23 +98,46 @@ fn servers(zone: &Zone) -> Vec<SocketAddr> {
     out
 }
 
-fn game_port(zone: &Zone) -> u16 {
-    zone.res
-        .get::<crate::runtime::GameAddr>()
-        .map(|a| a.0.port())
-        .unwrap_or_else(|| {
-            u16::try_from(zone.cfg.global().get_int("Listen", "Port", 5000)).unwrap_or(5000)
-        })
-}
-
-/// Players counted in the registration: everyone playing except fakes.
-pub fn population(zone: &Zone) -> u16 {
+/// Players counted in the registration: everyone playing except fakes, or
+/// for a virtual server those in arenas named after it (ASSS
+/// `GetLDPopulation`).
+pub fn population(zone: &Zone, connect_as: Option<&str>) -> u16 {
     let n = zone
         .players
         .iter()
         .filter(|p| p.status == PlayerStatus::Playing && p.kind != ClientKind::Fake)
+        .filter(|p| match connect_as {
+            None => true,
+            Some(c) => p
+                .arena
+                .and_then(|a| zone.arenas.get(a))
+                .is_some_and(|a| a.basename == c),
+        })
         .count();
     u16::try_from(n).unwrap_or(u16::MAX)
+}
+
+/// The registration datagram for each listen socket (ASSS `init_data` +
+/// `SendUpdates`).
+pub fn packets(zone: &Zone) -> Vec<Vec<u8>> {
+    let g = zone.cfg.global();
+    crate::net::Listeners::of(zone)
+        .iter()
+        .map(|l| {
+            let sec = l
+                .connect_as
+                .as_ref()
+                .map_or_else(|| "Directory".to_owned(), |c| format!("Directory-{c}"));
+            let pick = |key: &str| g.get(&sec, key).or_else(|| g.get("Directory", key));
+            update_packet(
+                l.addr.port(),
+                population(zone, l.connect_as.as_deref()),
+                pick("Name"),
+                pick("Description"),
+                g.get("Directory", "Password"),
+            )
+        })
+        .collect()
 }
 
 fn send_updates(zone: &mut Zone) -> bool {
@@ -119,18 +147,12 @@ fn send_updates(zone: &mut Zone) -> bool {
     if d.servers.is_empty() {
         return true;
     }
-    let g = zone.cfg.global();
-    let pkt = update_packet(
-        game_port(zone),
-        population(zone),
-        g.get("Directory", "Name"),
-        g.get("Directory", "Description"),
-        g.get("Directory", "Password"),
-    );
     tracing::trace!(target: "directory", "sending information to directory servers");
-    for s in &d.servers {
-        if let Err(e) = d.socket.send_to(&pkt, s) {
-            tracing::debug!(target: "directory", %s, "send failed: {e}");
+    for pkt in packets(zone) {
+        for s in &d.servers {
+            if let Err(e) = d.socket.send_to(&pkt, s) {
+                tracing::debug!(target: "directory", %s, "send failed: {e}");
+            }
         }
     }
     true
@@ -155,13 +177,9 @@ impl Module for DirectoryModule {
             tracing::warn!(target: "directory", "Directory:Password is longer than {MAX_DIR_PASSWORD} characters; directory servers will reject the zone");
         }
         let servers = servers(zone);
-        let name = zone
-            .cfg
-            .global()
-            .get("Directory", "Name")
-            .unwrap_or("<no name provided>")
-            .to_owned();
-        tracing::info!(target: "directory", "server on port {} using name '{name}'", game_port(zone));
+        for l in crate::net::Listeners::of(zone) {
+            tracing::info!(target: "directory", port = l.addr.port(), connect_as = ?l.connect_as, "registering listen socket");
+        }
         zone.res.insert(Directory { socket, servers });
         zone.set_timer(me, 1000, 6000, send_updates);
         Ok(())

@@ -42,7 +42,7 @@ impl H {
             (
                 "conf/groupdef.conf",
                 "[default]\ncmd_version = 1\ncmd_go = 1\ncmd_help = 1\n\
-                 privcmd_freqkick\nprivcmd_giveowner\ncmd_takeownership\n\
+                 privcmd_freqkick\nprivcmd_giveowner\ncmd_takeownership\ncmd_sheep\n\
                  [mod]\ncmd_version = 1\ncmd_go = 1\nseemodchat\nsendmodchat\n\
                  cmd_arena\nprivcmd_setship\nprivcmd_lock\nprivcmd_prize\nprivcmd_info\n\
                  privcmd_warpto\ncmd_z\nhigher_than_default\n\
@@ -839,4 +839,27 @@ fn redirects() {
             ([127, 0, 0, 1], 5100, -3, Some("duel".to_owned())),
         ]
     );
+}
+
+#[test]
+fn sheep() {
+    for (conf, want) in [
+        (
+            String::from(ARENA_CONF),
+            "Sheep successfully cloned -- hello Dolly",
+        ),
+        (format!("{ARENA_CONF}[Misc]\nSheepMessage = baa\n"), "baa"),
+    ] {
+        let mut h = H::with_conf(&conf, "[Chat]\nMessageReliable = 1\n");
+        let (alice, _) = h.login("alice", "x");
+        h.enter(alice);
+        h.take(alice);
+        h.chat(alice, chat_type::PUBLIC, 0, "?sheep");
+        let got = chats(&h.take(alice));
+        assert!(
+            got.iter()
+                .any(|c| c.kind == chat_type::ARENA && c.sound == 24 && c.text == want.as_bytes()),
+            "{conf}"
+        );
+    }
 }

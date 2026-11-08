@@ -25,6 +25,9 @@ pub struct PingSnapshot {
     pub playing: u32,
     /// Encoded arena summary, including the terminating NUL.
     pub arenas: Vec<u8>,
+    /// Players in arenas, by arena base name (ASSS counts a virtual
+    /// server's population as its `ConnectAs` arenas').
+    pub by_basename: std::collections::HashMap<String, u32>,
 }
 
 impl PingSnapshot {
@@ -56,6 +59,7 @@ impl PingSnapshot {
                 continue;
             }
             let (total, playing) = per_arena.get(&a.id).copied().unwrap_or_default();
+            *s.by_basename.entry(a.basename.clone()).or_default() += total;
             s.arenas
                 .extend_from_slice(&crate::config::to_latin1(&a.name));
             s.arenas.push(0);
@@ -68,10 +72,24 @@ impl PingSnapshot {
 
     /// The reply to a ping request, or `None` for malformed requests.
     pub fn reply(&self, req: &[u8]) -> Option<Vec<u8>> {
+        self.reply_for(req, None)
+    }
+
+    /// Population of a virtual server (`ConnectAs`), or of the whole zone.
+    pub fn population(&self, connect_as: Option<&str>) -> u32 {
+        match connect_as {
+            Some(c) => self.by_basename.get(c).copied().unwrap_or(0),
+            None => self.total,
+        }
+    }
+
+    /// The reply on a listen socket presenting virtual server `connect_as`:
+    /// a 4-byte ping gets that server's population (ASSS `ld->total`).
+    pub fn reply_for(&self, req: &[u8], connect_as: Option<&str>) -> Option<Vec<u8>> {
         match req.len() {
             4 => {
                 let mut out = Vec::with_capacity(8);
-                out.extend_from_slice(&self.total.to_le_bytes());
+                out.extend_from_slice(&self.population(connect_as).to_le_bytes());
                 out.extend_from_slice(req);
                 Some(out)
             }
@@ -108,8 +126,15 @@ mod tests {
             total: 7,
             playing: 3,
             arenas: b"0\0\x07\0\x03\0\0".to_vec(),
+            by_basename: [("duel".to_owned(), 2)].into_iter().collect(),
         };
         assert_eq!(s.reply(&[1, 2, 3, 4]), Some(vec![7, 0, 0, 0, 1, 2, 3, 4]));
+        // a virtual server answers with its own population
+        assert_eq!(
+            s.reply_for(&[1, 2, 3, 4], Some("duel")),
+            Some(vec![2, 0, 0, 0, 1, 2, 3, 4])
+        );
+        assert_eq!(s.population(Some("other")), 0);
         let r = s.reply(&[1, 2, 3, 4, 3, 0, 0, 0]).unwrap_or_default();
         assert_eq!(&r[..8], &[1, 2, 3, 4, 3, 0, 0, 0]);
         assert_eq!(&r[8..16], &[7, 0, 0, 0, 3, 0, 0, 0]);

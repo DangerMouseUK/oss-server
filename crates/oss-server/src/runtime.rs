@@ -25,10 +25,6 @@ use crate::ping::PingSnapshot;
 use crate::time::Ticks;
 use crate::zone::{Zone, ZoneStarted, ZoneStopping};
 
-/// The address the game socket is bound to (set when the server starts).
-#[derive(Debug, Clone, Copy)]
-pub struct GameAddr(pub SocketAddr);
-
 /// Capacity of the inbound queue; datagrams beyond it are dropped like UDP loss.
 pub const INBOUND_CAPACITY: usize = 16 * 1024;
 /// Most inbound items handled before the loop checks the clock again.
@@ -36,8 +32,10 @@ const BATCH: usize = 512;
 
 /// Something for the game thread to do.
 pub enum Inbound {
-    /// A datagram arrived on the game socket.
+    /// A datagram arrived on a game socket.
     Datagram {
+        /// Which listen socket (index into [`crate::net::Listeners`]).
+        listen: usize,
         /// Sender.
         from: SocketAddr,
         /// Payload.
@@ -71,8 +69,8 @@ impl ZoneHandle {
 
     /// Queues a datagram: `Some(false)` if the queue was full (dropped),
     /// `None` once the game thread is gone.
-    fn datagram(&self, from: SocketAddr, data: Vec<u8>) -> Option<bool> {
-        match self.tx.try_send(Inbound::Datagram { from, data }) {
+    fn datagram(&self, listen: usize, from: SocketAddr, data: Vec<u8>) -> Option<bool> {
+        match self.tx.try_send(Inbound::Datagram { listen, from, data }) {
             Ok(()) => Some(true),
             Err(TrySendError::Full(_)) => {
                 tracing::debug!(target: "net", "inbound queue full, dropping datagram");
@@ -91,13 +89,16 @@ pub fn channel() -> (ZoneHandle, Receiver<Inbound>) {
 
 /// [`DatagramIo`] over a non-blocking UDP socket.
 pub struct UdpIo {
-    socket: UdpSocket,
+    sockets: Vec<UdpSocket>,
     metrics: Arc<Metrics>,
 }
 
 impl DatagramIo for UdpIo {
-    fn send_to(&self, data: &[u8], to: SocketAddr) {
-        match self.socket.send_to(data, to) {
+    fn send_to(&self, listen: usize, data: &[u8], to: SocketAddr) {
+        let Some(socket) = self.sockets.get(listen) else {
+            return;
+        };
+        match socket.send_to(data, to) {
             Ok(n) => self.metrics.sent(n),
             Err(e) => tracing::trace!(target: "net", %to, "send failed: {e}"),
         }
@@ -108,7 +109,7 @@ impl DatagramIo for UdpIo {
 pub struct NoIo;
 
 impl DatagramIo for NoIo {
-    fn send_to(&self, _: &[u8], _: SocketAddr) {}
+    fn send_to(&self, _: usize, _: &[u8], _: SocketAddr) {}
 }
 
 /// The game loop: owns the zone and the transport.
@@ -156,9 +157,9 @@ impl GameLoop {
 
     fn handle(&mut self, msg: Inbound) {
         match msg {
-            Inbound::Datagram { from, data } => {
+            Inbound::Datagram { listen, from, data } => {
                 self.transport
-                    .on_datagram(&mut self.zone, self.io.as_ref(), from, &data);
+                    .on_datagram(&mut self.zone, self.io.as_ref(), listen, from, &data);
             }
             Inbound::Run(f) => f(&mut self.zone),
             Inbound::Shutdown => self.zone.request_shutdown(),
@@ -395,21 +396,48 @@ impl ServerBuilder {
     /// tasks, returning immediately. Use [`RunningServer::stop`] to shut down.
     pub fn start(mut self) -> Result<RunningServer, ServerError> {
         let mut zone = self.build_zone()?;
-        let port = u16::try_from(zone.cfg.global().get_int("Listen", "Port", 5000)).unwrap_or(5000);
-        let bind = self
-            .bind
-            .unwrap_or_else(|| SocketAddr::from(([0, 0, 0, 0], port)));
-        let game = UdpSocket::bind(bind)?;
-        game.set_nonblocking(true)?;
-        let mut ping_addr = bind;
-        if bind.port() != 0 {
-            ping_addr.set_port(bind.port().wrapping_add(1));
+        let mut specs = crate::net::listen_specs(zone.cfg.global());
+        if let Some(bind) = self.bind {
+            // --bind replaces the first listen socket's address
+            match specs.first_mut() {
+                Some(s) => s.addr = bind,
+                None => specs.push(crate::net::ListenSpec {
+                    addr: bind,
+                    allow_vie: true,
+                    allow_cont: true,
+                    connect_as: None,
+                }),
+            }
         }
-        let ping = UdpSocket::bind(ping_addr)?;
-        ping.set_nonblocking(true)?;
-        let game_addr = game.local_addr()?;
-        let ping_addr = ping.local_addr()?;
-        tracing::info!(target: "net", game = %game_addr, ping = %ping_addr, "listening");
+        // one game socket and one ping socket (game port + 1) per listener
+        let mut games = Vec::new();
+        let mut pings = Vec::new();
+        let mut bound = Vec::new();
+        for spec in &specs {
+            let game = UdpSocket::bind(spec.addr)?;
+            game.set_nonblocking(true)?;
+            let mut ping_addr = spec.addr;
+            if spec.addr.port() != 0 {
+                ping_addr.set_port(spec.addr.port().wrapping_add(1));
+            }
+            let ping = UdpSocket::bind(ping_addr)?;
+            ping.set_nonblocking(true)?;
+            let game_addr = game.local_addr()?;
+            tracing::info!(target: "net", game = %game_addr, ping = %ping.local_addr()?, connect_as = ?spec.connect_as, "listening");
+            bound.push(crate::net::ListenSpec {
+                addr: game_addr,
+                ..spec.clone()
+            });
+            games.push(game);
+            pings.push(ping);
+        }
+        let game_addr = bound
+            .first()
+            .map(|l| l.addr)
+            .ok_or_else(|| std::io::Error::other("no [Listen] Port configured"))?;
+        let ping_addr = pings[0].local_addr()?;
+        zone.res.insert(crate::net::Listeners(bound.clone()));
+        let listen_addrs: Vec<SocketAddr> = bound.iter().map(|l| l.addr).collect();
         let metrics = Arc::new(Metrics::default());
         zone.res.insert(metrics.clone());
         let admin_cfg = crate::admin::AdminConfig::from_zone(&zone);
@@ -417,7 +445,6 @@ impl ServerBuilder {
             .res
             .get::<crate::admin::AdminEvents>()
             .map(|e| e.0.clone());
-        zone.res.insert(GameAddr(game_addr));
 
         let transport = match self.transport.take() {
             Some(f) => f(&mut zone),
@@ -426,7 +453,10 @@ impl ServerBuilder {
         let (handle, rx) = channel();
         zone.res.insert(handle.clone());
         let io: Arc<dyn DatagramIo> = Arc::new(UdpIo {
-            socket: game.try_clone()?,
+            sockets: games
+                .iter()
+                .map(UdpSocket::try_clone)
+                .collect::<std::io::Result<_>>()?,
             metrics: metrics.clone(),
         });
         let game_loop = GameLoop::new(zone, transport, io, rx);
@@ -447,44 +477,54 @@ impl ServerBuilder {
             })?;
 
         let tasks = rt.block_on(async {
-            let game = tokio::net::UdpSocket::from_std(game)?;
-            let ping = tokio::net::UdpSocket::from_std(ping)?;
-            let recv_handle = handle.clone();
-            let recv_metrics = metrics.clone();
-            let recv = tokio::spawn(async move {
-                let mut buf = vec![0u8; 2048];
-                loop {
-                    match game.recv_from(&mut buf).await {
-                        Ok((n, from)) => {
-                            recv_metrics.received(n);
-                            match recv_handle.datagram(from, buf[..n].to_vec()) {
-                                Some(true) => {}
-                                Some(false) => {
-                                    recv_metrics
-                                        .inbound_dropped
-                                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let mut tasks = Vec::new();
+            for (listen, ((game, ping), spec)) in
+                games.into_iter().zip(pings).zip(bound).enumerate()
+            {
+                let game = tokio::net::UdpSocket::from_std(game)?;
+                let ping = tokio::net::UdpSocket::from_std(ping)?;
+                let recv_handle = handle.clone();
+                let recv_metrics = metrics.clone();
+                let recv = tokio::spawn(async move {
+                    let mut buf = vec![0u8; 2048];
+                    loop {
+                        match game.recv_from(&mut buf).await {
+                            Ok((n, from)) => {
+                                recv_metrics.received(n);
+                                match recv_handle.datagram(listen, from, buf[..n].to_vec()) {
+                                    Some(true) => {}
+                                    Some(false) => {
+                                        recv_metrics
+                                            .inbound_dropped
+                                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                    }
+                                    None => break,
                                 }
-                                None => break,
                             }
+                            // e.g. ICMP port unreachable reported on Windows
+                            Err(e) => tracing::trace!(target: "net", "recv: {e}"),
                         }
-                        // e.g. ICMP port unreachable reported on Windows
-                        Err(e) => tracing::trace!(target: "net", "recv: {e}"),
                     }
-                }
-            });
-            let pinger = tokio::spawn(async move {
-                let mut buf = [0u8; 16];
-                loop {
-                    let Ok((n, from)) = ping.recv_from(&mut buf).await else {
-                        continue;
-                    };
-                    let snap = snapshot.lock().map(|g| g.clone()).ok();
-                    if let Some(reply) = snap.and_then(|s| s.reply(&buf[..n])) {
-                        let _ = ping.send_to(&reply, from).await;
+                });
+                let snapshot = snapshot.clone();
+                let connect_as = spec.connect_as;
+                let pinger = tokio::spawn(async move {
+                    let mut buf = [0u8; 16];
+                    loop {
+                        let Ok((n, from)) = ping.recv_from(&mut buf).await else {
+                            continue;
+                        };
+                        let snap = snapshot.lock().map(|g| g.clone()).ok();
+                        if let Some(reply) =
+                            snap.and_then(|s| s.reply_for(&buf[..n], connect_as.as_deref()))
+                        {
+                            let _ = ping.send_to(&reply, from).await;
+                        }
                     }
-                }
-            });
-            let mut tasks = vec![recv, pinger];
+                });
+                tasks.push(recv);
+                tasks.push(pinger);
+            }
             let mut admin_addr = None;
             if let Some(cfg) = admin_cfg {
                 match tokio::net::TcpListener::bind(cfg.listen).await {
@@ -520,6 +560,7 @@ impl ServerBuilder {
             game_addr,
             ping_addr,
             admin_addr,
+            listen_addrs,
         })
     }
 }
@@ -534,6 +575,7 @@ pub struct RunningServer {
     game_addr: SocketAddr,
     ping_addr: SocketAddr,
     admin_addr: Option<SocketAddr>,
+    listen_addrs: Vec<SocketAddr>,
 }
 
 impl RunningServer {
@@ -545,6 +587,11 @@ impl RunningServer {
     /// The bound ping port.
     pub fn ping_addr(&self) -> SocketAddr {
         self.ping_addr
+    }
+
+    /// Every bound game socket, in `[Listen]`, `[Listen1]`.. order.
+    pub fn listen_addrs(&self) -> &[SocketAddr] {
+        &self.listen_addrs
     }
 
     /// The admin API's address, if it is enabled.

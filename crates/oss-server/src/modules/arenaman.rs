@@ -570,7 +570,13 @@ fn on_go_arena(zone: &mut Zone, player: PlayerId, pkt: &[u8]) {
             }
             name
         }
-        -2 | -1 => "0".to_owned(),
+        // a virtual server (Listen:ConnectAs) sends its players to its own
+        // arena, as ASSS's arena placement does
+        -2 | -1 => zone
+            .players
+            .get(player)
+            .and_then(|p| p.connect_as.clone())
+            .unwrap_or_else(|| "0".to_owned()),
         n if n >= 0 => {
             if !has_cap_go(zone, player) {
                 return;

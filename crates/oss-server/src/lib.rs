@@ -22,6 +22,7 @@ pub mod metrics;
 pub mod module;
 pub mod modules;
 pub mod net;
+pub mod opensec;
 pub mod ping;
 pub mod player;
 pub mod prng;

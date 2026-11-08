@@ -137,6 +137,8 @@ pub struct Player {
     pub addr: Option<SocketAddr>,
     /// The virtual server (`Listen:ConnectAs`) the player connected through.
     pub connect_as: Option<String>,
+    /// The connection's encryption (`vie`, `opensec`, ...), for network players.
+    pub cipher: Option<&'static str>,
     /// Current arena.
     pub arena: Option<ArenaId>,
     /// Arena the player asked to enter, while entering.
@@ -194,6 +196,7 @@ impl Player {
             squad: String::new(),
             addr: None,
             connect_as: None,
+            cipher: None,
             arena: None,
             new_arena: None,
             ship: Ship::SPEC,

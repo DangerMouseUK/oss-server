@@ -139,6 +139,9 @@ pub struct Player {
     pub connect_as: Option<String>,
     /// The connection's encryption (`vie`, `opensec`, ...), for network players.
     pub cipher: Option<&'static str>,
+    /// A long-term public key the client proved it holds, when the
+    /// connection's protocol carries one (key-bound identity).
+    pub identity_key: Option<[u8; 32]>,
     /// Current arena.
     pub arena: Option<ArenaId>,
     /// Arena the player asked to enter, while entering.
@@ -197,6 +200,7 @@ impl Player {
             addr: None,
             connect_as: None,
             cipher: None,
+            identity_key: None,
             arena: None,
             new_arena: None,
             ship: Ship::SPEC,

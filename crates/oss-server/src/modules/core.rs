@@ -140,6 +140,13 @@ pub trait Auth: Send + Sync {
     fn authenticate(&self, zone: &mut Zone, player: PlayerId, login: &LoginRequest);
 }
 
+/// Checked before authentication, whichever auth module is loaded (bans).
+/// Returning a result refuses the login with it.
+pub trait LoginGate: Send + Sync {
+    /// `Some(result)` to refuse `player`'s login.
+    fn check(&self, zone: &mut Zone, player: PlayerId, login: &LoginRequest) -> Option<AuthData>;
+}
+
 /// Loads and saves persistent player data (ASSS `Ipersist`). Each call must
 /// eventually be answered with [`player_sync_done`]. Without a provider the
 /// core continues immediately.
@@ -684,7 +691,16 @@ fn process_player_states(zone: &mut Zone) {
                 let auth: Arc<dyn Auth> = zone
                     .iface::<dyn Auth>()
                     .unwrap_or_else(|| Arc::new(DefaultAuth));
+                let refused = match (&login, zone.iface::<dyn LoginGate>()) {
+                    (Some(l), Some(g)) => g.check(zone, pid, l),
+                    _ => None,
+                };
                 match login {
+                    Some(_) if refused.is_some() => {
+                        if let Some(ad) = refused {
+                            auth_done(zone, pid, ad);
+                        }
+                    }
                     Some(l) => auth.authenticate(zone, pid, &l),
                     None => {
                         tracing::warn!(target: "core", pid = pid.0, "can't authenticate player");

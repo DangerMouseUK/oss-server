@@ -270,3 +270,91 @@ fn turf_game() {
         vec![-1, 0]
     );
 }
+
+#[test]
+fn soccer_balls() {
+    let conf = "[Soccer]\nBallCount = 1\nSpawnX = 512\nSpawnY = 512\nSpawnRadius = 3\nSendTime = 100\nGoalDelay = 0\n[Team]\nDesiredTeams = 2\n";
+    let mut h = H::new(conf, None);
+    let a = h.player("alpha", 0);
+    let b = h.player("bravo", 1);
+    let arena = h.arena(a);
+    let ball = oss_server::modules::balls::balls(&h.zone, arena)[0];
+    assert!(
+        ((ball.x >> 4) - 512).abs() <= 4 && ((ball.y >> 4) - 512).abs() <= 4,
+        "{ball:?}"
+    );
+    h.take(a);
+    h.take(b);
+
+    // positions are broadcast periodically
+    h.tick(400);
+    let bp = of(&h.take(b), s2c::kind::BALL);
+    let bp = s2c::BallPosition::decode(bp.last().expect("0x2E")).expect("decode");
+    assert_eq!((bp.pid, bp.time), (-1, ball.time));
+
+    // a stale pickup is refused; a fresh one succeeds
+    let pickup = |time: u32| {
+        let mut buf = Vec::new();
+        c2s::PickupBall { ball_id: 0, time }.encode(&mut buf);
+        buf
+    };
+    h.send(a, &pickup(ball.time.wrapping_add(1)));
+    assert!(of(&h.take(b), s2c::kind::BALL).is_empty());
+    h.send(a, &pickup(ball.time));
+    let bp = s2c::BallPosition::decode(&of(&h.take(b), s2c::kind::BALL)[0]).expect("0x2E");
+    assert_eq!((bp.pid, bp.time), (a.0 as i16, 0));
+    // b can't take a carried ball
+    h.send(b, &pickup(0));
+    assert!(of(&h.take(b), s2c::kind::BALL).is_empty());
+
+    // a fires it
+    let mut buf = Vec::new();
+    c2s::ShootBall {
+        ball_id: 0,
+        x: 8000,
+        y: 8100,
+        x_speed: 50,
+        y_speed: 0,
+        pid: a.0 as i16,
+        time: 777,
+    }
+    .encode(&mut buf);
+    h.send(a, &buf);
+    let bp = s2c::BallPosition::decode(&of(&h.take(b), s2c::kind::BALL)[0]).expect("0x2E");
+    assert_eq!((bp.x, bp.y, bp.time, bp.pid), (8000, 8100, 777, a.0 as i16));
+
+    // only the last shooter can score; the goal respawns the ball
+    let goal = {
+        let mut buf = Vec::new();
+        c2s::Goal {
+            ball_id: 0,
+            x: 600,
+            y: 512,
+        }
+        .encode(&mut buf);
+        buf
+    };
+    h.send(b, &goal);
+    assert!(of(&h.take(b), s2c::kind::BALL).is_empty());
+    h.send(a, &goal);
+    let bp = s2c::BallPosition::decode(&of(&h.take(b), s2c::kind::BALL)[0]).expect("0x2E");
+    assert_eq!(bp.pid, -1);
+    assert!(((bp.x >> 4) - 512).abs() <= 4);
+    let stats = h
+        .zone
+        .iface::<dyn oss_server::modules::stats::Stats>()
+        .expect("stats");
+    use oss_server::modules::stats::stat;
+    assert_eq!(stats.get(&h.zone, a, stat::BALL_GOALS), 1);
+    assert_eq!(stats.get(&h.zone, a, stat::BALL_CARRIES), 1);
+
+    // a carrier who changes ship drops the ball
+    let ball = oss_server::modules::balls::balls(&h.zone, arena)[0];
+    h.send(b, &pickup(ball.time));
+    h.send(b, &[c2s::kind::SET_SHIP, 8]);
+    let ball = oss_server::modules::balls::balls(&h.zone, arena)[0];
+    assert_eq!(
+        (ball.state, ball.carrier),
+        (oss_server::modules::balls::BallState::OnMap, None)
+    );
+}

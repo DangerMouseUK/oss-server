@@ -55,6 +55,10 @@ pub mod stat {
     pub const FLAG_GAMES_LOST: u16 = 207;
     /// Turf flags claimed.
     pub const TURF_TAGS: u16 = 208;
+    /// Ball pickups.
+    pub const BALL_CARRIES: u16 = 300;
+    /// Goals scored.
+    pub const BALL_GOALS: u16 = 302;
 }
 
 /// Statistics access (ASSS `Istats`).
@@ -201,6 +205,7 @@ impl Module for BasicStatsModule {
             }
         });
         register_flag_stats(zone, me);
+        register_ball_stats(zone, me);
         Ok(())
     }
 }
@@ -303,6 +308,21 @@ fn register_flag_stats(zone: &mut Zone, me: Owner) {
     zone.on::<super::fg_turf::TurfTag>(me, Scope::Global, |z, ev| {
         if let Some(st) = z.iface::<dyn Stats>() {
             st.increment(z, ev.player, stat::TURF_TAGS, 1);
+        }
+    });
+}
+
+/// basicstats' ball counters (ASSS `mybpickup`/`mygoal`).
+pub(crate) fn register_ball_stats(zone: &mut Zone, me: Owner) {
+    use super::balls::{BallPickup, Goal};
+    zone.on::<BallPickup>(me, Scope::Global, |z, ev| {
+        if let Some(st) = z.iface::<dyn Stats>() {
+            st.increment(z, ev.player, stat::BALL_CARRIES, 1);
+        }
+    });
+    zone.on::<Goal>(me, Scope::Global, |z, ev| {
+        if let Some(st) = z.iface::<dyn Stats>() {
+            st.increment(z, ev.player, stat::BALL_GOALS, 1);
         }
     });
 }

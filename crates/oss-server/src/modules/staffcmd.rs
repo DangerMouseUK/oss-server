@@ -387,11 +387,17 @@ fn c_warpto(zone: &mut Zone, inv: &Invocation<'_>) {
     };
     let to = targets(zone, inv);
     send_to(zone, &to, &WarpTo { x, y });
+    for p in &to {
+        super::anticheat::excuse(zone, *p, super::anticheat::Excuse::Jump);
+    }
 }
 
 fn c_shipreset(zone: &mut Zone, inv: &Invocation<'_>) {
     let to = targets(zone, inv);
     send_to(zone, &to, &ShipReset {});
+    for p in &to {
+        super::anticheat::excuse(zone, *p, super::anticheat::Excuse::Refill);
+    }
 }
 
 fn c_prize(zone: &mut Zone, inv: &Invocation<'_>) {
@@ -415,6 +421,9 @@ fn c_prize(zone: &mut Zone, inv: &Invocation<'_>) {
     };
     let to = targets(zone, inv);
     send_to(zone, &to, &PrizeReceive { count, prize });
+    for p in &to {
+        super::anticheat::prize_taken(zone, *p, i32::from(prize));
+    }
 }
 
 fn c_lock(zone: &mut Zone, inv: &Invocation<'_>) {

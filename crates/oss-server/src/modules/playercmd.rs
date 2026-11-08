@@ -70,6 +70,24 @@ fn c_sheep(zone: &mut Zone, inv: &Invocation<'_>) {
     }
 }
 
+fn c_serverkey(zone: &mut Zone, inv: &Invocation<'_>) {
+    let key = zone
+        .res
+        .get::<crate::opensec::ServerPublicKey>()
+        .map(|k| k.hex());
+    let cipher = zone
+        .players
+        .get(inv.sender)
+        .and_then(|p| p.cipher)
+        .unwrap_or("none");
+    let text = match key {
+        Some(k) => format!("OpenSec server key: {k}"),
+        None => "OpenSec is off on this server.".to_owned(),
+    };
+    message(zone, inv.sender, &text);
+    message(zone, inv.sender, &format!("Your connection: {cipher}"));
+}
+
 fn c_version(zone: &mut Zone, inv: &Invocation<'_>) {
     message(
         zone,
@@ -105,6 +123,19 @@ impl Module for PlayerCmdModule {
             c_version,
         );
         zone.add_command(me, "sheep", None, None, c_sheep);
+        zone.add_command(
+            me,
+            "serverkey",
+            None,
+            Some(
+                "Module: playercmd
+Targets: none
+Args: none
+Shows the server's OpenSec public key, for pinning, and your connection's encryption.
+",
+            ),
+            c_serverkey,
+        );
         Ok(())
     }
 }

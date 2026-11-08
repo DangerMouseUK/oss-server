@@ -80,6 +80,11 @@ impl SubspaceTransport {
         {
             server.add_acceptor(Box::new(Shared(a)));
         }
+        // OpenSec hellos are 42 bytes, VIE requests 8: each acceptor only
+        // answers its own
+        if let Some(a) = crate::opensec::acceptor(zone) {
+            server.add_acceptor(Box::new(a));
+        }
         server.add_acceptor(Box::new(VieAcceptor {
             accept_continuum: false,
         }));
@@ -117,7 +122,15 @@ impl SubspaceTransport {
                             if let Some(p) = zone.players.get_mut(pid) {
                                 p.connect_as = connect_as;
                             }
-                            tracing::info!(target: "net", addr = %addr.1, listen = addr.0, pid = pid.0, ?kind, "client connected");
+                            let cipher = self
+                                .server
+                                .connection(&addr)
+                                .and_then(|c| c.cipher_name())
+                                .unwrap_or("none");
+                            if let Some(p) = zone.players.get_mut(pid) {
+                                p.cipher = Some(cipher);
+                            }
+                            tracing::info!(target: "net", addr = %addr.1, listen = addr.0, pid = pid.0, ?kind, cipher, "client connected");
                             self.players.insert(addr, pid);
                             self.addrs.insert(pid, addr);
                         }

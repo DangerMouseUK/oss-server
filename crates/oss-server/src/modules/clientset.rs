@@ -28,6 +28,9 @@ pub trait ClientSettings: SendSettings {
     /// The settings checksum the player's client should report, or `None` if
     /// the player isn't playing.
     fn checksum(&self, zone: &Zone, player: PlayerId, key: u32) -> Option<u32>;
+    /// The settings block the player's client was sent (with arena and
+    /// player overrides), or `None` if the player isn't in an arena.
+    fn effective(&self, zone: &Zone, player: PlayerId) -> Option<clientset::SettingsBlock>;
     /// A weighted random prize for the arena (0 if all weights are 0).
     fn random_prize(
         &self,
@@ -82,6 +85,10 @@ impl SendSettings for ClientSet {
 }
 
 impl ClientSettings for ClientSet {
+    fn effective(&self, zone: &Zone, player: PlayerId) -> Option<clientset::SettingsBlock> {
+        effective(zone, player)
+    }
+
     fn arena_override(&self, zone: &mut Zone, arena: ArenaId, key: OverrideKey, value: i32) {
         if let Some(a) = zone.arenas.get_mut(arena) {
             a.ext.get_or_default::<ArenaCs>().overrides.set(key, value);

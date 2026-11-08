@@ -760,7 +760,7 @@ impl FreqManager for BalancedFreqs {
             return;
         };
         // too lagged to play: start in spectator mode
-        if super::lagdata::no_ship(zone, player) {
+        if super::lagdata::no_ship(zone, player) || super::anticheat::no_ship(zone, player) {
             *ship = Ship::SPEC;
         }
         *freq = if ship.is_spec() {
@@ -779,6 +779,15 @@ impl FreqManager for BalancedFreqs {
             *freq = spec;
         } else if super::lagdata::no_ship(zone, player) {
             super::chat::message(zone, player, "You have too much lag to play in this arena.");
+            if let Some(p) = zone.players.get(player) {
+                (*ship, *freq) = (p.ship, p.freq);
+            }
+        } else if super::anticheat::no_ship(zone, player) {
+            super::chat::message(
+                zone,
+                player,
+                "The anti-cheat checks are keeping you in spectator mode for now.",
+            );
             if let Some(p) = zone.players.get(player) {
                 (*ship, *freq) = (p.ship, p.freq);
             }

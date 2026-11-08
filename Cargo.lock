@@ -850,6 +850,7 @@ dependencies = [
  "oss-formats",
  "oss-net",
  "oss-proto",
+ "oss-sim",
  "rusqlite",
  "serde",
  "serde_json",
@@ -857,6 +858,13 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "oss-sim"
+version = "0.1.0"
+dependencies = [
+ "oss-proto",
 ]
 
 [[package]]

@@ -16,6 +16,7 @@ repository = "https://github.com/DangerMouseUK/oss-server"
 oss-proto = { path = "../oss-core/crates/oss-proto" }
 oss-net = { path = "../oss-core/crates/oss-net" }
 oss-formats = { path = "../oss-core/crates/oss-formats" }
+oss-sim = { path = "../oss-core/crates/oss-sim" }
 
 [workspace.lints.rust]
 unsafe_code = "deny"

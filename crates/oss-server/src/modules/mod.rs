@@ -3,6 +3,7 @@
 //! Each module is registered under its own name and its ASSS name(s), so an
 //! ASSS `conf/modules.conf` loads the equivalent modules unchanged.
 
+pub mod anticheat;
 pub mod arenaman;
 pub mod auth_file;
 pub mod balls;
@@ -78,6 +79,7 @@ pub const DEFAULT_MODULES: &[&str] = &[
     "playercmd",
     "staffcmd",
     "admin",
+    "anticheat",
 ];
 
 /// Every module shipped with this crate, under its own name and its ASSS name.
@@ -93,6 +95,7 @@ pub fn builtin_catalog() -> ModuleCatalog {
     c.register("cmdman", &[], || cmdman::CmdManModule);
     c.register("chat", &[], || chat::ChatModule);
     c.register("chatnet", &[], || chatnet::ChatNetModule);
+    c.register("anticheat", &[], || anticheat::AntiCheatModule);
     c.register("directory", &[], || directory::DirectoryModule);
     c.register("obscene", &[], || obscene::ObsceneModule);
     c.register("game", &[], || game::GameModule);

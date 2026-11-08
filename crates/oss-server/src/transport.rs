@@ -127,8 +127,10 @@ impl SubspaceTransport {
                                 .connection(&addr)
                                 .and_then(|c| c.cipher_name())
                                 .unwrap_or("none");
+                            let identity = self.server.connection(&addr).and_then(|c| c.peer_key());
                             if let Some(p) = zone.players.get_mut(pid) {
                                 p.cipher = Some(cipher);
+                                p.identity_key = identity;
                             }
                             tracing::info!(target: "net", addr = %addr.1, listen = addr.0, pid = pid.0, ?kind, cipher, "client connected");
                             self.players.insert(addr, pid);

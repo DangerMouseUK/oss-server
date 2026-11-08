@@ -43,3 +43,8 @@ privcmd_send
 cmd_redirect
 privcmd_redirect
 
+
+; oss-server: persistent bans by name, machine id, identity key (auth_ban)
+privcmd_ban
+cmd_banlist
+cmd_unban

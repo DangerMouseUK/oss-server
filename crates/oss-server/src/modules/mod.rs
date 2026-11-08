@@ -8,6 +8,7 @@ pub mod arenaman;
 pub mod auth_file;
 pub mod balls;
 pub mod banners;
+pub mod bans;
 pub mod billing_ssc;
 pub mod bricks;
 pub mod capman;
@@ -58,6 +59,7 @@ pub const DEFAULT_MODULES: &[&str] = &[
     "stats",
     "basicstats",
     "auth_file",
+    "auth_ban",
     "security",
     "points_kill",
     "flagcore",
@@ -138,6 +140,7 @@ pub fn builtin_catalog() -> ModuleCatalog {
         jackpot::PointsFlagModule
     });
     c.register("auth_file", &[], || auth_file::AuthFileModule);
+    c.register("auth_ban", &["bans"], || bans::BansModule);
     c.register("playercmd", &[], || playercmd::PlayerCmdModule);
     c.register("staffcmd", &["admincmd"], || staffcmd::StaffCmdModule);
     c

@@ -27,6 +27,12 @@
 //!   with one more allowed for flag carriers and, with `Soccer:UseFlagger`,
 //!   ball carriers (the `Flag:Flagger*` upgrades).
 //! - **flood**: more than `MaxPositionsPerSecond` position packets a second.
+//! - **items**: repels, bursts, decoys, thors and bricks used when the ship
+//!   can't hold one. The server keeps an upper bound per item: what the ship
+//!   spawns with (each item's maximum when `InitialBounty` hands out random
+//!   prizes the server can't replay), plus prizes it saw (greens, `?prize`;
+//!   a multiprize makes every item unknown again), less the uses it saw.
+//!   Rockets and portals are never seen in use, so they aren't counted.
 //!
 //! **Physics checks** (`MotionChecks`, on when the module is enabled), using
 //! `oss-sim`'s validation (the same physics the client runs): between two
@@ -39,8 +45,10 @@
 //! clock check's long window averages away. Teleport, speed and rotation
 //! count only `MotionMargin` percent past their bound, energy `EnergyMargin`
 //! percent of maximum energy past it. Jumps the server caused or can't see
-//! are excused: respawns, ship changes, `?warpto`, warp prizes, flashes
-//! (warps, portals), turrets; refills after deaths, prizes and ship resets;
+//! are excused: respawns, ship changes, `?warpto`, warp prizes, turrets, and
+//! flash-bit jumps backed by evidence (a portal the ship may hold, or a
+//! warp's energy signature: the client sets the flash bit itself, so on its
+//! own it explains nothing); refills after deaths, prizes and ship resets;
 //! enemy repels nearby; free shots under Super.
 //!
 //! **Trust.** Each finding lowers the player's trust (100 = clean) by its
@@ -105,9 +113,11 @@ pub enum Check {
     Energy,
     /// Stealth, cloak, X-radar or antiwarp without the capability.
     Status,
+    /// Used an item (repel, burst, decoy, thor, brick) the ship can't hold.
+    Item,
 }
 
-const CHECKS: usize = 10;
+const CHECKS: usize = 11;
 
 impl Check {
     /// Short name for logs and `?trust`.
@@ -123,6 +133,7 @@ impl Check {
             Check::Wall => "wall",
             Check::Energy => "energy",
             Check::Status => "status",
+            Check::Item => "item",
         }
     }
 
@@ -225,6 +236,7 @@ impl AcConfig {
                 i("WallWeight", 30),
                 i("EnergyWeight", 15),
                 i("StatusWeight", 25),
+                i("ItemWeight", 25),
             ],
             clock_window: u64::try_from(i("ClockWindow", 20)).unwrap_or(20).max(5) * 100,
             clock_windows: u("ClockWindows", 2).max(1),
@@ -255,6 +267,9 @@ struct ShipLimits {
     repel_distance: u32,
     settings: oss_sim::ShipSettings,
     motion: Limits,
+    /// spawning hands out random prizes the server can't replay
+    random_spawn: bool,
+    items_max: oss_sim::Items,
 }
 
 /// Something the server did (or can't see) that excuses the next sample.
@@ -291,6 +306,8 @@ struct Ac {
     jumped: bool,
     refilled: bool,
     super_until: Option<Ticks>,
+    /// upper bound on what the ship holds (items, capabilities, levels)
+    bound: Option<oss_sim::Loadout>,
 }
 
 impl Ac {
@@ -370,7 +387,84 @@ fn limits_for(zone: &Zone, p: PlayerId, arena: ArenaId, ship: Ship) -> Option<Sh
         repel_distance: s.repel_distance,
         settings: ss,
         motion: Limits::new(&ss, &s),
+        random_spawn: ss.initial_bounty > 0 && s.prize_weight_total() > 0,
+        items_max: oss_sim::Items {
+            repels: ss.repel_max,
+            bursts: ss.burst_max,
+            decoys: ss.decoy_max,
+            thors: ss.thor_max,
+            bricks: ss.brick_max,
+            rockets: ss.rocket_max,
+            portals: ss.portal_max,
+        },
     })
+}
+
+/// The bound a ship spawns with: exact when spawning is deterministic,
+/// otherwise every item at its maximum.
+fn spawn_bound(lim: &ShipLimits) -> oss_sim::Loadout {
+    let mut l = oss_sim::Loadout::initial(&lim.settings);
+    if lim.random_spawn {
+        l.items = lim.items_max;
+    }
+    l
+}
+
+/// The player's ship limits (cached per ship and arena) and item bound.
+fn ensure_limits(zone: &mut Zone, p: PlayerId) -> Option<ShipLimits> {
+    let pl = zone.players.get(p)?;
+    let (arena, ship) = (pl.arena?, pl.ship);
+    if ship.is_spec() {
+        return None;
+    }
+    let cached = pl
+        .ext
+        .get::<Ac>()
+        .and_then(|a| a.limits)
+        .filter(|l| l.ship == ship && l.arena == arena);
+    let lim = match cached {
+        Some(l) => l,
+        None => limits_for(zone, p, arena, ship)?,
+    };
+    let a = state(zone, p)?;
+    a.limits = Some(lim);
+    if a.bound.is_none() {
+        a.bound = Some(spawn_bound(&lim));
+    }
+    Some(lim)
+}
+
+/// Item use: a finding if the bound says the ship can't hold one, otherwise
+/// one fewer.
+fn use_item(zone: &mut Zone, p: PlayerId, arena: ArenaId, cfg: &AcConfig, item: &'static str) {
+    let empty = {
+        let Some(b) = state(zone, p).and_then(|a| a.bound.as_mut()) else {
+            return;
+        };
+        let n = match item {
+            "repel" => &mut b.items.repels,
+            "burst" => &mut b.items.bursts,
+            "decoy" => &mut b.items.decoys,
+            "thor" => &mut b.items.thors,
+            _ => &mut b.items.bricks,
+        };
+        if *n == 0 {
+            true
+        } else {
+            *n -= 1;
+            false
+        }
+    };
+    if empty {
+        found(
+            zone,
+            p,
+            arena,
+            cfg,
+            Check::Item,
+            format!("used a {item} the ship can't hold"),
+        );
+    }
 }
 
 /// Maps for the motion checks, by map checksum. A [`MotionMap`] borrows its
@@ -637,17 +731,15 @@ fn on_position(zone: &mut Zone, p: PlayerId, pkt: &[u8]) {
         return;
     }
     // the ship's limits, recomputed when ship or arena changes
-    let cached = zone
-        .players
-        .get(p)
-        .and_then(|x| x.ext.get::<Ac>())
-        .and_then(|a| a.limits)
-        .filter(|l| l.ship == ship && l.arena == arena);
-    let Some(lim) = cached.or_else(|| limits_for(zone, p, arena, ship)) else {
+    let Some(lim) = ensure_limits(zone, p) else {
         return;
     };
-    if let Some(a) = state(zone, p) {
-        a.limits = Some(lim);
+    match pos.weapon.kind() {
+        weapon_type::REPEL => use_item(zone, p, arena, &cfg, "repel"),
+        weapon_type::BURST => use_item(zone, p, arena, &cfg, "burst"),
+        weapon_type::DECOY => use_item(zone, p, arena, &cfg, "decoy"),
+        weapon_type::THOR => use_item(zone, p, arena, &cfg, "thor"),
+        _ => {}
     }
     // Flag:Flagger* upgrades apply to flag carriers, and to ball carriers
     // when Soccer:UseFlagger is set
@@ -749,6 +841,11 @@ fn weapon_checks(
     Some(fired)
 }
 
+/// A warp to spawn needs full energy and leaves almost none.
+fn warp_signature(prev: &Sample, next: &Sample, max_energy: i32) -> bool {
+    i64::from(prev.energy) * 100 >= i64::from(max_energy) * 90 && next.energy * 2 < prev.energy
+}
+
 #[allow(clippy::too_many_arguments)]
 fn motion_checks(
     zone: &mut Zone,
@@ -784,6 +881,7 @@ fn motion_checks(
         return;
     }
     let (jumped, refilled, spent) = (a.jumped, a.refilled, a.spent);
+    let portal_held = a.bound.is_some_and(|b| b.items.portals > 0);
     a.prev = Some((next, now));
     a.spent = 0;
     a.jumped = false;
@@ -811,8 +909,23 @@ fn motion_checks(
     let over = 100 + cfg.motion_margin;
     for f in verdict.findings() {
         let (check, detail) = match f {
-            // a flash means a warp or portal, which the server can't see
-            Finding::Teleport { flash: true, .. } => continue,
+            // The client sets the flash bit itself, so it explains a jump
+            // only with evidence: a portal the ship may hold, or the energy
+            // signature of a warp to spawn (full energy before, drained after)
+            Finding::Teleport { flash: true, .. }
+                if portal_held || warp_signature(&prev, &next, lim.motion.max_energy) =>
+            {
+                continue;
+            }
+            Finding::Teleport {
+                flash: true,
+                percent,
+            } => (
+                Check::Teleport,
+                format!(
+                    "jumped {percent}% of the ship's reach with the flash bit but no portal or warp"
+                ),
+            ),
             Finding::Teleport { percent, .. } if percent > over => (
                 Check::Teleport,
                 format!(
@@ -911,6 +1024,13 @@ fn c_trust(zone: &mut Zone, inv: &Invocation<'_>) {
     }
 }
 
+/// A respawn (or `?shipreset`): the ship holds what it spawns with again.
+pub fn respawned(zone: &mut Zone, p: PlayerId) {
+    if let Some(a) = zone.players.get_mut(p).and_then(|x| x.ext.get_mut::<Ac>()) {
+        a.bound = a.limits.as_ref().map(spawn_bound);
+    }
+}
+
 /// SubSpace prize numbers the physics checks care about.
 const PRIZE_WARP: i32 = 7;
 const PRIZE_SUPER: i32 = 17;
@@ -920,6 +1040,19 @@ const PRIZE_MULTI: i32 = 25;
 /// energy (full charge, or a capability the arena doesn't allow); a warp
 /// moves the ship; Super makes shots free for up to `SuperTime`.
 pub fn prize_taken(zone: &mut Zone, p: PlayerId, prize: i32) {
+    if let Some(lim) = ensure_limits(zone, p)
+        && let Some(b) = state(zone, p).and_then(|a| a.bound.as_mut())
+    {
+        if prize.abs() == PRIZE_MULTI {
+            // random extra prizes: anything may be held now
+            b.items = lim.items_max;
+        } else if let Some(pz) = u8::try_from(prize.unsigned_abs())
+            .ok()
+            .and_then(oss_sim::Prize::from_id)
+        {
+            b.apply(&lim.settings, pz, prize < 0);
+        }
+    }
     let jump = prize == PRIZE_WARP || prize == PRIZE_MULTI;
     excuse(zone, p, if jump { Excuse::Both } else { Excuse::Refill });
     if prize == PRIZE_SUPER || prize == PRIZE_MULTI {
@@ -964,6 +1097,7 @@ impl Module for AntiCheatModule {
                 a.last_bomb = None;
                 a.last_mine = None;
                 a.prev = None;
+                a.bound = None;
             }
         });
         zone.on::<super::core::PlayerAction>(me, Scope::Global, |z, ev| {
@@ -977,11 +1111,24 @@ impl Module for AntiCheatModule {
                 a.clock_start = None;
                 a.clock_streak = 0;
                 a.prev = None;
+                a.bound = None;
             }
         });
         // deaths respawn the ship somewhere else with full energy
         zone.on::<super::game::KillAnnounced>(me, Scope::Global, |z, ev| {
             excuse(z, ev.killed, Excuse::Both);
+            respawned(z, ev.killed);
+        });
+        zone.on_packet(me, c2s::kind::DROP_BRICK, |z, p, _| {
+            let Some(arena) = z.players.get(p).and_then(|x| x.arena) else {
+                return;
+            };
+            if !enabled_in(z, arena) || exempt(z, p) || ensure_limits(z, p).is_none() {
+                return;
+            }
+            if let Some(cfg) = arena_cfg(z, arena) {
+                use_item(z, p, arena, &cfg, "brick");
+            }
         });
         // prizes: warp moves, full charge refills, super makes shots free
         zone.on::<super::game::GreenPickup>(me, Scope::Global, |z, ev| {

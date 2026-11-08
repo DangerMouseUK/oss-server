@@ -127,10 +127,8 @@ impl SubspaceTransport {
                                 .connection(&addr)
                                 .and_then(|c| c.cipher_name())
                                 .unwrap_or("none");
-                            let identity = self.server.connection(&addr).and_then(|c| c.peer_key());
                             if let Some(p) = zone.players.get_mut(pid) {
                                 p.cipher = Some(cipher);
-                                p.identity_key = identity;
                             }
                             tracing::info!(target: "net", addr = %addr.1, listen = addr.0, pid = pid.0, ?kind, cipher, "client connected");
                             self.players.insert(addr, pid);
@@ -144,6 +142,17 @@ impl SubspaceTransport {
                 }
                 Event::Packet(p) => {
                     if let Some(&pid) = self.players.get(&addr) {
+                        // an OpenSec identity is proven only once the client's
+                        // first record authenticates: pick it up with the login
+                        if matches!(
+                            p.first(),
+                            Some(&oss_proto::c2s::kind::LOGIN | &oss_proto::c2s::kind::CONT_LOGIN)
+                        ) && let Some(key) =
+                            self.server.connection(&addr).and_then(|c| c.peer_key())
+                            && let Some(pl) = zone.players.get_mut(pid)
+                        {
+                            pl.identity_key = Some(key);
+                        }
                         zone.handle_packet(pid, &p);
                     }
                 }

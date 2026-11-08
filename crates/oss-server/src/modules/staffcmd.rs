@@ -397,6 +397,7 @@ fn c_shipreset(zone: &mut Zone, inv: &Invocation<'_>) {
     send_to(zone, &to, &ShipReset {});
     for p in &to {
         super::anticheat::excuse(zone, *p, super::anticheat::Excuse::Refill);
+        super::anticheat::respawned(zone, *p);
     }
 }
 
@@ -422,7 +423,9 @@ fn c_prize(zone: &mut Zone, inv: &Invocation<'_>) {
     let to = targets(zone, inv);
     send_to(zone, &to, &PrizeReceive { count, prize });
     for p in &to {
-        super::anticheat::prize_taken(zone, *p, i32::from(prize));
+        for _ in 0..count.unsigned_abs().clamp(1, 100) {
+            super::anticheat::prize_taken(zone, *p, i32::from(prize));
+        }
     }
 }
 

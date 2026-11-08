@@ -91,6 +91,22 @@ impl Client {
     }
 
     fn play(&mut self, name: &str) {
+        assert_eq!(self.login(name), 0);
+        let mut buf = Vec::new();
+        GoArena {
+            ship: 8,
+            x_res: 1024,
+            y_res: 768,
+            arena_type: -1,
+            ..Default::default()
+        }
+        .encode(&mut buf);
+        self.send(&buf);
+        self.wait_for(s2c::kind::ENTERING_ARENA);
+    }
+
+    /// Logs in; returns the login result code.
+    fn login(&mut self, name: &str) -> u8 {
         let mut buf = Vec::new();
         Login {
             kind: c2s::kind::LOGIN,
@@ -112,18 +128,7 @@ impl Client {
         self.send(&buf);
         let lr = self.wait_for(s2c::kind::LOGIN_RESPONSE);
         let lr = s2c::LoginResponse::decode(lr.last().expect("lr")).expect("decode");
-        assert_eq!(lr.code, 0);
-        buf.clear();
-        GoArena {
-            ship: 8,
-            x_res: 1024,
-            y_res: 768,
-            arena_type: -1,
-            ..Default::default()
-        }
-        .encode(&mut buf);
-        self.send(&buf);
-        self.wait_for(s2c::kind::ENTERING_ARENA);
+        lr.code
     }
 }
 
@@ -214,4 +219,78 @@ fn opensec_end_to_end() {
     assert_eq!(public_key(&again), key);
     assert!(again.stop().is_some());
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn identity_keys_and_key_bans() {
+    use oss_net::opensec::IdentityKey;
+    use oss_server::modules::bans::{self, Ban};
+    let src = oss_server::config::MemSource::new([
+        ("conf/global.conf", ""),
+        (
+            "conf/passwd.conf",
+            "[General]
+AllowUnknown = yes
+",
+        ),
+        ("arenas/(default)/arena.conf", ""),
+    ]);
+    let server = ServerBuilder::with_source(src)
+        .bind(([127, 0, 0, 1], 0).into())
+        .start()
+        .expect("server");
+    let addr = server.listen_addrs()[0];
+    let key = public_key(&server);
+    let me = IdentityKey::generate(&os_entropy());
+    let connect = |id: &IdentityKey| {
+        let mut c = Client::new(
+            addr,
+            Box::new(
+                OpenSecClientHandshake::new(&os_entropy(), Some(key)).with_identity(id.clone()),
+            ),
+        );
+        assert!(c.try_connect(10));
+        c
+    };
+
+    // the server learns the identity with the login
+    let mut a = connect(&me);
+    a.play("keyed");
+    let (tx, rx) = mpsc::channel();
+    server.handle().run(move |z| {
+        let k = z.players.find_by_name("keyed").and_then(|p| p.identity_key);
+        let _ = tx.send(k);
+    });
+    assert_eq!(
+        rx.recv_timeout(Duration::from_secs(5)).expect("zone"),
+        Some(me.public())
+    );
+
+    // a ban on the key holds under any name; another key gets in
+    let public = me.public();
+    server.handle().run(move |z| {
+        bans::add(
+            z,
+            &Ban {
+                id: 0,
+                name: None,
+                ip: None,
+                machine_id: None,
+                key: Some(public),
+                expires: None,
+                reason: "test".into(),
+                by: "test".into(),
+            },
+        );
+    });
+    drop(a);
+    let mut b = connect(&me);
+    assert_eq!(
+        b.login("renamed"),
+        oss_server::modules::core::auth_code::LOCKED_OUT
+    );
+    let mut c = connect(&IdentityKey::generate(&os_entropy()));
+    assert_eq!(c.login("someone"), 0);
+    drop((b, c));
+    assert!(server.stop().is_some());
 }

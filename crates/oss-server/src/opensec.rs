@@ -7,6 +7,9 @@
 //!
 //! `[OpenSec]` in `global.conf`:
 //! - `Enabled` (default 1): accept OpenSec connections.
+//! - `ClientIdentities` (default 1): accept clients' long-term identity keys
+//!   (`CLIENT_AUTH`), which bans can then match (`Player::identity_key`,
+//!   known once the login arrives).
 //! - `KeyFile` (default `data/opensec.key`, under the zone directory): the
 //!   server's secret key as 64 hex digits. It is created on first start; keep
 //!   it private and keep it, since clients that pinned the public key will
@@ -123,7 +126,12 @@ pub fn acceptor(zone: &mut Zone) -> Option<OpenSecAcceptor> {
     let public = ServerPublicKey(key.public());
     tracing::info!(target: "opensec", public_key = %public.hex(), "OpenSec enabled");
     zone.res.insert(public);
-    Some(OpenSecAcceptor::new(Some(key), entropy))
+    let acceptor = OpenSecAcceptor::new(Some(key), entropy);
+    if zone.cfg.global().get_int("OpenSec", "ClientIdentities", 1) != 0 {
+        Some(acceptor.with_client_identities())
+    } else {
+        Some(acceptor)
+    }
 }
 
 #[cfg(test)]

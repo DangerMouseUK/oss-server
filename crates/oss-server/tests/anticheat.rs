@@ -382,3 +382,78 @@ fn teleports_speeds_and_energy() {
     h.send_pos(p, t0 + 10_040, 12000, 12000, 0, 1000, 0, 0);
     assert_eq!(h.seen().last(), Some(&Check::Teleport));
 }
+
+#[test]
+fn item_counts() {
+    let items = "[Warbird]\nInitialRepel = 2\nRepelMax = 3\nThorMax = 0\n";
+    let mut h = H::with("Enabled = 1\nCooldown = 0\n", items);
+    let p = h.player("alice");
+    // a thor on a ship that can never hold one
+    h.pos(p, 1000, weapon_type::THOR, 0);
+    assert_eq!(h.seen(), vec![Check::Item]);
+    // two repels to start with: the third has nothing behind it
+    h.pos(p, 1100, weapon_type::REPEL, 0);
+    h.pos(p, 1200, weapon_type::REPEL, 0);
+    assert_eq!(h.seen().len(), 1);
+    h.pos(p, 1300, weapon_type::REPEL, 0);
+    assert_eq!(h.seen(), vec![Check::Item, Check::Item]);
+    // a repel prize (21) gives one more
+    oss_server::modules::anticheat::prize_taken(&mut h.zone, p, 21);
+    h.pos(p, 1400, weapon_type::REPEL, 0);
+    assert_eq!(h.seen().len(), 2);
+}
+
+#[test]
+fn random_spawn_prizes_make_items_unknown() {
+    // InitialBounty hands out random prizes the server can't replay, so any
+    // item up to its maximum may be held
+    let items =
+        "[Warbird]\nInitialRepel = 0\nRepelMax = 3\nInitialBounty = 10\n[PrizeWeight]\nRepel = 1\n";
+    let mut h = H::with("Enabled = 1\nCooldown = 0\n", items);
+    let p = h.player("alice");
+    for i in 0..3 {
+        h.pos(p, 1000 + i * 100, weapon_type::REPEL, 0);
+    }
+    assert!(h.seen().is_empty(), "{:?}", h.seen());
+    h.pos(p, 1400, weapon_type::REPEL, 0);
+    assert_eq!(h.seen(), vec![Check::Item]);
+}
+
+#[test]
+fn flash_bit_alone_explains_nothing() {
+    use oss_proto::position::status;
+    let mut h = H::with(
+        "Enabled = 1\nCooldown = 0\n",
+        "[Warbird]\nPortalMax = 0\nInitialPortal = 0\n",
+    );
+    let p = h.player("alice");
+    let t0 = h.t as u32;
+    let flash_jump = |h: &mut H, t: u32, x: i16, e_before: i16, e_after: i16| {
+        h.tick(10);
+        h.send_pos(p, t, 4000, 4000, 0, e_before, 0, 0);
+        h.tick(10);
+        let mut buf = Vec::new();
+        C2SPosition {
+            time: t + 10,
+            x,
+            y: 4000,
+            energy: e_after,
+            status: status::FLASH,
+            ..Default::default()
+        }
+        .encode(&mut buf);
+        h.zone.handle_packet(p, &buf);
+    };
+    // pinning the flash bit doesn't excuse a jump
+    flash_jump(&mut h, t0, 9000, 1000, 1000);
+    assert_eq!(h.seen(), vec![Check::Teleport]);
+    // a real warp to spawn: full energy before, drained after (the server
+    // put the ship back and refilled it first, as after a death)
+    oss_server::modules::anticheat::excuse(
+        &mut h.zone,
+        p,
+        oss_server::modules::anticheat::Excuse::Both,
+    );
+    flash_jump(&mut h, t0 + 100, 9000, 1700, 1);
+    assert_eq!(h.seen().len(), 1, "{:?}", h.seen());
+}

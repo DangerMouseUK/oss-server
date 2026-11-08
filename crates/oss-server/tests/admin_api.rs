@@ -161,6 +161,24 @@ fn admin_api() {
     let ev: serde_json::Value = serde_json::from_str(&ws_text(&mut ws)).expect("event");
     assert_eq!(ev["type"], "login");
     assert_eq!(ev["pid"], 3);
+    server.handle().run(|z| {
+        z.fire(&oss_server::modules::anticheat::CheatSuspected {
+            player: PlayerId(3),
+            arena: oss_server::arena::ArenaId(0),
+            check: oss_server::modules::anticheat::Check::Clock,
+            detail: "client clock running 20.0% fast".into(),
+            trust: 70,
+        });
+    });
+    let ev: serde_json::Value = serde_json::from_str(&ws_text(&mut ws)).expect("event");
+    assert_eq!(
+        (
+            ev["type"].as_str(),
+            ev["check"].as_str(),
+            ev["trust"].as_i64()
+        ),
+        (Some("cheat_suspected"), Some("clock"), Some(70))
+    );
 
     drop(ws);
     assert!(server.stop().is_some());

@@ -13,7 +13,8 @@
 //! - `POST /api/reload`: re-read changed config files
 //! - `POST /api/modules/{name}` / `DELETE /api/modules/{name}`: load / unload
 //! - `GET /api/events`: WebSocket stream of JSON events (logins, arena
-//!   changes, kills, public chat) from the `admin` module.
+//!   changes, kills, public chat, anti-cheat findings) from the `admin`
+//!   module.
 //!
 //! Handlers run their zone work on the game thread through
 //! [`ZoneHandle::run`].
@@ -472,6 +473,14 @@ impl Module for AdminModule {
                 json!({"type": "kill", "arena": arena_name(z, Some(ev.arena)),
                        "killer": player_name(z, ev.killer), "killed": player_name(z, ev.killed),
                        "points": ev.points, "flags": ev.flags}),
+            );
+        });
+        zone.on::<crate::modules::anticheat::CheatSuspected>(me, Scope::Global, |z, ev| {
+            emit(
+                z,
+                json!({"type": "cheat_suspected", "arena": arena_name(z, Some(ev.arena)),
+                       "pid": ev.player.0, "name": player_name(z, ev.player),
+                       "check": ev.check.name(), "detail": ev.detail, "trust": ev.trust}),
             );
         });
         zone.on::<crate::modules::chat::ChatMessage>(me, Scope::Global, |z, ev| {

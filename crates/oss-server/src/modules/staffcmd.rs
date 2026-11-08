@@ -236,6 +236,48 @@ fn c_find(zone: &mut Zone, inv: &Invocation<'_>) {
     message(zone, inv.sender, &text);
 }
 
+fn c_insmod(zone: &mut Zone, inv: &Invocation<'_>) {
+    let name = inv.params.trim();
+    let text = match crate::module::insert(zone, name) {
+        Ok(_) => format!("Module {name} loaded successfully"),
+        Err(e) => {
+            tracing::info!(target: "staffcmd", "insmod {name}: {e}");
+            format!("Loading module {name} failed")
+        }
+    };
+    message(zone, inv.sender, &text);
+}
+
+fn c_rmmod(zone: &mut Zone, inv: &Invocation<'_>) {
+    let name = inv.params.trim();
+    let text = match crate::module::unload(zone, name) {
+        Ok(()) => format!("Module {name} unloaded successfully"),
+        Err(_) => format!("Unloading module {name} failed"),
+    };
+    message(zone, inv.sender, &text);
+}
+
+fn c_attmod(zone: &mut Zone, inv: &Invocation<'_>) {
+    let Some(a) = inv.arena else { return };
+    let text = match inv.params.strip_prefix("-d") {
+        Some(rest) => {
+            let name = rest.trim();
+            match crate::module::detach(zone, name, a) {
+                Ok(()) => format!("Module {name} detached."),
+                Err(_) => format!("Detaching module {name} failed."),
+            }
+        }
+        None => {
+            let name = inv.params.trim();
+            match crate::module::attach(zone, name, a) {
+                Ok(()) => format!("Module {name} attached."),
+                Err(_) => format!("Attaching module {name} failed."),
+            }
+        }
+    };
+    message(zone, inv.sender, &text);
+}
+
 fn c_lsmod(zone: &mut Zone, inv: &Invocation<'_>) {
     let mods: Vec<String> = zone.modules.loaded().map(str::to_owned).collect();
     message(
@@ -414,7 +456,7 @@ fn c_shutdown(zone: &mut Zone, inv: &Invocation<'_>) {
 }
 
 fn c_reloadconf(zone: &mut Zone, inv: &Invocation<'_>) {
-    let n = zone.cfg.reload_changed().len();
+    let n = super::arenaman::reload_config(zone);
     message(
         zone,
         inv.sender,
@@ -733,6 +775,21 @@ const COMMANDS: &[(&str, Handler, &str)] = &[
         "Args: <name>\nTells you which arena a player is in.",
     ),
     ("lsmod", c_lsmod, "Args: none\nLists the loaded modules."),
+    (
+        "insmod",
+        c_insmod,
+        "Targets: none\nArgs: <module name>\nImmediately loads the specified module into the server.",
+    ),
+    (
+        "rmmod",
+        c_rmmod,
+        "Targets: none\nArgs: <module name>\nAttempts to unload the specified module from the server.",
+    ),
+    (
+        "attmod",
+        c_attmod,
+        "Targets: none\nArgs: [{-d}] <module name>\nAttaches the specified module to this arena. Or with {-d},\ndetaches the module from the arena.",
+    ),
     (
         "listmod",
         c_listmod,

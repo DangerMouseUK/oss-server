@@ -235,6 +235,18 @@ pub fn load(zone: &mut Zone, name: &str) -> Result<Option<Owner>, ModuleError> {
     Ok(Some(owner))
 }
 
+/// Loads one module at run time (ASSS `?insmod`): [`load`] followed by its
+/// [`Module::post_load`].
+pub fn insert(zone: &mut Zone, name: &str) -> Result<Option<Owner>, ModuleError> {
+    let owner = load(zone, name)?;
+    if let Some(o) = owner
+        && let Some((_, m)) = zone.modules.by_owner(o)
+    {
+        m.post_load(zone, o);
+    }
+    Ok(owner)
+}
+
 /// Calls [`Module::post_load`] on every loaded module, in load order.
 pub fn post_load_all(zone: &mut Zone) {
     let all: Vec<(Owner, Arc<dyn Module>)> = zone

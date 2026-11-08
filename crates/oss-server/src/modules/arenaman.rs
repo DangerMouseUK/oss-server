@@ -247,10 +247,26 @@ fn reap_arenas(zone: &mut Zone) {
     }
 }
 
+/// The global config (`global.conf` or an include) changed and was re-read
+/// (ASSS `CB_GLOBALCONFIGCHANGED`). Modules that cache global settings
+/// re-read them here.
+#[derive(Debug, Clone, Copy)]
+pub struct GlobalConfChanged;
+
+impl Event for GlobalConfChanged {
+    fn arena(&self) -> Option<ArenaId> {
+        None
+    }
+}
+
 /// Re-reads changed config files and tells running arenas whose config
-/// changed (ASSS `CheckModifiedFiles` + `AA_CONFCHANGED`).
-fn check_config(zone: &mut Zone) {
-    for (old, new) in zone.cfg.reload_changed() {
+/// changed (ASSS `CheckModifiedFiles` + `AA_CONFCHANGED`), and everyone if
+/// the global config changed. Returns the number of files re-read.
+pub fn reload_config(zone: &mut Zone) -> usize {
+    let before = zone.cfg.global().clone();
+    let changed = zone.cfg.reload_changed();
+    let n = changed.len();
+    for (old, new) in changed {
         let affected: Vec<ArenaId> = zone
             .arenas
             .iter()
@@ -270,6 +286,11 @@ fn check_config(zone: &mut Zone) {
             }
         }
     }
+    if !std::sync::Arc::ptr_eq(&before, zone.cfg.global()) {
+        tracing::info!(target: "config", "global config reloaded");
+        zone.fire(&GlobalConfChanged);
+    }
+    n
 }
 
 /// ASSS arena-name cleaning: at most 15 characters, `#` allowed first,
@@ -607,7 +628,7 @@ impl Module for ArenaManModule {
         .unwrap_or(1500);
         if interval > 0 {
             zone.set_timer(me, interval, interval, |z| {
-                check_config(z);
+                reload_config(z);
                 true
             });
         }

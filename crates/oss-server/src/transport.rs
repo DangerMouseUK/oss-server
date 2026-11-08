@@ -150,6 +150,12 @@ impl Transport for SubspaceTransport {
             self.kinds.insert(from, kind);
         }
         let now = self.now();
+        let tick = zone.now();
+        if let Some(&pid) = self.players.get(&from)
+            && let Some(p) = zone.players.get_mut(pid)
+        {
+            p.last_packet = Some(tick);
+        }
         self.server.handle_datagram(now, from, data);
         self.handle_events(zone);
         self.transmit(io);

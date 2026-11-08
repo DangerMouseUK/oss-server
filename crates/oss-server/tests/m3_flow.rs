@@ -316,4 +316,94 @@ fn lagged_players_are_specced() {
         texts.iter().any(|t| t.contains("excessive ping")),
         "{texts:?}"
     );
+    // still too lagged: no ship, no flags, all weapons ignored
+    let lag = oss_server::modules::lagdata::lag_data(&h.zone, a);
+    assert!(lag.no_ship && lag.no_flags_balls, "{lag:?}");
+    assert!((oss_server::modules::game::ignore_weapons(&h.zone, a) - 1.0).abs() < 1e-9);
+    h.send(a, &[c2s::kind::SET_SHIP, 0]);
+    assert_eq!(h.zone.players.get(a).map(|p| p.ship.0), Some(8));
+    assert!(
+        texts_of(&h.take(a))
+            .iter()
+            .any(|t| t == "You have too much lag to play in this arena.")
+    );
+}
+
+fn texts_of(pkts: &[Vec<u8>]) -> Vec<String> {
+    find(pkts, s2c::kind::CHAT)
+        .iter()
+        .map(|c| {
+            String::from_utf8_lossy(&s2c::S2CChat::decode(c).expect("chat").0.text).into_owned()
+        })
+        .collect()
+}
+
+#[test]
+fn ignored_weapons_and_weapon_counts() {
+    let mut h = H::new();
+    let (a, _) = h.player("alpha");
+    let (b, _) = h.player("beta");
+    h.send(a, &[c2s::kind::SET_SHIP, 0]);
+    h.send(b, &[c2s::kind::SET_SHIP, 1]);
+    h.position(b, 520, weapon_type::NONE);
+    h.take(b);
+    // every weapon alpha fires reaches beta and is counted for beta
+    for i in 0..5 {
+        h.tick(1);
+        h.position(a, 500 + i, weapon_type::BULLET);
+    }
+    let weapons = |pk: &[Vec<u8>]| {
+        find(pk, s2c::kind::WEAPON)
+            .iter()
+            .filter(|d| {
+                oss_proto::position::S2CWeapon::decode(d)
+                    .is_ok_and(|w| w.weapon.kind() != weapon_type::NONE)
+            })
+            .count()
+    };
+    assert_eq!(weapons(&h.take(b)), 5);
+    h.tick(1);
+    h.position(b, 520, weapon_type::NONE);
+    assert_eq!(
+        oss_server::modules::lagdata::lag_data(&h.zone, b).last_wpn_sent,
+        5
+    );
+
+    // ignoring all of alpha's weapons: they arrive as plain positions
+    oss_server::modules::game::set_ignore_weapons(&mut h.zone, a, 1.0);
+    for i in 0..5 {
+        h.tick(1);
+        h.position(a, 500 + i, weapon_type::BULLET);
+    }
+    assert_eq!(weapons(&h.take(b)), 0);
+}
+
+#[test]
+fn ship_change_limit() {
+    let mut h = H::new();
+    let (a, _) = h.player("alpha");
+    // General:ShipChangeLimit defaults to 10: the 12th change is refused
+    for i in 0..11 {
+        h.send(a, &[c2s::kind::SET_SHIP, (i % 2) as u8]);
+        assert_eq!(h.zone.players.get(a).map(|p| p.ship.0), Some((i % 2) as u8));
+    }
+    h.take(a);
+    h.send(a, &[c2s::kind::SET_SHIP, 3]);
+    assert_eq!(h.zone.players.get(a).map(|p| p.ship.0), Some(0));
+    assert!(
+        texts_of(&h.take(a))
+            .iter()
+            .any(|t| t.contains("changing ships too often"))
+    );
+    // blocked for about 30 seconds (the count halves every 10 s); as in
+    // ASSS, each refused try starts the 30 seconds again
+    h.tick(2000);
+    h.send(a, &[c2s::kind::SET_SHIP, 3]);
+    assert_eq!(h.zone.players.get(a).map(|p| p.ship.0), Some(0));
+    h.tick(2000);
+    h.send(a, &[c2s::kind::SET_SHIP, 3]);
+    assert_eq!(h.zone.players.get(a).map(|p| p.ship.0), Some(0));
+    h.tick(3000);
+    h.send(a, &[c2s::kind::SET_SHIP, 3]);
+    assert_eq!(h.zone.players.get(a).map(|p| p.ship.0), Some(3));
 }

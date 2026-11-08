@@ -317,7 +317,7 @@ fn on_response(zone: &mut Zone, pid: PlayerId, pkt: &[u8]) {
         bad = true;
     }
     // the client reports pings in ticks
-    super::lagdata::client_ping(zone, pid, i32::from(r.ping_average) * 10);
+    super::lagdata::client_ping(zone, pid, i32::from(r.ping_average) * 10, r.weapon_count);
     tracing::debug!(target: "security", pid = pid.0, ok = !bad, ping = r.ping_average, "security response");
     if bad {
         kick(zone, pid);

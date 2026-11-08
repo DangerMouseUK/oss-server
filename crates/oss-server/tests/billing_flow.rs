@@ -436,17 +436,28 @@ fn logoff_packets_match_asss() {
         ping: 34,
         loss_s2c: 1,
         loss_c2s: 2,
-        score: oss_proto::billing::PlayerScore {
+        score: Some(oss_proto::billing::PlayerScore {
             kills: 10,
             deaths: 3,
             flags: 2,
             points: 1234,
             flag_points: 56,
-        },
+        }),
+    };
+    assert_eq!(full.to_bytes(), vector("logoff_full"));
+    let ServerToBiller::UserLogoff { score, .. } = &full else {
+        unreachable!()
+    };
+    let mut short = full.clone();
+    if let ServerToBiller::UserLogoff { score: s, .. } = &mut short {
+        *s = None;
     }
-    .to_bytes();
-    assert_eq!(full, vector("logoff_full"));
-    assert_eq!(&full[..15], &vector("logoff_noscore")[..]);
+    assert!(score.is_some());
+    assert_eq!(short.to_bytes(), vector("logoff_noscore"));
+    assert_eq!(
+        ServerToBiller::decode(&vector("logoff_noscore")).expect("decode"),
+        short
+    );
     assert_eq!(ServerToBiller::Ping.to_bytes(), vector("ping"));
 }
 

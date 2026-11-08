@@ -286,14 +286,6 @@ impl Biller {
     }
 
     fn packet(&mut self, addr: SocketAddr, data: &[u8]) {
-        // logoffs come without the score when it didn't change
-        let padded;
-        let data = if data.first() == Some(&0x05) && data.len() == 15 {
-            padded = [data, &[0u8; 14][..]].concat();
-            &padded[..]
-        } else {
-            data
-        };
         let pkt = match ServerToBiller::decode(data) {
             Ok(p) => p,
             Err(e) => {
@@ -347,14 +339,14 @@ impl Biller {
                 ..
             } => {
                 let now = self.now();
-                let has_score = data.len() >= 29 && score != PlayerScore::default();
                 let Some(z) = self.zones.get_mut(&addr) else {
                     return;
                 };
                 let score_id = z.score_id;
                 if let Some(o) = z.players.remove(&connection_id) {
                     self.end_session(&o, now);
-                    if has_score
+                    // no score: it didn't change since the zone last sent one
+                    if let Some(score) = score
                         && let Err(e) = self.store.set_score(o.user_id, score_id, &db_score(&score))
                     {
                         tracing::warn!(target: "biller", "saving score failed: {e}");

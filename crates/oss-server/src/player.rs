@@ -147,6 +147,9 @@ pub struct Player {
     pub pos: Position,
     /// When the player connected.
     pub connected_at: Ticks,
+    /// When the transport last received anything from this player (ASSS
+    /// `lastpkt`; `None` for players without a network connection).
+    pub last_packet: Option<Ticks>,
     /// Players with this flag don't get position packets relayed to them.
     pub ignore_weapons: bool,
     /// Logged in with a verified password (billing or password file).
@@ -194,6 +197,7 @@ impl Player {
             freq: 0,
             pos: Position::default(),
             connected_at: now,
+            last_packet: None,
             ignore_weapons: false,
             authenticated: false,
             when_logged_in: None,

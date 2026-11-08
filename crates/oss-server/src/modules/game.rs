@@ -10,8 +10,12 @@
 //! the player they watch. Energy is appended per recipient according to
 //! `Misc:SeeEnergy`/`Misc:SpecSeeEnergy`/`Misc:SpecSeeExtra`.
 //!
-//! Not yet ported: regions, weapon-ignore percentages, ship locks, the
-//! ship-change flood limit and the "during change" ack wait.
+//! lagaction's weapon-ignore share drops that fraction of a player's weapons
+//! before relaying them, and `General:ShipChangeLimit` throttles rapid ship
+//! changes (ASSS: the count halves every 10 seconds; going over it blocks
+//! changes for about 30 seconds).
+//!
+//! Not yet ported: the "during change" ack wait.
 
 use std::sync::Arc;
 
@@ -99,6 +103,13 @@ struct GameData {
     deaths_without_firing: i32,
     /// ship locked by staff (`?lock`)
     locked: bool,
+    /// share of this player's weapons to drop (lagaction)
+    ignore_weapons: f64,
+    /// weapon packets relayed to this player since entering the arena
+    wpn_sent: u64,
+    /// recent ship changes (halved every 10 seconds) and when last decayed
+    changes: u32,
+    changes_checked: crate::time::Ticks,
     see_nrg: SeeEnergy,
     see_nrg_spec: SeeEnergy,
     see_epd: bool,
@@ -184,7 +195,12 @@ fn on_position(zone: &mut Zone, pid: PlayerId, pkt: &[u8]) {
     let latency = now.wire().wrapping_sub(pos.time) as i32;
     let latency = latency.clamp(0, 255) as u8;
     if !fake {
-        super::lagdata::position(zone, pid, i32::from(latency) * 10);
+        let wpn_sent = zone
+            .players
+            .get(pid)
+            .and_then(|p| p.ext.get::<GameData>())
+            .map_or(0, |d| d.wpn_sent);
+        super::lagdata::position(zone, pid, i32::from(latency) * 10, wpn_sent);
     }
     let (old_time, old_status, had) = zone
         .players
@@ -199,6 +215,15 @@ fn on_position(zone: &mut Zone, pid: PlayerId, pkt: &[u8]) {
         {
             d.sent_wpn = true;
             d.deaths_without_firing = 0;
+        }
+        // lagaction's weapon-ignore share (after the "fired" bookkeeping)
+        let ignore = zone
+            .players
+            .get(pid)
+            .and_then(|p| p.ext.get::<GameData>())
+            .map_or(0.0, |d| d.ignore_weapons);
+        if ignore > 0.0 && f64::from(rand(zone).below(1 << 16)) < ignore * 65536.0 {
+            pos.weapon.set_kind(weapon_type::NONE);
         }
         if !is_newer && !fake && pos.weapon.kind() == weapon_type::NONE {
             return;
@@ -375,6 +400,60 @@ fn relay(
         }
         zone.send_many(to.iter().copied(), &buf, flags);
     }
+    // weapon packets each recipient was sent, for weapon loss
+    if wtype != weapon_type::NONE {
+        for id in groups.iter().flatten() {
+            if let Some(d) = gd(zone, *id) {
+                d.wpn_sent += 1;
+            }
+        }
+    }
+}
+
+/// ASSS `SetIgnoreWeapons`: drop this share (0 to 1) of a player's weapons.
+pub fn set_ignore_weapons(zone: &mut Zone, pid: PlayerId, proportion: f64) {
+    if let Some(d) = gd(zone, pid) {
+        d.ignore_weapons = proportion.clamp(0.0, 1.0);
+    }
+}
+
+/// The share of a player's weapons being dropped.
+pub fn ignore_weapons(zone: &Zone, pid: PlayerId) -> f64 {
+    zone.players
+        .get(pid)
+        .and_then(|p| p.ext.get::<GameData>())
+        .map_or(0.0, |d| d.ignore_weapons)
+}
+
+/// ASSS `General:ShipChangeLimit`: counts a ship change request; false if
+/// the player has made too many lately.
+fn ship_change_allowed(zone: &mut Zone, pid: PlayerId) -> bool {
+    let limit =
+        u32::try_from(zone.cfg.global().get_int("General", "ShipChangeLimit", 10)).unwrap_or(0);
+    let now = zone.now();
+    let Some(d) = gd(zone, pid) else {
+        return true;
+    };
+    // exponential decay by 1/2 every 10 seconds
+    let periods = now.since(d.changes_checked) / 1000;
+    d.changes = d
+        .changes
+        .checked_shr(u32::try_from(periods).unwrap_or(u32::MAX))
+        .unwrap_or(0);
+    d.changes_checked = crate::time::Ticks(d.changes_checked.0 + periods * 1000);
+    if limit > 0 && d.changes > limit {
+        // blocked for at least 30 seconds
+        d.changes |= limit << 3;
+        tracing::info!(target: "game", pid = pid.0, "too many ship changes");
+        super::chat::message(
+            zone,
+            pid,
+            "You're changing ships too often, disabling for 30 seconds.",
+        );
+        return false;
+    }
+    d.changes += 1;
+    true
 }
 
 /// ASSS `SetFreqAndShip`: changes ship and frequency and tells the arena.
@@ -468,6 +547,12 @@ fn on_set_ship(zone: &mut Zone, pid: PlayerId, pkt: &[u8]) {
     if ship == p.ship {
         return;
     }
+    if !ship_change_allowed(zone, pid) {
+        return;
+    }
+    let Some(p) = zone.players.get(pid) else {
+        return;
+    };
     let locked = p.ext.get::<GameData>().is_some_and(|d| d.locked);
     if locked
         && !ship.is_spec()
@@ -565,6 +650,10 @@ impl FreqManager for BalancedFreqs {
         let Some(arena) = zone.players.get(player).and_then(|p| p.arena) else {
             return;
         };
+        // too lagged to play: start in spectator mode
+        if super::lagdata::no_ship(zone, player) {
+            *ship = Ship::SPEC;
+        }
         *freq = if ship.is_spec() {
             zone.arenas.get(arena).map_or(8025, spec_freq)
         } else {
@@ -579,6 +668,11 @@ impl FreqManager for BalancedFreqs {
         let spec = zone.arenas.get(arena).map_or(8025, spec_freq);
         if ship.is_spec() {
             *freq = spec;
+        } else if super::lagdata::no_ship(zone, player) {
+            super::chat::message(zone, player, "You have too much lag to play in this arena.");
+            if let Some(p) = zone.players.get(player) {
+                (*ship, *freq) = (p.ship, p.freq);
+            }
         } else if *freq == spec {
             *freq = balanced(zone, arena, player);
         }
@@ -636,8 +730,12 @@ impl Module for GameModule {
             let Some(cfg) = z.arenas.get(arena).map(|a| a.cfg.clone()) else {
                 return;
             };
+            let now = z.now();
             if let Some(d) = gd(z, ev.player) {
+                let ignore_weapons = d.ignore_weapons;
                 *d = GameData {
+                    ignore_weapons,
+                    changes_checked: now,
                     see_nrg: SeeEnergy::from_cfg(cfg.get_int("Misc", "SeeEnergy", 0)),
                     see_nrg_spec: SeeEnergy::from_cfg(cfg.get_int("Misc", "SpecSeeEnergy", 0)),
                     see_epd: cfg.get_int("Misc", "SpecSeeExtra", 0) != 0,

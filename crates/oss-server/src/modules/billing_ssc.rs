@@ -531,20 +531,17 @@ fn on_player_action(zone: &mut Zone, ev: &PlayerAction) {
                     d.saved_score = score;
                     c
                 });
-                let mut pkt = ServerToBiller::UserLogoff {
+                // without the score when it didn't change (ASSS sends 15 bytes)
+                let pkt = ServerToBiller::UserLogoff {
                     connection_id: u32::from(p.0),
                     reason: 0,
                     latency: 0,
                     ping: 0,
                     loss_s2c: 0,
                     loss_c2s: 0,
-                    score,
-                }
-                .to_bytes();
-                if !changed {
-                    pkt.truncate(15);
-                }
-                send(zone, &pkt, true);
+                    score: changed.then_some(score),
+                };
+                send_s2b(zone, &pkt);
             }
         }
         Action::LeaveArena => {

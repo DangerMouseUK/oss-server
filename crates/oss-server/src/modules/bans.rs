@@ -14,10 +14,18 @@
 //! - `?banlist` and `?unban <id>`.
 //!
 //! The identity key (`Player::identity_key`) is the client's long-term
-//! public key, for protocols that prove possession of one. Keys can't be
-//! changed by renaming or moving, so a key ban follows the person rather than
-//! the name or address. Bans are checked before any authentication (a
-//! [`LoginGate`]), so they hold with the password file and with a biller.
+//! public key, for protocols that prove possession of one (OpenSec
+//! `CLIENT_AUTH`). Only keys the connection has proven are used; a key a
+//! client merely claims is never matched, counted or logged, since identity
+//! keys are public and anyone could claim someone else's.
+//!
+//! **A key ban is a speed bump, not an identity system.** It stops someone
+//! returning casually with the same installation under a new name, but a
+//! client can always present a fresh key (or none) by design, just as it can
+//! change name or address. Treat it like a machine-id ban.
+//!
+//! Bans are checked before any authentication (a [`LoginGate`]), so they hold
+//! with the password file and with a biller.
 
 use std::net::SocketAddr;
 

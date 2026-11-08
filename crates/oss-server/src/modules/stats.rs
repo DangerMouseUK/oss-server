@@ -105,7 +105,9 @@ fn encode_stats(m: &HashMap<u16, i32>) -> Vec<u8> {
 }
 
 fn decode_stats(b: &[u8]) -> HashMap<u16, i32> {
-    b.chunks_exact(6)
+    b.as_chunks::<6>()
+        .0
+        .iter()
         .map(|c| {
             (
                 u16::from_le_bytes([c[0], c[1]]),

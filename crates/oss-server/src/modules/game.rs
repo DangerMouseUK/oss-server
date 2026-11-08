@@ -183,6 +183,9 @@ fn on_position(zone: &mut Zone, pid: PlayerId, pkt: &[u8]) {
     }
     let latency = now.wire().wrapping_sub(pos.time) as i32;
     let latency = latency.clamp(0, 255) as u8;
+    if !fake {
+        super::lagdata::position(zone, pid, i32::from(latency) * 10);
+    }
     let (old_time, old_status, had) = zone
         .players
         .get(pid)

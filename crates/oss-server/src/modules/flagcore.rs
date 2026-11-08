@@ -733,6 +733,10 @@ fn on_touch(zone: &mut Zone, pid: PlayerId, pkt: &[u8]) {
         tracing::warn!(target: "flagcore", pid = pid.0, "flag pickup packet from spec");
         return;
     }
+    if super::lagdata::no_flags_balls(zone, pid) {
+        tracing::debug!(target: "flagcore", pid = pid.0, "too lagged to pick up a flag");
+        return;
+    }
     let Ok(fid) = usize::try_from(req.flag_id) else {
         return;
     };

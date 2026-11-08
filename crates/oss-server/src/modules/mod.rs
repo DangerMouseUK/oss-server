@@ -18,6 +18,7 @@ pub mod flagcore;
 pub mod game;
 pub mod jackpot;
 pub mod koth;
+pub mod lagdata;
 pub mod mapdata;
 pub mod mapnewsdl;
 pub mod obscene;
@@ -56,6 +57,8 @@ pub const DEFAULT_MODULES: &[&str] = &[
     "balls",
     "bricks",
     "koth",
+    "lagdata",
+    "lagaction",
     "periodic",
     "points_periodic",
     "points_goal",
@@ -96,6 +99,8 @@ pub fn builtin_catalog() -> ModuleCatalog {
     c.register("balls", &[], || balls::BallsModule);
     c.register("bricks", &[], || bricks::BricksModule);
     c.register("koth", &[], || koth::KothModule);
+    c.register("lagdata", &[], || lagdata::LagDataModule);
+    c.register("lagaction", &[], || lagdata::LagActionModule);
     c.register("persist", &["scoring:persist"], || persist::PersistModule);
     c.register("periodic", &["scoring:periodic"], || {
         periodic::PeriodicModule

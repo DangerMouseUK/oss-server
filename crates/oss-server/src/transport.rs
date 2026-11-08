@@ -47,6 +47,7 @@ pub struct SubspaceTransport {
     kinds: HashMap<SocketAddr, ClientKind>,
     players: HashMap<SocketAddr, PlayerId>,
     addrs: HashMap<PlayerId, SocketAddr>,
+    last_lag: u64,
 }
 
 impl SubspaceTransport {
@@ -79,6 +80,7 @@ impl SubspaceTransport {
             kinds: HashMap::new(),
             players: HashMap::new(),
             addrs: HashMap::new(),
+            last_lag: 0,
         }
     }
 
@@ -200,6 +202,23 @@ impl Transport for SubspaceTransport {
     fn tick(&mut self, zone: &mut Zone, io: &dyn DatagramIo) {
         let now = self.now();
         self.server.tick(now);
+        if now.saturating_sub(self.last_lag) >= 1000 {
+            self.last_lag = now;
+            for (addr, pid) in &self.players {
+                if let Some(c) = self.server.connection(addr) {
+                    let s = c.stats();
+                    let rtt = i32::try_from(c.rtt_ms()).unwrap_or(i32::MAX);
+                    crate::modules::lagdata::transport(
+                        zone,
+                        *pid,
+                        rtt,
+                        s.datagrams_sent,
+                        s.datagrams_received,
+                        c.peer_counts(),
+                    );
+                }
+            }
+        }
         self.handle_events(zone);
         self.transmit(io);
     }

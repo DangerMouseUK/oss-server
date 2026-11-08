@@ -98,7 +98,6 @@ pub const BUILT_INTO_CORE: &[&str] = &[
     "mainloop",
     "config",
     "playerdata",
-    "lagdata",
     "bw_default",
     "bw_nolimit",
     "net",

@@ -316,6 +316,8 @@ fn on_response(zone: &mut Zone, pid: PlayerId, pkt: &[u8]) {
         malicious(zone, pid, "exe checksum mismatch");
         bad = true;
     }
+    // the client reports pings in ticks
+    super::lagdata::client_ping(zone, pid, i32::from(r.ping_average) * 10);
     tracing::debug!(target: "security", pid = pid.0, ok = !bad, ping = r.ping_average, "security response");
     if bad {
         kick(zone, pid);

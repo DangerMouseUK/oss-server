@@ -269,3 +269,33 @@ fn periodic_and_warzone_rewards_match_asss() {
     }
     assert!(n > 150);
 }
+
+#[test]
+fn lag_aggregation_matches_asss() {
+    use oss_server::modules::lagdata::{PingStat, ploss};
+    let vectors = include_str!("fixtures/asss-vectors/lag-aggregation.txt");
+    let mut n = 0;
+    for line in vectors
+        .lines()
+        .filter(|l| !l.starts_with('#') && !l.is_empty())
+    {
+        let f: Vec<&str> = line.split_whitespace().collect();
+        match f[0] {
+            "ping" => {
+                let mut p = PingStat::default();
+                for s in f[1].split(',') {
+                    p.add(s.parse().expect("sample"));
+                }
+                let want: Vec<i32> = f[2..6].iter().map(|v| v.parse().expect("int")).collect();
+                assert_eq!(vec![p.current, p.avg, p.min, p.max], want, "{line}");
+            }
+            "ploss" => {
+                let (s, r): (u64, u64) = (f[1].parse().expect("sent"), f[2].parse().expect("rcvd"));
+                assert_eq!(format!("{:.6}", ploss(s, r)), f[3], "{line}");
+            }
+            _ => continue,
+        }
+        n += 1;
+    }
+    assert!(n >= 30);
+}

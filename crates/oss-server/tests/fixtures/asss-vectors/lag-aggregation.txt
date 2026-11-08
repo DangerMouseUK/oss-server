@@ -1,0 +1,72 @@
+# Lag aggregation from ASSS 1.4.4 src/core/lagdata.c (add_ping, QueryPLoss).
+# ping <sequence of samples, ms> <current> <avg> <min> <max>
+#   Each sample is clamped to 0..10000 FIRST, then: avg = (avg * 7 + ping) / 8 with
+#   integer truncation, so the average decays toward a new level and never exceeds it
+#   from below. ASSS starts a fresh player at avg 0, min INT_MAX, max 0, which is what
+#   these sequences assume; min/max compare the CLAMPED value.
+# ploss <packets sent> <packets received> <loss as printed with %.6f>
+#   0.0 unless sent > 200 (PLOSS_MIN_PACKETS); otherwise (sent - received) / sent in
+#   double precision. Both are unsigned, so received > sent wraps to a huge positive
+#   loss -- ASSS does not guard against it.
+ping 0,1,7,50,60,120,9999,10000,10001,32767 10000 4151 0 10000
+ping 9999,10000,10001,32767 10000 4136 9999 10000
+ping 187,628,598,126,773,847,232,824,195 195 342 126 847
+ping 766,62,424,663 663 197 62 766
+ping 375,1088,179,510,513,1043,405,412 412 364 179 1088
+ping 26,775,1097,809,-28,253,1091 1091 362 0 1097
+ping 925,268,1054,311,405,674,115 115 297 115 1054
+ping 665,-36,418,325 325 141 0 665
+ping 239,700,600,867,21,819 819 302 21 867
+ping 942,977,1007 1007 321 942 1007
+ping 457 457 57 457 457
+ping 940,1078,955,7,732,415,553,872,892,614,451,484 484 498 7 1078
+ping 1018,451 451 167 451 1018
+ping 889,332 332 138 332 889
+ping 0 0 0 0 0
+ping 1 1 0 1 1
+ping 7 7 0 7 7
+ping 50 50 6 50 50
+ping 60 60 7 60 60
+ping 120 120 15 120 120
+ping 9999 9999 1249 9999 9999
+ping 10000 10000 1250 10000 10000
+ping 10001 10000 1250 10000 10000
+ping 32767 10000 1250 10000 10000
+ping -1 0 0 0 0
+ping -500 0 0 0 0
+ploss 0 0 0.000000
+ploss 0 1 0.000000
+ploss 0 200 0.000000
+ploss 0 201 0.000000
+ploss 0 1000 0.000000
+ploss 0 100000 0.000000
+ploss 1 0 0.000000
+ploss 1 1 0.000000
+ploss 1 200 0.000000
+ploss 1 201 0.000000
+ploss 1 1000 0.000000
+ploss 1 100000 0.000000
+ploss 200 0 0.000000
+ploss 200 1 0.000000
+ploss 200 200 0.000000
+ploss 200 201 0.000000
+ploss 200 1000 0.000000
+ploss 200 100000 0.000000
+ploss 201 0 1.000000
+ploss 201 1 0.995025
+ploss 201 200 0.004975
+ploss 201 201 0.000000
+ploss 201 1000 -3.975124
+ploss 201 100000 -496.512438
+ploss 1000 0 1.000000
+ploss 1000 1 0.999000
+ploss 1000 200 0.800000
+ploss 1000 201 0.799000
+ploss 1000 1000 0.000000
+ploss 1000 100000 -99.000000
+ploss 100000 0 1.000000
+ploss 100000 1 0.999990
+ploss 100000 200 0.998000
+ploss 100000 201 0.997990
+ploss 100000 1000 0.990000
+ploss 100000 100000 0.000000

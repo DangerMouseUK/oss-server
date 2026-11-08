@@ -379,6 +379,10 @@ fn on_pickup(zone: &mut Zone, p: PlayerId, pkt: &[u8]) {
     let Some(a) = playing_ship(zone, p) else {
         return;
     };
+    if super::lagdata::no_flags_balls(zone, p) {
+        tracing::debug!(target: "balls", pid = p.0, "too lagged to pick up a ball");
+        return;
+    }
     let bid = usize::from(req.ball_id);
     let (px, py, freq) = zone
         .players

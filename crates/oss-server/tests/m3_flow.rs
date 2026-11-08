@@ -281,3 +281,39 @@ fn scores_persist_across_logins() {
         .expect("own record");
     assert_eq!(me.kill_points, 7);
 }
+
+/// lagaction moves a player whose positions arrive very late to spectator
+/// mode, and ?lag reports the numbers.
+#[test]
+fn lagged_players_are_specced() {
+    let mut h = H::new();
+    let (a, _) = h.player("alpha");
+    h.send(a, &[c2s::kind::SET_SHIP, 0]);
+    for i in 0..40 {
+        // timestamps 3 s old: the latency clamps at 2550 ms one way
+        let pos = C2SPosition {
+            time: (h.t as u32).wrapping_sub(300),
+            x: 100 + i,
+            y: 100,
+            ..Default::default()
+        };
+        let mut buf = Vec::new();
+        pos.encode(&mut buf);
+        h.send(a, &buf);
+        h.tick(1);
+    }
+    let lag = oss_server::modules::lagdata::lag_data(&h.zone, a);
+    assert!(lag.pping.avg > 4000, "{lag:?}");
+    h.tick(300);
+    assert_eq!(h.zone.players.get(a).map(|p| p.ship.0), Some(8));
+    let texts: Vec<String> = find(&h.take(a), s2c::kind::CHAT)
+        .iter()
+        .map(|c| {
+            String::from_utf8_lossy(&s2c::S2CChat::decode(c).expect("chat").0.text).into_owned()
+        })
+        .collect();
+    assert!(
+        texts.iter().any(|t| t.contains("excessive ping")),
+        "{texts:?}"
+    );
+}

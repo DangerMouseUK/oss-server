@@ -97,6 +97,8 @@ struct GameData {
     sent_wpn: bool,
     /// deaths in a row without firing
     deaths_without_firing: i32,
+    /// ship locked by staff (`?lock`)
+    locked: bool,
     see_nrg: SeeEnergy,
     see_nrg_spec: SeeEnergy,
     see_epd: bool,
@@ -461,6 +463,25 @@ fn on_set_ship(zone: &mut Zone, pid: PlayerId, pkt: &[u8]) {
         return;
     }
     if ship == p.ship {
+        return;
+    }
+    let locked = p.ext.get::<GameData>().is_some_and(|d| d.locked);
+    if locked
+        && !ship.is_spec()
+        && !zone
+            .iface::<dyn super::capman::Capabilities>()
+            .is_some_and(|c| c.has_capability(zone, pid, "bypasslock"))
+    {
+        let spec = zone.players.get(pid).is_some_and(|p| p.ship.is_spec());
+        super::chat::message(
+            zone,
+            pid,
+            if spec {
+                "You have been locked in spectator mode."
+            } else {
+                "You have been locked in your ship."
+            },
+        );
         return;
     }
     if let Some(fm) = zone.iface_in::<dyn FreqManager>(arena) {
@@ -919,4 +940,19 @@ fn on_kickoff(zone: &mut Zone, pid: PlayerId, _pkt: &[u8]) {
     let mut buf = Vec::with_capacity(3);
     TurretKickoff { pid: pid.0 as i16 }.encode(&mut buf);
     zone.send_to_arena(arena, None, &buf, SendFlags::RELIABLE);
+}
+
+/// Locks or unlocks a player's ship (ASSS `Lock`/`Unlock`): a locked
+/// player can only change to spectator. `spec` first moves them to spec.
+pub fn set_lock(zone: &mut Zone, pid: PlayerId, locked: bool, spec: bool) {
+    if locked && spec {
+        let arena = zone.players.get(pid).and_then(|p| p.arena);
+        if let Some(a) = arena {
+            let sf = zone.arenas.get(a).map_or(8025, spec_freq);
+            set_ship_and_freq(zone, pid, Ship::SPEC, sf);
+        }
+    }
+    if let Some(d) = gd(zone, pid) {
+        d.locked = locked;
+    }
 }

@@ -26,6 +26,7 @@ pub mod persist;
 pub mod playercmd;
 pub mod points_goal;
 pub mod security;
+pub mod staffcmd;
 pub mod stats;
 
 use crate::module::ModuleCatalog;
@@ -63,6 +64,7 @@ pub const DEFAULT_MODULES: &[&str] = &[
     "jackpot",
     "points_flag",
     "playercmd",
+    "staffcmd",
 ];
 
 /// Every module shipped with this crate, under its own name and its ASSS name.
@@ -112,6 +114,7 @@ pub fn builtin_catalog() -> ModuleCatalog {
     });
     c.register("auth_file", &[], || auth_file::AuthFileModule);
     c.register("playercmd", &[], || playercmd::PlayerCmdModule);
+    c.register("staffcmd", &["admincmd"], || staffcmd::StaffCmdModule);
     c
 }
 

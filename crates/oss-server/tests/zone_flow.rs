@@ -42,7 +42,9 @@ impl H {
             (
                 "conf/groupdef.conf",
                 "[default]\ncmd_version = 1\ncmd_go = 1\ncmd_help = 1\n\
-                 [mod]\ncmd_version = 1\ncmd_go = 1\nseemodchat\nsendmodchat\n"
+                 [mod]\ncmd_version = 1\ncmd_go = 1\nseemodchat\nsendmodchat\n\
+                 cmd_arena\nprivcmd_setship\nprivcmd_lock\nprivcmd_prize\nprivcmd_info\n\
+                 privcmd_warpto\ncmd_z\nhigher_than_default\n"
                     .to_owned(),
             ),
             ("conf/staff.conf", "[(global)]\nbob = mod\n".to_owned()),
@@ -572,4 +574,90 @@ fn arena_chat_restrictions() {
     assert!(chats(&h.take(bob)).is_empty());
     h.chat(alice, chat_type::PRIVATE, bob.0 as i16, "psst");
     assert_eq!(chats(&h.take(bob)).len(), 1);
+}
+
+#[test]
+fn staff_commands() {
+    let mut h = H::new();
+    let (alice, _) = h.login("alice", "x");
+    let (bob, _) = h.login("bob", "secret");
+    h.enter(alice);
+    h.enter(bob);
+    h.take(alice);
+    h.take(bob);
+    let arena_id = h
+        .zone
+        .players
+        .get(bob)
+        .and_then(|p| p.arena)
+        .expect("arena");
+    let _ = arena_id;
+
+    // ?setship aimed at alice (sent as a private message)
+    h.chat(bob, chat_type::PRIVATE, alice.0 as i16, "?setship 3");
+    assert_eq!(h.zone.players.get(alice).map(|p| p.ship.0), Some(2));
+    // alice (default group) can't do that to bob
+    h.chat(alice, chat_type::PRIVATE, bob.0 as i16, "?setship 1");
+    assert_eq!(h.zone.players.get(bob).map(|p| p.ship.0), Some(8));
+
+    // ?lock -s: alice goes to spec and can't leave it
+    h.chat(bob, chat_type::PRIVATE, alice.0 as i16, "?lock -s");
+    assert_eq!(h.zone.players.get(alice).map(|p| p.ship.0), Some(8));
+    h.take(alice);
+    h.send(alice, &[c2s::kind::SET_SHIP, 0]);
+    assert_eq!(h.zone.players.get(alice).map(|p| p.ship.0), Some(8));
+    assert!(
+        chats(&h.take(alice))
+            .iter()
+            .any(|c| String::from_utf8_lossy(&c.text).contains("locked"))
+    );
+
+    // ?prize and ?warpto send packets to the target
+    h.chat(bob, chat_type::PRIVATE, alice.0 as i16, "?prize 2 #13");
+    let pr = h
+        .take(alice)
+        .into_iter()
+        .find(|d| d[0] == s2c::kind::PRIZE_RECEIVE)
+        .expect("0x20");
+    let pr = s2c::PrizeReceive::decode(&pr).expect("decode");
+    assert_eq!((pr.count, pr.prize), (2, 13));
+    h.chat(bob, chat_type::PRIVATE, alice.0 as i16, "?warpto 512 300");
+    let w = h
+        .take(alice)
+        .into_iter()
+        .find(|d| d[0] == s2c::kind::WARP_TO)
+        .expect("0x32");
+    assert_eq!(
+        s2c::WarpTo::decode(&w).map(|w| (w.x, w.y)).expect("decode"),
+        (512, 300)
+    );
+
+    // ?arena lists our arena with a negative population
+    h.take(bob);
+    h.chat(bob, chat_type::PUBLIC, 0, "?arena");
+    let al = h
+        .take(bob)
+        .into_iter()
+        .find(|d| d[0] == s2c::kind::ARENA_LIST)
+        .expect("0x2F");
+    let al = s2c::ArenaList::decode(&al).expect("decode");
+    assert_eq!(al.arenas.len(), 1);
+    assert_eq!(
+        (al.arenas[0].name.as_slice(), al.arenas[0].population),
+        (b"0".as_slice(), -2)
+    );
+
+    // ?z reaches everyone
+    h.take(alice);
+    h.chat(bob, chat_type::PUBLIC, 0, "?z server restart soon");
+    let got: Vec<String> = chats(&h.take(alice))
+        .iter()
+        .map(|c| String::from_utf8_lossy(&c.text).into_owned())
+        .collect();
+    assert!(
+        got.iter()
+            .any(|t| t.starts_with("server restart soon  -bob")),
+        "{got:?} {:?}",
+        chats(&h.take(bob))
+    );
 }

@@ -428,7 +428,7 @@ pub fn player_data(p: &Player) -> PlayerData {
         freq: p.freq as i16,
         wins: p.score.wins,
         losses: p.score.losses,
-        attached_to: -1,
+        attached_to: p.attached.map_or(-1, |h| h.0 as i16),
         flags_carried: p.flags_carried,
         misc_bits: 0,
     }

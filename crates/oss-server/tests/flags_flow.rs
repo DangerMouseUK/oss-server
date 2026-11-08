@@ -465,3 +465,33 @@ fn soccer_scoring() {
     let ball = oss_server::modules::balls::balls(&h.zone, arena)[0];
     assert_eq!(ball.state, oss_server::modules::balls::BallState::Waiting);
 }
+
+#[test]
+fn turrets_attach_and_kickoff() {
+    let mut h = H::new("[Team]\nDesiredTeams = 1\n", None);
+    let a = h.player("alpha", 0);
+    let c = h.player("charlie", 1);
+    let b = h.player("bravo", 8);
+    assert_eq!(h.zone.players.get(c).map(|p| p.freq), Some(0));
+    h.take(a);
+    let attach = |h: &mut H, p: PlayerId, to: i16| {
+        let mut buf = Vec::new();
+        c2s::AttachTo { pid: to }.encode(&mut buf);
+        h.send(p, &buf);
+    };
+    attach(&mut h, c, a.0 as i16);
+    let t = s2c::Turret::decode(&of(&h.take(a), s2c::kind::TURRET)[0]).expect("0x0E");
+    assert_eq!((t.pid, t.host), (c.0 as i16, a.0 as i16));
+    assert_eq!(h.zone.players.get(c).and_then(|p| p.attached), Some(a));
+    // a spectator on another freq is not a valid host; nor is yourself
+    attach(&mut h, c, b.0 as i16);
+    attach(&mut h, c, c.0 as i16);
+    assert!(of(&h.take(a), s2c::kind::TURRET).is_empty());
+    // the host shakes turrets off
+    h.send(a, &[c2s::kind::TURRET_KICKOFF]);
+    let k =
+        s2c::TurretKickoff::decode(&of(&h.take(c), s2c::kind::TURRET_KICKOFF)[0]).expect("0x15");
+    assert_eq!(k.pid, a.0 as i16);
+    attach(&mut h, c, -1);
+    assert_eq!(h.zone.players.get(c).and_then(|p| p.attached), None);
+}

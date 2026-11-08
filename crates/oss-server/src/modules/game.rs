@@ -11,14 +11,16 @@
 //! `Misc:SeeEnergy`/`Misc:SpecSeeEnergy`/`Misc:SpecSeeExtra`.
 //!
 //! Not yet ported: regions, weapon-ignore percentages, ship locks, the
-//! ship-change flood limit, turrets and the "during change" ack wait.
+//! ship-change flood limit and the "during change" ack wait.
 
 use std::sync::Arc;
 
 use oss_proto::Packet;
 use oss_proto::c2s;
 use oss_proto::position::{C2SPosition, PositionTail, S2CPosition, S2CWeapon, status, weapon_type};
-use oss_proto::s2c::{FreqChange, Green as S2CGreen, Kill as S2CKill, ShipChange};
+use oss_proto::s2c::{
+    FreqChange, Green as S2CGreen, Kill as S2CKill, ShipChange, Turret, TurretKickoff,
+};
 
 use crate::arena::{ArenaId, ArenaStatus};
 use crate::module::{Module, ModuleError};
@@ -283,6 +285,7 @@ fn relay(
         let (ix, iy) = d.map_or((0, 0), |d| (i64::from(d.x), i64::from(d.y)));
         let dist = (((x1 - ix).pow(2) + (y1 - iy).pow(2)) as f64).sqrt() as i64;
         let watching = d.is_some_and(|d| d.speccing == Some(pid));
+        let turret = i.attached == Some(pid);
         let radar = dist <= cfg.pos_pix && dist < radar_cut;
         let near = if send_wpn {
             dist <= range || (wtype == weapon_type::NONE && radar)
@@ -290,7 +293,7 @@ fn relay(
             let res = i64::from(i.resolution.0) + i64::from(i.resolution.1);
             dist < res || radar
         };
-        if !(near || to_all || watching) {
+        if !(near || to_all || watching || turret) {
             continue;
         }
         let tail = match d {
@@ -588,6 +591,15 @@ impl Module for GameModule {
         zone.on_packet(me, c2s::kind::SPEC_REQUEST, on_spec_request);
         zone.on_packet(me, c2s::kind::DEATH, on_death);
         zone.on_packet(me, c2s::kind::TAKE_GREEN, on_green);
+        zone.on_packet(me, c2s::kind::ATTACH_TO, on_attach);
+        zone.on_packet(me, c2s::kind::TURRET_KICKOFF, on_kickoff);
+        zone.on::<PlayerAction>(me, Scope::Global, |z, ev| {
+            if ev.action == Action::PreEnterArena
+                && let Some(p) = z.players.get_mut(ev.player)
+            {
+                p.attached = None;
+            }
+        });
         if zone.iface::<dyn FreqManager>().is_none() {
             zone.reg
                 .provide::<dyn FreqManager>(me, Scope::Global, Arc::new(BalancedFreqs));
@@ -827,4 +839,84 @@ fn on_green(zone: &mut Zone, pid: PlayerId, pkt: &[u8]) {
         y: g.y,
         prize: g.prize,
     });
+}
+
+/// ASSS `CB_ATTACH`: a player attached to (or detached from) a host.
+#[derive(Debug, Clone, Copy)]
+pub struct Attach {
+    /// Arena.
+    pub arena: ArenaId,
+    /// The turret.
+    pub player: PlayerId,
+    /// The host, or `None` when detaching.
+    pub host: Option<PlayerId>,
+}
+
+impl Event for Attach {
+    fn arena(&self) -> Option<ArenaId> {
+        Some(self.arena)
+    }
+}
+
+fn on_attach(zone: &mut Zone, pid: PlayerId, pkt: &[u8]) {
+    if pkt.len() != 3 {
+        tracing::warn!(target: "game", pid = pid.0, len = pkt.len(), "bad attach packet length");
+        return;
+    }
+    let Ok(req) = c2s::AttachTo::decode(pkt) else {
+        return;
+    };
+    let Some(p) = zone.players.get(pid) else {
+        return;
+    };
+    let (Some(arena), PlayerStatus::Playing) = (p.arena, p.status) else {
+        return;
+    };
+    let freq = p.freq;
+    let host = if req.pid == -1 {
+        None
+    } else {
+        let to = u16::try_from(req.pid).ok().map(PlayerId);
+        let ok = to.and_then(|t| zone.players.get(t)).is_some_and(|t| {
+            t.status == PlayerStatus::Playing
+                && t.id != pid
+                && t.arena == Some(arena)
+                && t.freq == freq
+        });
+        if !ok {
+            tracing::warn!(target: "game", pid = pid.0, host = req.pid, "tried to attach to a bad pid");
+            return;
+        }
+        to
+    };
+    if zone.players.get(pid).is_some_and(|p| p.attached == host) {
+        return;
+    }
+    if let Some(p) = zone.players.get_mut(pid) {
+        p.attached = host;
+    }
+    let mut buf = Vec::with_capacity(5);
+    Turret {
+        pid: pid.0 as i16,
+        host: host.map_or(-1, |h| h.0 as i16),
+    }
+    .encode(&mut buf);
+    zone.send_to_arena(arena, None, &buf, SendFlags::RELIABLE);
+    zone.fire(&Attach {
+        arena,
+        player: pid,
+        host,
+    });
+}
+
+fn on_kickoff(zone: &mut Zone, pid: PlayerId, _pkt: &[u8]) {
+    let Some(p) = zone.players.get(pid) else {
+        return;
+    };
+    let (Some(arena), PlayerStatus::Playing) = (p.arena, p.status) else {
+        return;
+    };
+    let mut buf = Vec::with_capacity(3);
+    TurretKickoff { pid: pid.0 as i16 }.encode(&mut buf);
+    zone.send_to_arena(arena, None, &buf, SendFlags::RELIABLE);
 }

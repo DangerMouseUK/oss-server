@@ -173,6 +173,8 @@ pub struct Player {
     pub score: Score,
     /// Flags carried (kept by flagcore).
     pub flags_carried: i16,
+    /// Host this player is attached to as a turret.
+    pub attached: Option<PlayerId>,
     /// Module-owned per-player data.
     pub ext: Extensions,
 }
@@ -205,6 +207,7 @@ impl Player {
             client_name: String::new(),
             score: Score::default(),
             flags_carried: 0,
+            attached: None,
             ext: Extensions::default(),
         }
     }

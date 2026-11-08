@@ -146,6 +146,37 @@ impl ArenaMap {
     }
 }
 
+/// ASSS `TILE_BRICK`.
+pub const TILE_BRICK: u8 = 250;
+
+impl ArenaMap {
+    /// Sets one tile (copy-on-write if the grid is shared).
+    pub fn set_tile(&mut self, x: i32, y: i32, tile: u8) {
+        if (0..1024).contains(&x) && (0..1024).contains(&y) {
+            Arc::make_mut(&mut self.grid).set(x as u32, y as u32, tile);
+        }
+    }
+
+    /// ASSS `DoBrick`: places (or clears) a horizontal or vertical brick.
+    pub fn do_brick(&mut self, drop: bool, x1: i32, y1: i32, x2: i32, y2: i32) {
+        let tile = if drop { TILE_BRICK } else { 0 };
+        if x1 == x2 {
+            for y in y1..=y2 {
+                self.set_tile(x1, y, tile);
+            }
+        } else if y1 == y2 {
+            for x in x1..=x2 {
+                self.set_tile(x, y1, tile);
+            }
+        }
+    }
+}
+
+/// Mutable access to an arena's map.
+pub fn arena_map_mut(zone: &mut Zone, arena: ArenaId) -> Option<&mut ArenaMap> {
+    zone.arenas.get_mut(arena)?.ext.get_mut::<ArenaMap>()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

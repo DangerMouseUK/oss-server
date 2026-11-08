@@ -358,3 +358,38 @@ fn soccer_balls() {
         (oss_server::modules::balls::BallState::OnMap, None)
     );
 }
+
+#[test]
+fn bricks_drop_resend_and_expire() {
+    let conf = "[Brick]\nBrickSpan = 5\nBrickTime = 200\n[Team]\nDesiredTeams = 2\n";
+    let mut h = H::new(conf, None);
+    let a = h.player("alpha", 0);
+    h.take(a);
+    let mut buf = Vec::new();
+    c2s::DropBrick { x: 300, y: 300 }.encode(&mut buf);
+    h.send(a, &buf);
+    let got = of(&h.take(a), s2c::kind::BRICK);
+    let b = s2c::Bricks::decode(&got[0]).expect("0x21");
+    assert_eq!(b.bricks.len(), 1);
+    let br = b.bricks[0];
+    assert_eq!(br.freq, 0);
+    assert!(br.x1 == br.x2 || br.y1 == br.y2);
+    // a player arriving now is sent the live brick
+    let late = h.player("late", 8);
+    let got: Vec<_> = of(&h.take(late), s2c::kind::BRICK)
+        .into_iter()
+        .filter(|d| d.len() > 1)
+        .collect();
+    assert_eq!(got.len(), 1);
+    // after BrickTime it's gone for newcomers
+    h.tick(300);
+    let later = h.player("later", 8);
+    assert!(
+        of(&h.take(later), s2c::kind::BRICK)
+            .iter()
+            .all(|d| d.len() == 1)
+    );
+    // specs can't drop bricks
+    h.send(later, &buf);
+    assert!(of(&h.take(a), s2c::kind::BRICK).is_empty());
+}

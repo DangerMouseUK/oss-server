@@ -6,6 +6,7 @@
 pub mod arenaman;
 pub mod auth_file;
 pub mod balls;
+pub mod bricks;
 pub mod capman;
 pub mod chat;
 pub mod clientset;
@@ -45,6 +46,7 @@ pub const DEFAULT_MODULES: &[&str] = &[
     "points_kill",
     "flagcore",
     "balls",
+    "bricks",
     "fg_wz",
     "fg_turf",
     "jackpot",
@@ -78,6 +80,7 @@ pub fn builtin_catalog() -> ModuleCatalog {
     });
     c.register("flagcore", &[], || flagcore::FlagCoreModule);
     c.register("balls", &[], || balls::BallsModule);
+    c.register("bricks", &[], || bricks::BricksModule);
     c.register("fg_wz", &["<py> fg_wz"], || fg_wz::FgWzModule);
     c.register("fg_turf", &["<py> fg_turf"], || fg_turf::FgTurfModule);
     c.register("jackpot", &["scoring:jackpot"], || jackpot::JackpotModule);

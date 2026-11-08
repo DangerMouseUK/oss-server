@@ -18,6 +18,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::config::{ConfSource, ConfigManager, ZoneDir};
+use crate::metrics::Metrics;
 use crate::module::{self, ModuleCatalog, ModuleError};
 use crate::net::{DatagramIo, Transport};
 use crate::ping::PingSnapshot;
@@ -68,14 +69,16 @@ impl ZoneHandle {
         let _ = self.tx.send(Inbound::Shutdown);
     }
 
-    fn datagram(&self, from: SocketAddr, data: Vec<u8>) -> bool {
+    /// Queues a datagram: `Some(false)` if the queue was full (dropped),
+    /// `None` once the game thread is gone.
+    fn datagram(&self, from: SocketAddr, data: Vec<u8>) -> Option<bool> {
         match self.tx.try_send(Inbound::Datagram { from, data }) {
-            Ok(()) => true,
+            Ok(()) => Some(true),
             Err(TrySendError::Full(_)) => {
                 tracing::debug!(target: "net", "inbound queue full, dropping datagram");
-                true
+                Some(false)
             }
-            Err(TrySendError::Disconnected(_)) => false,
+            Err(TrySendError::Disconnected(_)) => None,
         }
     }
 }
@@ -89,12 +92,14 @@ pub fn channel() -> (ZoneHandle, Receiver<Inbound>) {
 /// [`DatagramIo`] over a non-blocking UDP socket.
 pub struct UdpIo {
     socket: UdpSocket,
+    metrics: Arc<Metrics>,
 }
 
 impl DatagramIo for UdpIo {
     fn send_to(&self, data: &[u8], to: SocketAddr) {
-        if let Err(e) = self.socket.send_to(data, to) {
-            tracing::trace!(target: "net", %to, "send failed: {e}");
+        match self.socket.send_to(data, to) {
+            Ok(n) => self.metrics.sent(n),
+            Err(e) => tracing::trace!(target: "net", %to, "send failed: {e}"),
         }
     }
 }
@@ -115,6 +120,7 @@ pub struct GameLoop {
     rx: Receiver<Inbound>,
     ping: Arc<Mutex<Arc<PingSnapshot>>>,
     start: Instant,
+    metrics: Arc<Metrics>,
 }
 
 impl GameLoop {
@@ -125,6 +131,8 @@ impl GameLoop {
         io: Arc<dyn DatagramIo>,
         rx: Receiver<Inbound>,
     ) -> Self {
+        // shared with the I/O tasks and the admin API when the server set it up
+        let metrics = zone.res.get::<Arc<Metrics>>().cloned().unwrap_or_default();
         Self {
             zone,
             transport,
@@ -132,7 +140,13 @@ impl GameLoop {
             rx,
             ping: Arc::new(Mutex::new(Arc::new(PingSnapshot::default()))),
             start: Instant::now(),
+            metrics,
         }
+    }
+
+    /// The loop's counters.
+    pub fn metrics(&self) -> Arc<Metrics> {
+        self.metrics.clone()
     }
 
     /// The snapshot the ping responder serves.
@@ -189,11 +203,13 @@ impl GameLoop {
             if now >= next {
                 tick_no = (now - self.start).as_millis() as u64 / 10;
                 self.tick(Ticks(tick_no), ping_every.max(1), &mut last_ping);
+                self.metrics.tick(now.elapsed().as_nanos() as u64);
                 next = self.start + TICK * (tick_no as u32 + 1);
                 continue;
             }
             match self.rx.recv_timeout(next - now) {
                 Ok(msg) => {
+                    let busy = Instant::now();
                     self.handle(msg);
                     for _ in 0..BATCH {
                         match self.rx.try_recv() {
@@ -202,6 +218,7 @@ impl GameLoop {
                         }
                     }
                     self.transport.flush(&mut self.zone, self.io.as_ref());
+                    self.metrics.busy(busy.elapsed().as_nanos() as u64);
                 }
                 Err(RecvTimeoutError::Timeout) => {}
                 Err(RecvTimeoutError::Disconnected) => break,
@@ -393,6 +410,13 @@ impl ServerBuilder {
         let game_addr = game.local_addr()?;
         let ping_addr = ping.local_addr()?;
         tracing::info!(target: "net", game = %game_addr, ping = %ping_addr, "listening");
+        let metrics = Arc::new(Metrics::default());
+        zone.res.insert(metrics.clone());
+        let admin_cfg = crate::admin::AdminConfig::from_zone(&zone);
+        let admin_events = zone
+            .res
+            .get::<crate::admin::AdminEvents>()
+            .map(|e| e.0.clone());
         zone.res.insert(GameAddr(game_addr));
 
         let transport = match self.transport.take() {
@@ -403,6 +427,7 @@ impl ServerBuilder {
         zone.res.insert(handle.clone());
         let io: Arc<dyn DatagramIo> = Arc::new(UdpIo {
             socket: game.try_clone()?,
+            metrics: metrics.clone(),
         });
         let game_loop = GameLoop::new(zone, transport, io, rx);
         let snapshot = game_loop.ping_snapshot();
@@ -425,13 +450,21 @@ impl ServerBuilder {
             let game = tokio::net::UdpSocket::from_std(game)?;
             let ping = tokio::net::UdpSocket::from_std(ping)?;
             let recv_handle = handle.clone();
+            let recv_metrics = metrics.clone();
             let recv = tokio::spawn(async move {
                 let mut buf = vec![0u8; 2048];
                 loop {
                     match game.recv_from(&mut buf).await {
                         Ok((n, from)) => {
-                            if !recv_handle.datagram(from, buf[..n].to_vec()) {
-                                break;
+                            recv_metrics.received(n);
+                            match recv_handle.datagram(from, buf[..n].to_vec()) {
+                                Some(true) => {}
+                                Some(false) => {
+                                    recv_metrics
+                                        .inbound_dropped
+                                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                }
+                                None => break,
                             }
                         }
                         // e.g. ICMP port unreachable reported on Windows
@@ -451,8 +484,33 @@ impl ServerBuilder {
                     }
                 }
             });
-            Ok::<_, std::io::Error>(vec![recv, pinger])
+            let mut tasks = vec![recv, pinger];
+            let mut admin_addr = None;
+            if let Some(cfg) = admin_cfg {
+                match tokio::net::TcpListener::bind(cfg.listen).await {
+                    Ok(l) => {
+                        admin_addr = l.local_addr().ok();
+                        tracing::info!(target: "admin", addr = ?admin_addr, "admin API listening");
+                        let app = crate::admin::router(
+                            handle.clone(),
+                            metrics.clone(),
+                            admin_events,
+                            cfg.token,
+                        );
+                        tasks.push(tokio::spawn(async move {
+                            if let Err(e) = axum::serve(l, app).await {
+                                tracing::error!(target: "admin", "admin API stopped: {e}");
+                            }
+                        }));
+                    }
+                    Err(e) => {
+                        tracing::error!(target: "admin", "can't listen on {}: {e}", cfg.listen);
+                    }
+                }
+            }
+            Ok::<_, std::io::Error>((tasks, admin_addr))
         })?;
+        let (tasks, admin_addr) = tasks;
         Ok(RunningServer {
             rt,
             handle,
@@ -461,6 +519,7 @@ impl ServerBuilder {
             done,
             game_addr,
             ping_addr,
+            admin_addr,
         })
     }
 }
@@ -474,6 +533,7 @@ pub struct RunningServer {
     done: tokio::sync::watch::Receiver<bool>,
     game_addr: SocketAddr,
     ping_addr: SocketAddr,
+    admin_addr: Option<SocketAddr>,
 }
 
 impl RunningServer {
@@ -485,6 +545,11 @@ impl RunningServer {
     /// The bound ping port.
     pub fn ping_addr(&self) -> SocketAddr {
         self.ping_addr
+    }
+
+    /// The admin API's address, if it is enabled.
+    pub fn admin_addr(&self) -> Option<SocketAddr> {
+        self.admin_addr
     }
 
     /// A handle for running closures on the game thread.

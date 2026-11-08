@@ -77,6 +77,7 @@ pub const DEFAULT_MODULES: &[&str] = &[
     "points_flag",
     "playercmd",
     "staffcmd",
+    "admin",
 ];
 
 /// Every module shipped with this crate, under its own name and its ASSS name.
@@ -85,6 +86,7 @@ pub fn builtin_catalog() -> ModuleCatalog {
     // "core" is also in module::BUILT_INTO_CORE; registering it here makes
     // the lifecycle module load when modules.conf lists it.
     c.register("core", &[], || core::CoreModule);
+    c.register("admin", &[], || crate::admin::AdminModule);
     c.register("arenaman", &[], || arenaman::ArenaManModule);
     c.register("capman", &[], || capman::CapManModule);
     c.register("clientset", &[], || clientset::ClientSetModule);

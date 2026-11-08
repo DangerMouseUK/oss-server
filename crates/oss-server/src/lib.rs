@@ -11,12 +11,14 @@
 //! * [`config`] reads ASSS config files unchanged; [`clientset`] builds the
 //!   settings packet from them.
 
+pub mod admin;
 pub mod arena;
 pub mod clientset;
 pub mod commands;
 pub mod config;
 pub mod default_zone;
 pub mod logging;
+pub mod metrics;
 pub mod module;
 pub mod modules;
 pub mod net;

@@ -20,6 +20,7 @@ pub mod jackpot;
 pub mod koth;
 pub mod mapdata;
 pub mod mapnewsdl;
+pub mod periodic;
 pub mod playercmd;
 pub mod points_goal;
 pub mod security;
@@ -50,6 +51,8 @@ pub const DEFAULT_MODULES: &[&str] = &[
     "balls",
     "bricks",
     "koth",
+    "periodic",
+    "points_periodic",
     "points_goal",
     "fg_wz",
     "fg_turf",
@@ -86,6 +89,12 @@ pub fn builtin_catalog() -> ModuleCatalog {
     c.register("balls", &[], || balls::BallsModule);
     c.register("bricks", &[], || bricks::BricksModule);
     c.register("koth", &[], || koth::KothModule);
+    c.register("periodic", &["scoring:periodic"], || {
+        periodic::PeriodicModule
+    });
+    c.register("points_periodic", &["scoring:points_periodic"], || {
+        periodic::PointsPeriodicModule
+    });
     c.register("points_goal", &["scoring:points_goal"], || {
         points_goal::PointsGoalModule
     });

@@ -536,3 +536,25 @@ fn king_of_the_hill() {
         Some(1000)
     );
 }
+
+#[test]
+fn periodic_turf_rewards() {
+    let map = tile_list(&[(100, 100, 170), (200, 200, 170)]);
+    let conf = "[General]\nMap = test.lvl\n[Modules]\nAttachModules = fg_turf points_periodic\n\
+        [Periodic]\nRewardDelay = 1000\nRewardPoints = 50\n[Team]\nDesiredTeams = 2\n";
+    let mut h = H::new(conf, Some(map));
+    let a = h.player("alpha", 0);
+    let b = h.player("bravo", 1);
+    h.touch(a, 0);
+    h.touch(a, 1);
+    h.take(b);
+    h.tick(1000);
+    let r =
+        s2c::PeriodicReward::decode(&of(&h.take(b), s2c::kind::PERIODIC_REWARD)[0]).expect("0x23");
+    let r: Vec<(i16, i16)> = r.rewards.iter().map(|x| (x.freq, x.points)).collect();
+    assert_eq!(r, vec![(0, 100), (1, 0)]);
+    assert_eq!(
+        h.zone.players.get(a).map(|p| p.score.flag_points),
+        Some(100)
+    );
+}

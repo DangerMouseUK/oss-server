@@ -142,8 +142,10 @@ impl SubspaceTransport {
                 }
                 Event::Packet(p) => {
                     if let Some(&pid) = self.players.get(&addr) {
-                        // an OpenSec identity is proven only once the client's
-                        // first record authenticates: pick it up with the login
+                        // An OpenSec identity is proven only once a record from
+                        // the client authenticates (peer_key() returns nothing
+                        // before that), so pick it up with the login, which is
+                        // such a record. Only proven keys are ever stored.
                         if matches!(
                             p.first(),
                             Some(&oss_proto::c2s::kind::LOGIN | &oss_proto::c2s::kind::CONT_LOGIN)

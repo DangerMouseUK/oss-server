@@ -139,8 +139,11 @@ pub struct Player {
     pub connect_as: Option<String>,
     /// The connection's encryption (`vie`, `opensec`, ...), for network players.
     pub cipher: Option<&'static str>,
-    /// A long-term public key the client proved it holds, when the
-    /// connection's protocol carries one (key-bound identity).
+    /// A long-term public key the client *proved* it holds (OpenSec
+    /// `CLIENT_AUTH`): set only from a key the transport has authenticated,
+    /// never from what a client merely claims. Identity keys are public, so an
+    /// unproven one could be anyone's; nothing may count, limit, log or ban
+    /// on a claimed key.
     pub identity_key: Option<[u8; 32]>,
     /// Current arena.
     pub arena: Option<ArenaId>,

@@ -39,10 +39,14 @@
 //! position packets of a player in a ship, the distance travelled, reported
 //! speed, turn, path through walls, energy (after the weapons the server saw
 //! fired) and stealth/cloak/X-radar/antiwarp bits must be possible for that
-//! ship. The elapsed time is capped by the server's own clock plus
-//! `MotionClockSlack` ticks, so a client can't widen the bounds by skewing
-//! its timestamps; this also catches short bursts of clock speed that the
-//! clock check's long window averages away. Teleport, speed and rotation
+//! ship. The elapsed time a client claims is capped by oss-sim's
+//! `ClientClock` (how far its timestamps have ever run ahead of the server's
+//! clock, plus `MotionClockSlack` ticks, default 30), so a client can't widen
+//! the bounds by skewing its timestamps, while packets bunched after a lag
+//! spike are still judged fairly; this also catches a short burst of clock
+//! speed that the clock check's long window averages away. Energy is judged
+//! between consecutive packets and, to count the shots fired, over spans of
+//! at least three seconds. Teleport, speed and rotation
 //! count only `MotionMargin` percent past their bound, energy `EnergyMargin`
 //! percent of maximum energy past it. Jumps the server caused or can't see
 //! are excused: respawns, ship changes, `?warpto`, warp prizes, turrets, and
@@ -72,7 +76,9 @@ use std::collections::HashMap;
 use oss_proto::Packet;
 use oss_proto::c2s;
 use oss_proto::position::{C2SPosition, weapon_type};
-use oss_sim::{Context, Finding, Fired, Limits, MotionMap, Sample, TileMap, Tolerance};
+use oss_sim::{
+    ClientClock, Context, Finding, Fired, Limits, MotionMap, Sample, TileMap, Tolerance,
+};
 
 use crate::arena::ArenaId;
 use crate::commands::{Invocation, Target};
@@ -246,7 +252,7 @@ impl AcConfig {
             motion: i("MotionChecks", 1) != 0,
             motion_margin: u("MotionMargin", 25),
             energy_margin: u("EnergyMargin", 10),
-            clock_slack: u("MotionClockSlack", 100),
+            clock_slack: u("MotionClockSlack", 30),
         }
     }
 }
@@ -299,10 +305,15 @@ struct Ac {
     last_hit: [Option<Ticks>; CHECKS],
     recent: Vec<(Ticks, Check, String)>,
     benched: bool,
-    /// last sample the physics checks accepted, with its arrival time
-    prev: Option<(Sample, Ticks)>,
-    /// energy spent on weapons since `prev`
-    spent: i32,
+    /// last sample the physics checks accepted
+    prev: Option<Sample>,
+    /// the player's clock as the server has seen it run
+    clock: ClientClock,
+    /// older sample the energy check spans from, the cheapest cost of the
+    /// shots seen strictly after it, and whether energy was refilled since
+    anchor: Option<Sample>,
+    anchor_spent: i32,
+    anchor_refilled: bool,
     jumped: bool,
     refilled: bool,
     super_until: Option<Ticks>,
@@ -749,23 +760,11 @@ fn on_position(zone: &mut Zone, p: PlayerId, pkt: &[u8]) {
             .any(|b| b.carrier == Some(p));
     let flagger = flags > 0 || carrying_ball;
 
-    if let Some(f) = weapon_checks(zone, p, arena, &cfg, &lim, &pos, flagger) {
-        let free = state(zone, p)
-            .and_then(|a| a.super_until)
-            .is_some_and(|t| now < t);
-        if !free {
-            let mut cost = oss_sim::fire_cost(&lim.settings, f);
-            if flagger {
-                cost = oss_sim::flagger_cost(cost, lim.fire_cost_percent);
-            }
-            if let Some(a) = state(zone, p) {
-                a.spent = a.spent.saturating_add(cost / 1000);
-            }
-        }
-    }
+    let fired = weapon_checks(zone, p, arena, &cfg, &lim, &pos, flagger);
 
+    // a turret moves with its host, which may be faster: check the host
     if cfg.motion && attached.is_none() {
-        motion_checks(zone, p, arena, &cfg, &lim, &pos, freq, now);
+        motion_checks(zone, p, arena, &cfg, &lim, &pos, freq, now, fired, flagger);
     }
 }
 
@@ -841,10 +840,24 @@ fn weapon_checks(
     Some(fired)
 }
 
-/// A warp to spawn needs full energy and leaves almost none.
-fn warp_signature(prev: &Sample, next: &Sample, max_energy: i32) -> bool {
-    i64::from(prev.energy) * 100 >= i64::from(max_energy) * 90 && next.energy * 2 < prev.energy
+/// What a shot costs in energy points. A flag or ball carrier may pay the
+/// flagger price instead, if lower. (oss-sim's `least_fire_cost` gives
+/// everyone the lower of the two, for servers that don't know who carries
+/// what; this one does, and with `Flag:FlaggerFireCostPercent` unset the
+/// flagger price is 0, which would make every shot free.)
+fn shot_cost(lim: &ShipLimits, fired: Fired, flagger: bool) -> i32 {
+    let cost = oss_sim::fire_cost(&lim.settings, fired);
+    let cost = if flagger {
+        cost.min(oss_sim::flagger_cost(cost, lim.fire_cost_percent))
+    } else {
+        cost
+    };
+    cost / 1000
 }
+
+/// Energy is judged over at least this many ticks (3 s), from an older anchor
+/// sample, so the shots fired in between can be counted.
+const ENERGY_SPAN: u32 = 300;
 
 #[allow(clippy::too_many_arguments)]
 fn motion_checks(
@@ -856,6 +869,8 @@ fn motion_checks(
     pos: &C2SPosition,
     freq: u16,
     now: Ticks,
+    fired: Option<Fired>,
+    flagger: bool,
 ) {
     let next = Sample {
         time: pos.time,
@@ -867,26 +882,49 @@ fn motion_checks(
         status: pos.status,
         energy: i32::from(pos.energy),
     };
+    let server_now = now.0 as u32;
+    let free_shots = state(zone, p)
+        .and_then(|a| a.super_until)
+        .is_some_and(|t| now < t);
+    let shot = match fired {
+        Some(f) if !free_shots => shot_cost(lim, f, flagger),
+        _ => 0,
+    };
     let Some(a) = state(zone, p) else { return };
-    let Some((prev, prev_at)) = a.prev else {
-        a.prev = Some((next, now));
-        a.spent = 0;
+    let Some(prev) = a.prev else {
+        a.clock.observe(next.time, server_now);
+        a.prev = Some(next);
+        a.anchor = Some(next);
+        a.anchor_spent = 0;
+        a.anchor_refilled = false;
         a.jumped = false;
         a.refilled = false;
         return;
     };
-    // an older or duplicated packet: nothing to judge
     let dt = next.time.wrapping_sub(prev.time);
-    if dt == 0 || dt >= 0x8000_0000 {
+    if dt == 0 {
+        // a duplicate
         return;
     }
-    let (jumped, refilled, spent) = (a.jumped, a.refilled, a.spent);
+    let reordered = dt >= 0x8000_0000;
+    // the cap comes from the client's own clock as the server has seen it
+    // run (tolerates packets bunched after a lag spike); computed before
+    // this packet is observed
+    let max_ticks = a.clock.max_ticks(prev.time, server_now, cfg.clock_slack);
+    let span_cap = a.anchor.map_or(0, |an| {
+        a.clock.max_ticks(an.time, server_now, cfg.clock_slack)
+    });
+    a.clock.observe(next.time, server_now);
+    let (jumped, refilled) = (a.jumped, a.refilled);
+    // the server's own record of what the ship may hold, never the client's
     let portal_held = a.bound.is_some_and(|b| b.items.portals > 0);
-    a.prev = Some((next, now));
-    a.spent = 0;
-    a.jumped = false;
-    a.refilled = false;
-    let server_ticks = u32::try_from(now.since(prev_at)).unwrap_or(u32::MAX);
+    let anchor = a.anchor;
+    let (anchor_spent, anchor_refilled) = (a.anchor_spent, a.anchor_refilled || refilled);
+    if !reordered {
+        a.prev = Some(next);
+        a.jumped = false;
+        a.refilled = false;
+    }
     let repelled = repelled_near(zone, arena, lim, freq, [(prev.x, prev.y), (next.x, next.y)]);
     let Some(map) = motion_map(zone, arena) else {
         return;
@@ -895,8 +933,11 @@ fn motion_checks(
         jumped,
         repelled,
         refilled,
-        spent,
-        max_ticks: Some(server_ticks.saturating_add(cfg.clock_slack)),
+        // shots in this packet or the previous one may or may not be in
+        // their energy readings, so none count between consecutive samples
+        spent: 0,
+        max_ticks,
+        portal_held,
     };
     let verdict = oss_sim::check_motion(
         &lim.motion,
@@ -906,55 +947,98 @@ fn motion_checks(
         &context,
         &Tolerance::default(),
     );
+    let mut findings: Vec<(Check, String)> = Vec::new();
     let over = 100 + cfg.motion_margin;
     for f in verdict.findings() {
-        let (check, detail) = match f {
-            // The client sets the flash bit itself, so it explains a jump
-            // only with evidence: a portal the ship may hold, or the energy
-            // signature of a warp to spawn (full energy before, drained after)
-            Finding::Teleport { flash: true, .. }
-                if portal_held || warp_signature(&prev, &next, lim.motion.max_energy) =>
-            {
-                continue;
-            }
-            Finding::Teleport {
-                flash: true,
-                percent,
-            } => (
+        let found = match f {
+            // with the flash bit only when no evidence backed it (oss-sim
+            // accepts a portal the ship may hold, or a warp's energy)
+            Finding::Teleport { percent, flash } if percent > over || flash => Some((
                 Check::Teleport,
-                format!(
-                    "jumped {percent}% of the ship's reach with the flash bit but no portal or warp"
-                ),
-            ),
-            Finding::Teleport { percent, .. } if percent > over => (
-                Check::Teleport,
-                format!(
-                    "moved {percent}% of the furthest the ship could go in {} ticks",
-                    verdict.ticks
-                ),
-            ),
-            Finding::Speed { percent } if percent > over => (
+                if flash {
+                    format!(
+                        "jumped {percent}% of the ship's reach with the flash bit but no portal or warp"
+                    )
+                } else {
+                    format!(
+                        "moved {percent}% of the furthest the ship could go in {} ticks",
+                        verdict.ticks
+                    )
+                },
+            )),
+            Finding::Speed { percent } if percent > over => Some((
                 Check::Speed,
                 format!("reported {percent}% of the ship's top speed"),
-            ),
-            Finding::Rotation { percent } if percent > over => (
+            )),
+            Finding::Rotation { percent } if percent > over => Some((
                 Check::Rotation,
                 format!("turned {percent}% of the most the ship can"),
-            ),
-            Finding::ThroughWall => (Check::Wall, "passed through a wall".to_owned()),
-            Finding::InsideWall => (Check::Wall, "inside a wall".to_owned()),
-            Finding::Energy { excess, percent } if percent > cfg.energy_margin => (
+            )),
+            Finding::ThroughWall => Some((Check::Wall, "passed through a wall".to_owned())),
+            Finding::InsideWall => Some((Check::Wall, "inside a wall".to_owned())),
+            Finding::Energy { excess, percent } if percent > cfg.energy_margin => Some((
                 Check::Energy,
                 format!(
                     "{excess} more energy than the ship could have ({percent}% of its maximum)"
                 ),
-            ),
-            Finding::Status { bits } => (
+            )),
+            Finding::Status { bits } => Some((
                 Check::Status,
                 format!("status bits {bits:#04x} without the capability"),
-            ),
-            _ => continue,
+            )),
+            _ => None,
         };
+        findings.extend(found);
+    }
+
+    // Energy over a longer span, counting the shots the server saw strictly
+    // between the anchor and this packet: an endless-energy client reports
+    // full energy while firing, which no single pair can show.
+    if !reordered && let Some(anchor) = anchor {
+        let span = next.time.wrapping_sub(anchor.time);
+        if (ENERGY_SPAN..0x8000_0000).contains(&span) {
+            let ctx = Context {
+                // only energy is judged over the span
+                jumped: true,
+                repelled: false,
+                refilled: anchor_refilled,
+                spent: anchor_spent,
+                max_ticks: span_cap,
+                portal_held,
+            };
+            let v = oss_sim::check_motion(
+                &lim.motion,
+                &map,
+                &anchor,
+                &next,
+                &ctx,
+                &Tolerance::default(),
+            );
+            for f in v.findings() {
+                if let Finding::Energy { excess, percent } = f
+                    && percent > cfg.energy_margin
+                {
+                    findings.push((
+                        Check::Energy,
+                        format!(
+                            "{excess} more energy than the ship could have after the shots fired over {span} ticks ({percent}% of its maximum)"
+                        ),
+                    ));
+                }
+            }
+            if let Some(a) = state(zone, p) {
+                a.anchor = Some(next);
+                a.anchor_spent = 0;
+                a.anchor_refilled = false;
+            }
+        } else if let Some(a) = state(zone, p) {
+            // this packet's own shot lies strictly between the anchor and
+            // whatever sample closes the span
+            a.anchor_spent = a.anchor_spent.saturating_add(shot);
+            a.anchor_refilled |= refilled;
+        }
+    }
+    for (check, detail) in findings {
         found(zone, p, arena, cfg, check, detail);
     }
 }

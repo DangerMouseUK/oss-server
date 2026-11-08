@@ -457,3 +457,34 @@ fn flash_bit_alone_explains_nothing() {
     flash_jump(&mut h, t0 + 100, 9000, 1700, 1);
     assert_eq!(h.seen().len(), 1, "{:?}", h.seen());
 }
+
+#[test]
+fn endless_energy_while_firing() {
+    // shots dear enough that recharge can't keep up: 300 energy each, two a
+    // second, against 115 a second of recharge
+    let pricey = "[Warbird]\nBulletFireEnergy = 300\n";
+    for (honest, want) in [(true, 0), (false, 1)] {
+        let mut h = H::with("Enabled = 1\nCooldown = 0\n", pricey);
+        let p = h.player("alice");
+        let t0 = h.t as u32;
+        let mut energy = 1700i32;
+        for i in 0..8u32 {
+            h.tick(50);
+            if honest {
+                energy = (energy - 300 + 57).max(0);
+            }
+            h.send_pos(
+                p,
+                t0 + i * 50,
+                8000,
+                8000,
+                0,
+                energy as i16,
+                weapon_type::BULLET,
+                0,
+            );
+        }
+        let n = h.seen().iter().filter(|c| **c == Check::Energy).count();
+        assert_eq!(n.min(1), want, "honest: {honest}, {:?}", h.seen());
+    }
+}

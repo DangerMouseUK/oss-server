@@ -10,7 +10,11 @@ pub mod chat;
 pub mod clientset;
 pub mod cmdman;
 pub mod core;
+pub mod fg_turf;
+pub mod fg_wz;
+pub mod flagcore;
 pub mod game;
+pub mod jackpot;
 pub mod mapdata;
 pub mod mapnewsdl;
 pub mod playercmd;
@@ -38,6 +42,11 @@ pub const DEFAULT_MODULES: &[&str] = &[
     "auth_file",
     "security",
     "points_kill",
+    "flagcore",
+    "fg_wz",
+    "fg_turf",
+    "jackpot",
+    "points_flag",
     "playercmd",
 ];
 
@@ -64,6 +73,13 @@ pub fn builtin_catalog() -> ModuleCatalog {
     });
     c.register("security", &["security:security"], || {
         security::SecurityModule
+    });
+    c.register("flagcore", &[], || flagcore::FlagCoreModule);
+    c.register("fg_wz", &["<py> fg_wz"], || fg_wz::FgWzModule);
+    c.register("fg_turf", &["<py> fg_turf"], || fg_turf::FgTurfModule);
+    c.register("jackpot", &["scoring:jackpot"], || jackpot::JackpotModule);
+    c.register("points_flag", &["scoring:points_flag"], || {
+        jackpot::PointsFlagModule
     });
     c.register("auth_file", &[], || auth_file::AuthFileModule);
     c.register("playercmd", &[], || playercmd::PlayerCmdModule);

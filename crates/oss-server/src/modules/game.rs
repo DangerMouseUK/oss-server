@@ -67,6 +67,13 @@ pub struct ShipFreqChange {
     pub ship: Ship,
     /// New frequency.
     pub freq: u16,
+    /// Ship before the change.
+    pub old_ship: Ship,
+    /// Frequency before the change.
+    pub old_freq: u16,
+    /// True for ASSS `CB_SHIPCHANGE` (a ship+freq change), false for
+    /// `CB_FREQCHANGE` (frequency only).
+    pub ship_change: bool,
 }
 
 impl Event for ShipFreqChange {
@@ -374,6 +381,7 @@ pub fn set_ship_and_freq(zone: &mut Zone, pid: PlayerId, ship: Ship, freq: u16) 
     if freq > 9999 || ship.0 > 8 || (p.ship == ship && p.freq == freq) {
         return;
     }
+    let (old_ship, old_freq) = (p.ship, p.freq);
     p.ship = ship;
     p.freq = freq;
     if let Some(d) = gd(zone, pid) {
@@ -393,6 +401,9 @@ pub fn set_ship_and_freq(zone: &mut Zone, pid: PlayerId, ship: Ship, freq: u16) 
         arena,
         ship,
         freq,
+        old_ship,
+        old_freq,
+        ship_change: true,
     });
     tracing::debug!(target: "game", pid = pid.0, ship = ship.0, freq, "changed ship/freq");
 }
@@ -406,6 +417,7 @@ pub fn set_freq(zone: &mut Zone, pid: PlayerId, freq: u16) {
     if freq > 9999 || p.freq == freq {
         return;
     }
+    let old_freq = p.freq;
     p.freq = freq;
     let ship = p.ship;
     let mut buf = Vec::with_capacity(6);
@@ -422,6 +434,9 @@ pub fn set_freq(zone: &mut Zone, pid: PlayerId, freq: u16) {
         arena,
         ship,
         freq,
+        old_ship: ship,
+        old_freq,
+        ship_change: false,
     });
 }
 
@@ -701,8 +716,7 @@ fn on_death(zone: &mut Zone, pid: PlayerId, pkt: &[u8]) {
         tracing::warn!(target: "game", pid = pid.0, killer = d.killer, "reported kill by bad pid");
         return;
     };
-    // flags aren't implemented yet, so nobody carries any
-    let flags = 0i16;
+    let flags = zone.players.get(pid).map_or(0, |p| p.flags_carried);
     let ev = Kill {
         arena,
         killer,

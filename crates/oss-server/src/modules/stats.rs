@@ -43,6 +43,18 @@ pub mod stat {
     pub const FLAG_KILLS: u16 = 204;
     /// Deaths while carrying flags.
     pub const FLAG_DEATHS: u16 = 205;
+    /// Flags picked up.
+    pub const FLAG_PICKUPS: u16 = 200;
+    /// Flags dropped.
+    pub const FLAG_DROPS: u16 = 202;
+    /// Flags neuted (ship/freq change, leaving).
+    pub const FLAG_NEUT_DROPS: u16 = 203;
+    /// Flag games won.
+    pub const FLAG_GAMES_WON: u16 = 206;
+    /// Flag games lost.
+    pub const FLAG_GAMES_LOST: u16 = 207;
+    /// Turf flags claimed.
+    pub const TURF_TAGS: u16 = 208;
 }
 
 /// Statistics access (ASSS `Istats`).
@@ -188,6 +200,7 @@ impl Module for BasicStatsModule {
                 st.increment(z, k.killed, stat::FLAG_DEATHS, 1);
             }
         });
+        register_flag_stats(zone, me);
         Ok(())
     }
 }
@@ -235,4 +248,61 @@ impl Module for PointsKillModule {
         });
         Ok(())
     }
+}
+
+/// basicstats' flag counters (ASSS `myflaggain`/`myflaglost`/`myflagreset`).
+fn register_flag_stats(zone: &mut Zone, me: Owner) {
+    use super::flagcore::{Cleanup, FlagGain, FlagLost, FlagReset, GainHow};
+    zone.on::<FlagGain>(me, Scope::Global, |z, ev| {
+        if ev.how == GainHow::Pickup
+            && let Some(st) = z.iface::<dyn Stats>()
+        {
+            st.increment(z, ev.player, stat::FLAG_PICKUPS, 1);
+        }
+    });
+    zone.on::<FlagLost>(me, Scope::Global, |z, ev| {
+        let Some(st) = z.iface::<dyn Stats>() else {
+            return;
+        };
+        match ev.reason {
+            Cleanup::Dropped | Cleanup::InSafe => st.increment(z, ev.player, stat::FLAG_DROPS, 1),
+            Cleanup::ShipChange | Cleanup::FreqChange | Cleanup::LeftArena => {
+                st.increment(z, ev.player, stat::FLAG_NEUT_DROPS, 1);
+            }
+            _ => {}
+        }
+    });
+    zone.on::<FlagReset>(me, Scope::Global, |z, ev| {
+        if ev.freq < 0 || ev.points <= 0 {
+            return;
+        }
+        let Some(st) = z.iface::<dyn Stats>() else {
+            return;
+        };
+        let members: Vec<(PlayerId, bool, bool)> = z
+            .players
+            .in_arena(ev.arena)
+            .filter(|p| !p.ship.is_spec())
+            .map(|p| {
+                let safe = p.pos.status & oss_proto::position::status::SAFEZONE != 0;
+                (p.id, p.freq as i16 == ev.freq, safe)
+            })
+            .collect();
+        for (pid, won, safe) in members {
+            if won {
+                st.increment(z, pid, stat::FLAG_GAMES_WON, 1);
+                // no flag reward in a safe zone
+                if !safe {
+                    st.increment(z, pid, stat::FLAG_POINTS, ev.points);
+                }
+            } else {
+                st.increment(z, pid, stat::FLAG_GAMES_LOST, 1);
+            }
+        }
+    });
+    zone.on::<super::fg_turf::TurfTag>(me, Scope::Global, |z, ev| {
+        if let Some(st) = z.iface::<dyn Stats>() {
+            st.increment(z, ev.player, stat::TURF_TAGS, 1);
+        }
+    });
 }

@@ -171,6 +171,8 @@ pub struct Player {
     pub client_name: String,
     /// Scores shown to other players (kept by the stats module).
     pub score: Score,
+    /// Flags carried (kept by flagcore).
+    pub flags_carried: i16,
     /// Module-owned per-player data.
     pub ext: Extensions,
 }
@@ -202,6 +204,7 @@ impl Player {
             want_all_lvz: false,
             client_name: String::new(),
             score: Score::default(),
+            flags_carried: 0,
             ext: Extensions::default(),
         }
     }

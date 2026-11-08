@@ -429,7 +429,7 @@ pub fn player_data(p: &Player) -> PlayerData {
         wins: p.score.wins,
         losses: p.score.losses,
         attached_to: -1,
-        flags_carried: 0,
+        flags_carried: p.flags_carried,
         misc_bits: 0,
     }
 }

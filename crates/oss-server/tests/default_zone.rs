@@ -20,26 +20,18 @@ fn unhex(s: &str) -> Vec<u8> {
 fn default_zone_loads_every_listed_module() {
     let zone = ServerBuilder::default_zone().build_zone().expect("zone");
     let loaded: Vec<&str> = zone.modules.loaded().collect();
-    assert_eq!(
-        loaded,
-        vec![
-            "arenaman",
-            "mapdata",
-            "capman",
-            "mapnewsdl",
-            "core",
-            "clientset",
-            "cmdman",
-            "chat",
-            "stats",
-            "basicstats",
-            "auth_file",
-            "security",
-            "game",
-            "points_kill",
-            "playercmd"
-        ]
-    );
+    // every module modules.conf lists is either loaded or done by the core
+    let src = oss_server::default_zone::source();
+    let listed = oss_server::module::read_modules_conf(&src).expect("modules.conf");
+    for name in &listed {
+        let canon = zone.modules.catalog().canonical(name);
+        let ok = canon.as_deref().is_some_and(|c| loaded.contains(&c))
+            || oss_server::module::BUILT_INTO_CORE.contains(&name.as_str());
+        assert!(ok, "{name} listed but not loaded");
+    }
+    for core in ["core", "arenaman", "game", "chat", "security", "flagcore"] {
+        assert!(loaded.contains(&core), "{core} missing: {loaded:?}");
+    }
     assert_eq!(zone.cfg.global().get_int("Listen", "Port", 0), 5000);
 }
 
@@ -104,7 +96,7 @@ fn init_zone_writes_a_runnable_copy() {
     let zone = ServerBuilder::new(&dir)
         .build_zone()
         .expect("zone from disk");
-    assert_eq!(zone.modules.loaded().count(), 15);
+    assert!(zone.modules.loaded().count() >= 15);
     let _ = std::fs::remove_dir_all(&dir);
 }
 

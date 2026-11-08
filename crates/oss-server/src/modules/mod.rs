@@ -15,6 +15,7 @@ pub mod chatnet;
 pub mod clientset;
 pub mod cmdman;
 pub mod core;
+pub mod directory;
 pub mod fg_turf;
 pub mod fg_wz;
 pub mod flagcore;
@@ -90,6 +91,7 @@ pub fn builtin_catalog() -> ModuleCatalog {
     c.register("cmdman", &[], || cmdman::CmdManModule);
     c.register("chat", &[], || chat::ChatModule);
     c.register("chatnet", &[], || chatnet::ChatNetModule);
+    c.register("directory", &[], || directory::DirectoryModule);
     c.register("obscene", &[], || obscene::ObsceneModule);
     c.register("game", &[], || game::GameModule);
     c.register("mapdata", &[], || mapdata::MapDataModule);

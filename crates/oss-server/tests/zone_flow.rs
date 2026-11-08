@@ -42,9 +42,11 @@ impl H {
             (
                 "conf/groupdef.conf",
                 "[default]\ncmd_version = 1\ncmd_go = 1\ncmd_help = 1\n\
+                 privcmd_freqkick\nprivcmd_giveowner\ncmd_takeownership\n\
                  [mod]\ncmd_version = 1\ncmd_go = 1\nseemodchat\nsendmodchat\n\
                  cmd_arena\nprivcmd_setship\nprivcmd_lock\nprivcmd_prize\nprivcmd_info\n\
-                 privcmd_warpto\ncmd_z\nhigher_than_default\n"
+                 privcmd_warpto\ncmd_z\nhigher_than_default\n\
+                 privcmd_freqkick\nprivcmd_giveowner\ncmd_takeownership\n"
                     .to_owned(),
             ),
             ("conf/staff.conf", "[(global)]\nbob = mod\n".to_owned()),
@@ -659,5 +661,182 @@ fn staff_commands() {
             .any(|t| t.starts_with("server restart soon  -bob")),
         "{got:?} {:?}",
         chats(&h.take(bob))
+    );
+}
+
+fn texts(pkts: &[Vec<u8>]) -> Vec<String> {
+    chats(pkts)
+        .iter()
+        .map(|c| String::from_utf8_lossy(&c.text).into_owned())
+        .collect()
+}
+
+#[test]
+fn banners_reach_the_arena() {
+    let mut h = H::new();
+    let (alice, _) = h.login("alice", "x");
+    let (bob, _) = h.login("bob", "secret");
+    h.enter(alice);
+    h.enter(bob);
+    h.take(alice);
+    h.take(bob);
+
+    let mut pkt = vec![c2s::kind::BANNER];
+    pkt.extend((0..96).map(|i| i as u8));
+    h.send(alice, &pkt);
+    let b = h
+        .take(bob)
+        .into_iter()
+        .find(|d| d[0] == s2c::kind::BANNER)
+        .expect("0x1F");
+    let b = s2c::Banner::decode(&b).expect("decode");
+    assert_eq!(b.pid, alice.0 as i16);
+    assert_eq!(b.banner.0[95], 95);
+
+    // in a ship: refused
+    h.send(bob, &[c2s::kind::SET_SHIP, 0]);
+    h.take(bob);
+    h.send(bob, &pkt);
+    let out = h.take(bob);
+    assert!(!out.iter().any(|d| d[0] == s2c::kind::BANNER));
+    assert!(texts(&out).iter().any(|t| t.contains("spectator mode")));
+    // short packets are ignored
+    h.send(alice, &pkt[..50]);
+
+    // late arrivals get the banners already shown
+    let (carol, _) = h.login("carol", "x");
+    let out = h.enter(carol);
+    assert!(
+        out.iter()
+            .filter(|d| d[0] == s2c::kind::BANNER)
+            .filter_map(|d| s2c::Banner::decode(d).ok())
+            .any(|b| b.pid == alice.0 as i16)
+    );
+}
+
+#[test]
+fn freq_owners() {
+    let mut h = H::new();
+    let (alice, _) = h.login("alice", "x");
+    let (bob, _) = h.login("bob", "secret");
+    let (carol, _) = h.login("carol", "x");
+    for p in [alice, bob, carol] {
+        h.enter(p);
+        h.send(p, &[c2s::kind::SET_SHIP, 0]);
+    }
+    let freq = |h: &H, p: PlayerId| h.zone.players.get(p).map(|x| x.freq);
+    h.take(alice);
+    h.send(alice, &[c2s::kind::SET_FREQ, 100, 0]);
+    assert_eq!(freq(&h, alice), Some(100));
+    assert!(
+        texts(&h.take(alice))
+            .iter()
+            .any(|t| t.contains("owner of freq 100"))
+    );
+    h.take(bob);
+    h.send(bob, &[c2s::kind::SET_FREQ, 100, 0]);
+    assert!(
+        texts(&h.take(bob))
+            .iter()
+            .any(|t| t.contains("This freq has an owner"))
+    );
+
+    // a non-owner can't kick; the owner can, after a delay
+    h.chat(bob, chat_type::PRIVATE, alice.0 as i16, "?freqkick");
+    assert!(
+        texts(&h.take(bob))
+            .iter()
+            .any(|t| t == "You are not the owner of your freq.")
+    );
+    h.chat(alice, chat_type::PRIVATE, bob.0 as i16, "?freqkick");
+    assert_eq!(freq(&h, bob), Some(100));
+    // a ship change on the same freq doesn't dodge the kick
+    h.send(bob, &[c2s::kind::SET_SHIP, 1]);
+    h.tick(301);
+    assert_eq!(h.zone.players.get(bob).map(|p| p.ship.0), Some(8));
+    assert!(
+        texts(&h.take(bob))
+            .iter()
+            .any(|t| t == "You have been kicked off your freq.")
+    );
+
+    // ownership can be shared, and claimed once the owners leave
+    h.send(carol, &[c2s::kind::SET_FREQ, 100, 0]);
+    h.chat(alice, chat_type::PRIVATE, carol.0 as i16, "?giveowner");
+    h.chat(carol, chat_type::PRIVATE, alice.0 as i16, "?freqkick");
+    assert!(
+        texts(&h.take(carol))
+            .iter()
+            .any(|t| t == "You can not kick other freq owners off your freq.")
+    );
+    h.send(alice, &[c2s::kind::SET_SHIP, 1]);
+    assert!(oss_server::modules::freqowners::owns_freq(&h.zone, alice));
+    h.send(bob, &[c2s::kind::SET_SHIP, 0]);
+    h.send(bob, &[c2s::kind::SET_FREQ, 100, 0]);
+    h.send(alice, &[c2s::kind::SET_FREQ, 5, 0]);
+    h.send(carol, &[c2s::kind::SET_FREQ, 6, 0]);
+    h.take(bob);
+    h.chat(bob, chat_type::PUBLIC, 0, "?takeownership");
+    assert!(
+        texts(&h.take(bob))
+            .iter()
+            .any(|t| t == "You are now the owner of your freq.")
+    );
+    h.send(alice, &[c2s::kind::SET_FREQ, 100, 0]);
+    h.chat(alice, chat_type::PUBLIC, 0, "?takeownership");
+    let out = texts(&h.take(alice));
+    assert!(
+        out.iter()
+            .any(|t| t == "Your freq already has one or more owners:")
+    );
+    assert!(out.iter().any(|t| t == "bob"));
+    // public freqs never have owners
+    h.send(carol, &[c2s::kind::SET_FREQ, 6, 0]);
+    h.take(carol);
+    h.chat(carol, chat_type::PUBLIC, 0, "?takeownership");
+    assert!(
+        texts(&h.take(carol))
+            .iter()
+            .any(|t| t == "Your freq can not have an owner.")
+    );
+}
+
+#[test]
+fn redirects() {
+    use oss_server::modules::redirect::Redirect;
+    let mut h = H::with_conf(
+        ARENA_CONF,
+        "[Chat]\nMessageReliable = 1\n[Redirects]\nother = 127.0.0.1:5100:duel\n",
+    );
+    let (alice, _) = h.login("alice", "x");
+    h.enter(alice);
+    h.take(alice);
+    let r = h.zone.iface::<dyn Redirect>().expect("redirect");
+    assert!(r.alias_redirect(&mut h.zone, &[alice], "other"));
+    assert!(r.alias_redirect(&mut h.zone, &[alice], "10.1.2.3:6000"));
+    assert!(!r.alias_redirect(&mut h.zone, &[alice], "nowhere"));
+    assert!(r.arena_request(&mut h.zone, alice, "other"));
+    h.lo.collect(&mut h.zone);
+    let got: Vec<_> = h
+        .take(alice)
+        .into_iter()
+        .filter(|d| d[0] == s2c::kind::REDIRECT)
+        .filter_map(|d| s2c::Redirect::decode(&d).ok())
+        .map(|r| {
+            (
+                r.ip,
+                r.port,
+                r.arena_type,
+                r.arena.to_str().map(str::to_owned),
+            )
+        })
+        .collect();
+    assert_eq!(
+        got,
+        vec![
+            ([127, 0, 0, 1], 5100, -3, Some("duel".to_owned())),
+            ([10, 1, 2, 3], 6000, -1, Some(String::new())),
+            ([127, 0, 0, 1], 5100, -3, Some("duel".to_owned())),
+        ]
     );
 }

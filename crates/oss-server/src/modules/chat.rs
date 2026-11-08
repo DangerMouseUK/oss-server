@@ -138,6 +138,48 @@ pub fn message(zone: &mut Zone, to: PlayerId, text: &str) {
     }
 }
 
+/// Splits `text` into lines of at most `width` bytes at spaces (ASSS
+/// `wrap_text`): words longer than `width - 1` are cut short.
+pub fn wrap_text(text: &str, width: usize) -> Vec<String> {
+    let width = width.clamp(2, 250);
+    let mut out = Vec::new();
+    let mut line = String::new();
+    let mut rest = Some(text);
+    while let Some(r) = rest.filter(|r| !r.is_empty()) {
+        let (word, next) = match r.split_once(' ') {
+            Some((w, n)) => (w, Some(n)),
+            None => (r, None),
+        };
+        let mut end = word.len().min(width - 1);
+        while !word.is_char_boundary(end) {
+            end -= 1;
+        }
+        let word = &word[..end];
+        if line.len() + word.len() > width {
+            if line.ends_with(' ') {
+                line.pop();
+            }
+            out.push(std::mem::take(&mut line));
+        }
+        line.push_str(word);
+        if next.is_some_and(|n| !n.is_empty()) {
+            line.push(' ');
+        }
+        rest = next;
+    }
+    if !line.is_empty() && !line.starts_with(' ') {
+        out.push(line);
+    }
+    out
+}
+
+/// Sends `text` wrapped at 80 columns (ASSS `SendWrappedText`).
+pub fn wrapped_message(zone: &mut Zone, to: PlayerId, text: &str) {
+    for l in wrap_text(text, 80) {
+        message(zone, to, &l);
+    }
+}
+
 fn is_command(text: &str) -> bool {
     let mut c = text.chars();
     matches!(c.next(), Some('?' | '*')) && c.next().is_some()

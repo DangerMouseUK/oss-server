@@ -517,7 +517,18 @@ fn on_go_arena(zone: &mut Zone, player: PlayerId, pkt: &[u8]) {
             if !has_cap_go(zone, player) {
                 return;
             }
-            String::from_utf8_lossy(go_pkt.arena.as_bytes()).into_owned()
+            let name = String::from_utf8_lossy(go_pkt.arena.as_bytes()).into_owned();
+            let continuum = zone
+                .players
+                .get(player)
+                .is_some_and(|p| p.kind == crate::player::ClientKind::Continuum);
+            if continuum
+                && let Some(r) = zone.iface::<dyn super::redirect::Redirect>()
+                && r.arena_request(zone, player, &name)
+            {
+                return;
+            }
+            name
         }
         -2 | -1 => "0".to_owned(),
         n if n >= 0 => {

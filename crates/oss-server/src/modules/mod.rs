@@ -6,6 +6,7 @@
 pub mod arenaman;
 pub mod auth_file;
 pub mod balls;
+pub mod banners;
 pub mod bricks;
 pub mod capman;
 pub mod chat;
@@ -15,6 +16,7 @@ pub mod core;
 pub mod fg_turf;
 pub mod fg_wz;
 pub mod flagcore;
+pub mod freqowners;
 pub mod game;
 pub mod jackpot;
 pub mod koth;
@@ -26,6 +28,7 @@ pub mod periodic;
 pub mod persist;
 pub mod playercmd;
 pub mod points_goal;
+pub mod redirect;
 pub mod security;
 pub mod staffcmd;
 pub mod stats;
@@ -56,7 +59,10 @@ pub const DEFAULT_MODULES: &[&str] = &[
     "flagcore",
     "balls",
     "bricks",
+    "banners",
     "koth",
+    "freqowners",
+    "redirect",
     "lagdata",
     "lagaction",
     "periodic",
@@ -98,7 +104,10 @@ pub fn builtin_catalog() -> ModuleCatalog {
     c.register("flagcore", &[], || flagcore::FlagCoreModule);
     c.register("balls", &[], || balls::BallsModule);
     c.register("bricks", &[], || bricks::BricksModule);
+    c.register("banners", &[], || banners::BannersModule);
     c.register("koth", &[], || koth::KothModule);
+    c.register("freqowners", &[], || freqowners::FreqOwnersModule);
+    c.register("redirect", &[], || redirect::RedirectModule);
     c.register("lagdata", &[], || lagdata::LagDataModule);
     c.register("lagaction", &[], || lagdata::LagActionModule);
     c.register("persist", &["scoring:persist"], || persist::PersistModule);

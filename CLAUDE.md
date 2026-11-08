@@ -12,6 +12,6 @@ Rust zone server for SubSpace/Continuum. Licence **GPL-2.0-or-later**. Behaviour
 ## Rules
 - Untrusted input never panics the server. No `unwrap`/`expect` on network or file data.
 - Performance budget (PRD): 500 players in one arena at under 20% of one core. Avoid per-packet allocations on hot paths; measure with benches before optimising.
-- Tests use synthetic zones/maps generated in tests or small hand-made fixtures. No game assets, captures, personal data or machine paths in the repo.
+- Tests use synthetic zones/maps or small hand-made fixtures. The project's default content under `zone/` (the GPL ASSS sample zone: configs and `.lvl` maps) is committed on purpose. Never commit `Continuum.exe` or its DLLs, `scrty*` files, third-party zone downloads, captures, personal data or machine paths.
 - Continuum's security handshake is not implemented here; expose the hooks a private module needs.
 - Before committing: `cargo fmt --all`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`.

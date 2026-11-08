@@ -61,9 +61,10 @@ pub fn command(zone: &mut Zone, sender: PlayerId, line: &str, target: Target) {
         return;
     };
     // a leading backslash sends the command to the billing server only
-    if line.starts_with('\\') {
-        return;
-    }
+    let (line, skip_local) = match line.strip_prefix('\\') {
+        Some(l) => (l, true),
+        None => (line, false),
+    };
     let (name, params) = split_command(line);
     if name.is_empty() {
         return;
@@ -76,9 +77,28 @@ pub fn command(zone: &mut Zone, sender: PlayerId, line: &str, target: Target) {
         },
         Target::Freq(..) => ("privcmd", None),
     };
-    let handlers = zone.commands.lookup(&name, Some(arena));
+    let handlers = if skip_local {
+        Vec::new()
+    } else {
+        zone.commands.lookup(&name, Some(arena))
+    };
     if handlers.is_empty() {
-        tracing::debug!(target: "cmdman", pid = sender.0, cmd = %name, "unknown command");
+        // we don't know about this: send it to the biller
+        match zone.commands.default_handler() {
+            Some(f) => f(
+                zone,
+                &Invocation {
+                    name: &name,
+                    params: line,
+                    sender,
+                    arena: Some(arena),
+                    target,
+                },
+            ),
+            None => {
+                tracing::debug!(target: "cmdman", pid = sender.0, cmd = %name, "unknown command");
+            }
+        }
         return;
     }
     if !allowed(zone, sender, &name, prefix, remote) {

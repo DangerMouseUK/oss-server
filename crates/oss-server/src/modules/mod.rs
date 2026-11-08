@@ -7,6 +7,7 @@ pub mod arenaman;
 pub mod auth_file;
 pub mod balls;
 pub mod banners;
+pub mod billing_ssc;
 pub mod bricks;
 pub mod capman;
 pub mod chat;
@@ -105,6 +106,7 @@ pub fn builtin_catalog() -> ModuleCatalog {
     c.register("balls", &[], || balls::BallsModule);
     c.register("bricks", &[], || bricks::BricksModule);
     c.register("banners", &[], || banners::BannersModule);
+    c.register("billing_ssc", &[], || billing_ssc::BillingSscModule);
     c.register("koth", &[], || koth::KothModule);
     c.register("freqowners", &[], || freqowners::FreqOwnersModule);
     c.register("redirect", &[], || redirect::RedirectModule);

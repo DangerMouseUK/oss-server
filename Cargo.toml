@@ -1,6 +1,8 @@
 [workspace]
 resolver = "3"
 members = ["crates/*"]
+# `cargo run` at the root runs the zone server; `-p oss-biller` runs the biller.
+default-members = ["crates/oss-server"]
 
 [workspace.package]
 version = "0.1.0"

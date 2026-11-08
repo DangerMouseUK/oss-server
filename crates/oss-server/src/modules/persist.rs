@@ -204,13 +204,34 @@ fn save_player(zone: &mut Zone, pid: PlayerId, arena: Option<ArenaId>) {
 /// (or every group with `None`); players there have that data cleared.
 pub fn end_interval(zone: &mut Zone, arena: Option<ArenaId>, interval: Interval) {
     let grp = arena.map(|a| group(zone, Some(a)));
+    end_group_interval(zone, grp, arena, interval);
+}
+
+/// [`end_interval`] for the public arenas' group (ASSS `AG_PUBLIC`), whether
+/// or not a public arena exists right now.
+pub fn end_public_interval(zone: &mut Zone, interval: Interval) {
+    let arena = zone.arenas.iter().find(|a| a.is_public()).map(|a| a.id);
+    end_group_interval(
+        zone,
+        Some(crate::arena::PUBLIC_BASENAME.to_owned()),
+        arena,
+        interval,
+    );
+}
+
+fn end_group_interval(
+    zone: &mut Zone,
+    grp: Option<String>,
+    arena: Option<ArenaId>,
+    interval: Interval,
+) {
     // save current data first so the ended period keeps its final values
     let affected: Vec<(PlayerId, ArenaId)> = zone
         .players
         .iter()
         .filter(|p| p.status == PlayerStatus::Playing)
         .filter_map(|p| p.arena.map(|a| (p.id, a)))
-        .filter(|(_, a)| arena.is_none() || grp.as_deref() == Some(group(zone, Some(*a)).as_str()))
+        .filter(|(_, a)| grp.is_none() || grp.as_deref() == Some(group(zone, Some(*a)).as_str()))
         .collect();
     for (pid, a) in &affected {
         save_player(zone, *pid, Some(*a));

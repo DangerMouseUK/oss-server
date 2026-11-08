@@ -1,0 +1,109 @@
+# SubSpace Core (SSC) billing protocol. Layouts from ASSS 1.4.4
+# src/packets/billing.h compiled unmodified; sizes and field values follow the send
+# sites in src/core/billing_ssc.c (quoted in README). All fields little-endian, packed.
+# layout <struct> <sizeof>
+# field <struct> <name> <offset> <size>
+# s2b/b2s <name> <length as sent> <bytes>
+# Every packet rides the reliable layer (NET_RELIABLE) on a client connection the zone
+# opens to the biller; the biller never acknowledges the connect packet.
+layout PlayerScore 14
+field PlayerScore Kills 0 2
+field PlayerScore Deaths 2 2
+field PlayerScore Flags 4 2
+field PlayerScore Score 6 4
+field PlayerScore FlagScore 10 4
+layout S2B_ServerConnect 173
+field S2B_ServerConnect Type 0 1
+field S2B_ServerConnect ServerID 1 4
+field S2B_ServerConnect GroupID 5 4
+field S2B_ServerConnect ScoreID 9 4
+field S2B_ServerConnect ServerName 13 126
+field S2B_ServerConnect Port 139 2
+field S2B_ServerConnect Password 141 32
+layout S2B_UserLogin 342
+field S2B_UserLogin Type 0 1
+field S2B_UserLogin MakeNew 1 1
+field S2B_UserLogin IPAddress 2 4
+field S2B_UserLogin Name 6 32
+field S2B_UserLogin Password 38 32
+field S2B_UserLogin ConnectionID 70 4
+field S2B_UserLogin MachineID 74 4
+field S2B_UserLogin Timezone 78 4
+field S2B_UserLogin Unused0 82 1
+field S2B_UserLogin Sysop 83 1
+field S2B_UserLogin ClientVersion 84 2
+field S2B_UserLogin ClientExtraData 86 256
+layout S2B_UserLogoff 29
+field S2B_UserLogoff ConnectionID 1 4
+field S2B_UserLogoff DisconnectReason 5 2
+field S2B_UserLogoff Latency 7 2
+field S2B_UserLogoff Ping 9 2
+field S2B_UserLogoff PacketLossS2C 11 2
+field S2B_UserLogoff PacketLossC2S 13 2
+field S2B_UserLogoff Score 15 14
+layout S2B_UserScore 19
+field S2B_UserScore ConnectionID 1 4
+field S2B_UserScore Score 5 14
+layout S2B_UserBanner 101
+field S2B_UserBanner ConnectionID 1 4
+field S2B_UserBanner Data 5 96
+layout S2B_UserPrivateChat 261
+field S2B_UserPrivateChat ConnectionID 1 4
+field S2B_UserPrivateChat GroupID 5 4
+field S2B_UserPrivateChat SubType 9 1
+field S2B_UserPrivateChat Sound 10 1
+field S2B_UserPrivateChat Text 11 250
+layout S2B_UserChannelChat 287
+field S2B_UserChannelChat ConnectionID 1 4
+field S2B_UserChannelChat ChannelNr 5 32
+field S2B_UserChannelChat Text 37 250
+layout S2B_UserCommand 255
+field S2B_UserCommand ConnectionID 1 4
+field S2B_UserCommand Text 5 250
+layout S2B_UserDemographics 770
+field S2B_UserDemographics ConnectionID 1 4
+field S2B_UserDemographics Data 5 765
+layout S2B_ServerCapabilities 5
+layout B2S_UserLogin 192
+field B2S_UserLogin Result 1 1
+field B2S_UserLogin ConnectionID 2 4
+field B2S_UserLogin Name 6 24
+field B2S_UserLogin Squad 30 24
+field B2S_UserLogin Banner 54 96
+field B2S_UserLogin SecondsPlayed 150 4
+field B2S_UserLogin FirstLogin 154 12
+field B2S_UserLogin Unused0 166 4
+field B2S_UserLogin UserID 170 4
+field B2S_UserLogin Unused1 174 4
+field B2S_UserLogin Score 178 14
+layout B2S_UserPrivateChat 257
+field B2S_UserPrivateChat SourceServerID 1 4
+field B2S_UserPrivateChat SubType 5 1
+field B2S_UserPrivateChat Sound 6 1
+field B2S_UserPrivateChat Text 7 250
+layout B2S_UserKickout 7
+field B2S_UserKickout ConnectionID 1 4
+field B2S_UserKickout Reason 5 2
+layout B2S_UserCommandChat 255
+field B2S_UserCommandChat ConnectionID 1 4
+field B2S_UserCommandChat Text 5 250
+layout B2S_UserChannelChat 256
+field B2S_UserChannelChat ConnectionID 1 4
+field B2S_UserChannelChat ChannelNr 5 1
+field B2S_UserChannelChat Text 6 250
+layout B2S_UserMChannelChat 477
+field B2S_UserMChannelChat Count 1 1
+field B2S_UserMChannelChat Recipient 2 225
+field B2S_UserMChannelChat Text 227 250
+s2b connect 173 028813000001000000881300004f53532054657374205a6f6e650000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000881362696c6c70770000000000000000000000000000000000000000000000000000
+s2b login_noextra 86 04007f000001706c617965720000000000000000000000000000000000000000000000000000707700000000000000000000000000000000000000000000000000000000000007000000efbeadde0000000000002800
+s2b login_extra4 90 04007f000001706c617965720000000000000000000000000000000000000000000000000000707700000000000000000000000000000000000000000000000000000000000007000000efbeadde000000000000280001020304
+s2b logoff_full 29 050700000000000c002200010002000a0003000200d204000038000000
+s2b logoff_noscore 15 050700000000000c00220001000200
+s2b command 11 13070000003f68656c7000
+s2b chanchat 45 14070000003100000000000000000000000000000000000000000000000000000000000000313b68656c6c6f00
+s2b capabilities 5 1501000000
+s2b ping 1 01
+b2s login_ok 192 010007000000506c61796572000000000000000000000000000000000000537175616400000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000100e0000d307080004000f00370033000000000092100000000000000a0003000200d204000038000000
+b2s login_invalidpw 178 010207000000506c61796572000000000000000000000000000000000000537175616400000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000100e0000d307080004000f0037003300000000009210000000000000
+b2s kickout 7 08070000000300

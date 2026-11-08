@@ -225,6 +225,12 @@ fn c_find(zone: &mut Zone, inv: &Invocation<'_>) {
             }
         }
         Some((n, None)) => format!("{n} is logged in but not in an arena."),
+        None if zone.commands.default_handler().is_some() => {
+            // not here: ask the biller (ASSS sends "\find" to the default handler)
+            let line = format!("\\find {name}");
+            super::cmdman::command(zone, inv.sender, &line, inv.target);
+            return;
+        }
         None => format!("{name} isn't online."),
     };
     message(zone, inv.sender, &text);

@@ -60,6 +60,7 @@ pub struct Command {
 #[derive(Default)]
 pub struct Commands {
     map: HashMap<String, Vec<Command>>,
+    default: Option<(Owner, CommandFn)>,
 }
 
 impl Commands {
@@ -105,6 +106,19 @@ impl Commands {
             .find_map(|c| c.help.clone())
     }
 
+    /// Sets the handler for commands nobody registered and for lines starting
+    /// with a backslash (ASSS `AddCommand(NULL, ...)`; the billing module
+    /// forwards these to the biller). Its [`Invocation::params`] is the whole
+    /// line without the `?` or backslash.
+    pub fn set_default(&mut self, owner: Owner, handler: CommandFn) {
+        self.default = Some((owner, handler));
+    }
+
+    /// The default handler, if one is set.
+    pub fn default_handler(&self) -> Option<CommandFn> {
+        self.default.as_ref().map(|(_, f)| f.clone())
+    }
+
     /// Registered command names.
     pub fn names(&self) -> impl Iterator<Item = &str> {
         self.map.keys().map(String::as_str)
@@ -112,6 +126,9 @@ impl Commands {
 
     /// Removes everything `owner` registered.
     pub fn remove_owner(&mut self, owner: Owner) {
+        if self.default.as_ref().is_some_and(|(o, _)| *o == owner) {
+            self.default = None;
+        }
         for v in self.map.values_mut() {
             v.retain(|c| c.owner != owner);
         }

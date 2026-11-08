@@ -21,6 +21,7 @@ flate2 = "1"
 rusqlite = { version = "0.37", features = ["bundled"] }
 
 [dev-dependencies]
+oss-biller = { path = "../oss-biller" }
 
 [lints]
 workspace = true

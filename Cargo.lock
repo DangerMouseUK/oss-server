@@ -571,6 +571,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
+name = "oss-biller"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "oss-net",
+ "oss-proto",
+ "rusqlite",
+ "sha2",
+ "thiserror",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "oss-formats"
 version = "0.1.0"
 dependencies = [
@@ -600,6 +614,7 @@ dependencies = [
  "clap",
  "flate2",
  "md-5",
+ "oss-biller",
  "oss-formats",
  "oss-net",
  "oss-proto",

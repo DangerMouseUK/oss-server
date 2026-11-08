@@ -138,6 +138,26 @@ pub fn message(zone: &mut Zone, to: PlayerId, text: &str) {
     }
 }
 
+/// Sends a remote private message from another zone (ASSS
+/// `SendRemotePrivMessage`): `(sender)>msg`, or `(#squad)(sender)>msg` for a
+/// squad message.
+pub fn send_remote_priv(
+    zone: &mut Zone,
+    to: &[PlayerId],
+    sound: u8,
+    squad: Option<&str>,
+    sender: &str,
+    msg: &str,
+) {
+    let text = match squad {
+        Some(sq) => format!("(#{sq})({sender})>{msg}"),
+        None => format!("({sender})>{msg}"),
+    };
+    if let Some(c) = zone.iface::<dyn Chat>() {
+        c.send_any_message(zone, to, chat_type::REMOTE_PRIVATE, sound, -1, &text);
+    }
+}
+
 /// Splits `text` into lines of at most `width` bytes at spaces (ASSS
 /// `wrap_text`): words longer than `width - 1` are cut short.
 pub fn wrap_text(text: &str, width: usize) -> Vec<String> {
@@ -409,13 +429,36 @@ fn route_chat(zone: &mut Zone, p: PlayerId, pkt: &[u8]) {
                     None,
                     msg,
                 );
+            } else if zone.players.find_by_name(&dest).is_none() {
+                // not here: the biller (if any) delivers it. As in ASSS the
+                // text is the whole ":target:message".
+                fire(
+                    zone,
+                    p,
+                    Some(arena),
+                    chat_type::REMOTE_PRIVATE,
+                    sound,
+                    None,
+                    None,
+                    &text,
+                );
             }
         }
         chat_type::ARENA | chat_type::SERVER_ERROR | chat_type::WARNING => {
             tracing::warn!(target: "chat", pid = p.0, kind = body.kind, "client sent a server-only chat type");
         }
         chat_type::CHANNEL => {
-            tracing::debug!(target: "chat", pid = p.0, "chat channels not implemented");
+            // "text" or "channel;text": delivered by the biller
+            fire(
+                zone,
+                p,
+                Some(arena),
+                chat_type::CHANNEL,
+                sound,
+                None,
+                None,
+                &text,
+            );
         }
         k => tracing::warn!(target: "chat", pid = p.0, kind = k, "undefined chat type"),
     }

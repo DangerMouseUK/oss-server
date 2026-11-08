@@ -6,38 +6,65 @@
 //! the checks and logs what they find; nothing happens to players unless
 //! `Action` is raised. A false auto-spec is worse than a missed cheat, so every
 //! check allows for latency and jitter, each check counts at most once per
-//! `Cooldown` seconds, and trust recovers over time.
+//! `Cooldown` seconds, and trust recovers over time. Every threshold below is
+//! a setting.
 //!
-//! Checks (none of them simulate movement; see below):
-//! - **clock** (speed hacks): over each `ClockWindow` seconds the client's
-//!   position timestamps may run at most `ClockDrift` percent faster than the
-//!   server's clock;
+//! **Checks without physics:**
+//! - **clock** (timer speed hacks): the client's position timestamps may run
+//!   at most `ClockDrift` percent faster than the server's clock over each
+//!   `ClockWindow` seconds; it counts once `ClockWindows` windows in a row
+//!   drift, so one clock step or a single bad window never counts. A
+//!   timestamp that went backwards (a resynchronised or wrapped clock) starts
+//!   a new window instead. Accepted risk: a computer whose clock really runs
+//!   that fast is indistinguishable from a slow timer hack; such a player is
+//!   told plainly that their clock is fast.
 //! - **fire rate**: consecutive bullets, bombs or mines, measured on the
 //!   client's own timestamps, may not come faster than the ship's
 //!   `BulletFireDelay`/`MultiFireDelay`, `BombFireDelay` or
-//!   `LandmineFireDelay`, less `FireDelaySlack` ticks;
-//! - **weapon level**: guns or bombs above the ship's `MaxGuns`/`MaxBombs`
-//!   (one more for flag carriers, who may get flagger upgrades);
-//! - **flood**: more than `MaxPositionsPerSecond` position packets in a
-//!   second.
+//!   `LandmineFireDelay`, less `FireDelaySlack` ticks. A duplicated packet
+//!   (same timestamp) is ignored.
+//! - **weapon level**: guns or bombs above the ship's `MaxGuns`/`MaxBombs`,
+//!   with one more allowed for flag carriers and, with `Soccer:UseFlagger`,
+//!   ball carriers (the `Flag:Flagger*` upgrades).
+//! - **flood**: more than `MaxPositionsPerSecond` position packets a second.
 //!
-//! Each finding lowers the player's trust (100 = clean) by that check's
-//! weight and raises [`CheatSuspected`]. Trust recovers by
-//! `RecoverPerMinute`. With `Action = 1` a player whose trust falls below
+//! **Physics checks** (`MotionChecks`, on when the module is enabled), using
+//! `oss-sim`'s validation (the same physics the client runs): between two
+//! position packets of a player in a ship, the distance travelled, reported
+//! speed, turn, path through walls, energy (after the weapons the server saw
+//! fired) and stealth/cloak/X-radar/antiwarp bits must be possible for that
+//! ship. The elapsed time is capped by the server's own clock plus
+//! `MotionClockSlack` ticks, so a client can't widen the bounds by skewing
+//! its timestamps; this also catches short bursts of clock speed that the
+//! clock check's long window averages away. Teleport, speed and rotation
+//! count only `MotionMargin` percent past their bound, energy `EnergyMargin`
+//! percent of maximum energy past it. Jumps the server caused or can't see
+//! are excused: respawns, ship changes, `?warpto`, warp prizes, flashes
+//! (warps, portals), turrets; refills after deaths, prizes and ship resets;
+//! enemy repels nearby; free shots under Super.
+//!
+//! **Trust.** Each finding lowers the player's trust (100 = clean) by its
+//! check's weight and raises [`CheatSuspected`]. Trust recovers by
+//! `RecoverPerMinute` (default 10), and that number is the cheat budget: a
+//! check of weight W costs nothing on average below one finding per
+//! W / RecoverPerMinute minutes (weight 10: one a minute). The 5-second
+//! cooldown caps the other end. It is a deliberate floor, so honest players
+//! don't drift towards a spec over a long session.
+//!
+//! **Actions.** With `Action = 1` a player whose trust falls below
 //! `SpecTrust` is moved to spectator mode and can't take a ship until trust
 //! is back above it; with `Action = 2` a player below `KickTrust` is also
-//! kicked. Staff with `seemodchat` get a one-line notice for each action.
-//! Players with `bypasssecurity` are exempt, as are bots.
-//!
-//! Ship limits come from the settings the player's client was actually sent,
-//! read through `oss-sim`'s settings model. Movement, energy and item checks
-//! will use `oss-sim`'s validation API (shared with the client, so both sides
-//! judge physics identically) once oss-core provides it; see
-//! `notes/server-needs-from-core.md`.
+//! kicked. The player is told why, and staff with `seemodchat` get a notice
+//! saying how long the player will be out, so they can use `?trust -r` to
+//! override a false positive. Players with `bypasssecurity` are exempt, as
+//! are bots.
+
+use std::collections::HashMap;
 
 use oss_proto::Packet;
 use oss_proto::c2s;
 use oss_proto::position::{C2SPosition, weapon_type};
+use oss_sim::{Context, Finding, Fired, Limits, MotionMap, Sample, TileMap, Tolerance};
 
 use crate::arena::ArenaId;
 use crate::commands::{Invocation, Target};
@@ -66,7 +93,21 @@ pub enum Check {
     WeaponLevel,
     /// Too many position packets.
     Flood,
+    /// Moved further than the ship could.
+    Teleport,
+    /// Reported a speed the ship can't reach.
+    Speed,
+    /// Turned faster than the ship can.
+    Rotation,
+    /// Passed through or sat inside a wall.
+    Wall,
+    /// More energy than the ship could have.
+    Energy,
+    /// Stealth, cloak, X-radar or antiwarp without the capability.
+    Status,
 }
+
+const CHECKS: usize = 10;
 
 impl Check {
     /// Short name for logs and `?trust`.
@@ -76,11 +117,30 @@ impl Check {
             Check::FireRate => "fire rate",
             Check::WeaponLevel => "weapon level",
             Check::Flood => "flood",
+            Check::Teleport => "teleport",
+            Check::Speed => "speed",
+            Check::Rotation => "rotation",
+            Check::Wall => "wall",
+            Check::Energy => "energy",
+            Check::Status => "status",
         }
     }
 
     fn index(self) -> usize {
         self as usize
+    }
+
+    /// What the player is told when this check moves them to spectator mode.
+    fn player_reason(self, detail: &str) -> String {
+        match self {
+            Check::Clock => format!(
+                "Your computer's clock is running fast ({detail}), which looks like a speed hack to the server. Fixing the clock fixes this; staff can help."
+            ),
+            c => format!(
+                "You have been moved to spectator mode by the anti-cheat checks ({}).",
+                c.name()
+            ),
+        }
     }
 }
 
@@ -116,26 +176,37 @@ pub struct AcConfig {
     pub spec_trust: i32,
     /// Kick below this trust.
     pub kick_trust: i32,
-    /// Trust regained per minute.
+    /// Trust regained per minute (the cheat budget, see the module docs).
     pub recover_per_minute: i32,
     /// A check counts at most once per this many ticks.
     pub cooldown: u64,
     /// Weights per [`Check`].
-    pub weights: [i32; 4],
+    pub weights: [i32; CHECKS],
     /// Clock window (ticks).
     pub clock_window: u64,
+    /// Drifting windows in a row before the clock check counts.
+    pub clock_windows: u32,
     /// Allowed clock speed-up, percent.
     pub clock_drift: f64,
     /// Ticks forgiven on fire delays.
     pub fire_slack: u32,
     /// Position packets per second allowed.
     pub max_positions: u32,
+    /// Run the physics checks.
+    pub motion: bool,
+    /// Percent past a movement bound before it counts.
+    pub motion_margin: u32,
+    /// Percent of maximum energy past the energy bound before it counts.
+    pub energy_margin: u32,
+    /// Ticks added to the server's elapsed time when capping the client's.
+    pub clock_slack: u32,
 }
 
 impl AcConfig {
     /// Reads `[AntiCheat]`.
     pub fn load(cfg: &crate::config::ConfigFile) -> Self {
         let i = |k: &str, d: i32| cfg.get_int("AntiCheat", k, d);
+        let u = |k: &str, d: i32| u32::try_from(i(k, d)).unwrap_or(0);
         Self {
             enabled: i("Enabled", 0) != 0,
             action: i("Action", 0).clamp(0, 2),
@@ -148,17 +219,28 @@ impl AcConfig {
                 i("FireRateWeight", 10),
                 i("WeaponLevelWeight", 25),
                 i("FloodWeight", 10),
+                i("TeleportWeight", 30),
+                i("SpeedWeight", 20),
+                i("RotationWeight", 10),
+                i("WallWeight", 30),
+                i("EnergyWeight", 15),
+                i("StatusWeight", 25),
             ],
             clock_window: u64::try_from(i("ClockWindow", 20)).unwrap_or(20).max(5) * 100,
+            clock_windows: u("ClockWindows", 2).max(1),
             clock_drift: f64::from(i("ClockDrift", 5).max(1)) / 100.0,
-            fire_slack: u32::try_from(i("FireDelaySlack", 2)).unwrap_or(2),
-            max_positions: u32::try_from(i("MaxPositionsPerSecond", 100)).unwrap_or(100),
+            fire_slack: u("FireDelaySlack", 2),
+            max_positions: u("MaxPositionsPerSecond", 100),
+            motion: i("MotionChecks", 1) != 0,
+            motion_margin: u("MotionMargin", 25),
+            energy_margin: u("EnergyMargin", 10),
+            clock_slack: u("MotionClockSlack", 100),
         }
     }
 }
 
-/// The limits of the ship a player is flying, from their settings.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// What the server knows about a player's ship, from their settings.
+#[derive(Debug, Clone, Copy)]
 struct ShipLimits {
     arena: ArenaId,
     ship: Ship,
@@ -167,6 +249,23 @@ struct ShipLimits {
     mine_delay: u32,
     max_guns: u8,
     max_bombs: u8,
+    use_flagger: bool,
+    fire_cost_percent: u32,
+    repel_time: u32,
+    repel_distance: u32,
+    settings: oss_sim::ShipSettings,
+    motion: Limits,
+}
+
+/// Something the server did (or can't see) that excuses the next sample.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Excuse {
+    /// The ship was moved: warp, respawn, `?warpto`.
+    Jump,
+    /// Energy was refilled: ship reset, prize, respawn.
+    Refill,
+    /// Both.
+    Both,
 }
 
 #[derive(Debug, Default)]
@@ -176,26 +275,34 @@ struct Ac {
     limits: Option<ShipLimits>,
     /// (server tick, client time) at the start of the clock window
     clock_start: Option<(Ticks, u32)>,
+    clock_streak: u32,
     last_bullet: Option<u32>,
     last_bomb: Option<u32>,
     last_mine: Option<u32>,
     second_start: Ticks,
     second_count: u32,
-    last_hit: [Option<Ticks>; 4],
+    last_hit: [Option<Ticks>; CHECKS],
     recent: Vec<(Ticks, Check, String)>,
     benched: bool,
-}
-
-fn state(zone: &mut Zone, p: PlayerId) -> Option<&mut Ac> {
-    zone.players
-        .get_mut(p)
-        .map(|x| x.ext.get_or_default::<Ac>())
+    /// last sample the physics checks accepted, with its arrival time
+    prev: Option<(Sample, Ticks)>,
+    /// energy spent on weapons since `prev`
+    spent: i32,
+    jumped: bool,
+    refilled: bool,
+    super_until: Option<Ticks>,
 }
 
 impl Ac {
     fn trust(&self) -> i32 {
         FULL_TRUST - ((self.lost_milli + 999) / 1000) as i32
     }
+}
+
+fn state(zone: &mut Zone, p: PlayerId) -> Option<&mut Ac> {
+    zone.players
+        .get_mut(p)
+        .map(|x| x.ext.get_or_default::<Ac>())
 }
 
 /// A player's trust (100 = clean).
@@ -212,6 +319,15 @@ pub fn no_ship(zone: &Zone, p: PlayerId) -> bool {
         .get(p)
         .and_then(|x| x.ext.get::<Ac>())
         .is_some_and(|a| a.benched)
+}
+
+/// Tells the physics checks the server moved or refilled the player (call
+/// from anything that does: staff commands, prizes, arena modules).
+pub fn excuse(zone: &mut Zone, p: PlayerId, what: Excuse) {
+    if let Some(a) = zone.players.get_mut(p).and_then(|x| x.ext.get_mut::<Ac>()) {
+        a.jumped |= matches!(what, Excuse::Jump | Excuse::Both);
+        a.refilled |= matches!(what, Excuse::Refill | Excuse::Both);
+    }
 }
 
 /// `[AntiCheat]` cached per arena (re-read when the arena's config changes).
@@ -239,18 +355,43 @@ fn limits_for(zone: &Zone, p: PlayerId, arena: ArenaId, ship: Ship) -> Option<Sh
         .effective(zone, p)?;
     let cs = oss_proto::ClientSettings::decode(block.as_bytes()).ok()?;
     let s = oss_sim::ArenaSettings::from_client_settings(&cs);
-    let ship_settings = s.ships.get(usize::from(ship.0))?;
+    let ss = *s.ships.get(usize::from(ship.0))?;
     Some(ShipLimits {
         arena,
         ship,
-        bullet_delay: ship_settings
-            .bullet_fire_delay
-            .min(ship_settings.multi_fire_delay),
-        bomb_delay: ship_settings.bomb_fire_delay,
-        mine_delay: ship_settings.landmine_fire_delay,
-        max_guns: ship_settings.max_guns,
-        max_bombs: ship_settings.max_bombs,
+        bullet_delay: ss.bullet_fire_delay.min(ss.multi_fire_delay),
+        bomb_delay: ss.bomb_fire_delay,
+        mine_delay: ss.landmine_fire_delay,
+        max_guns: ss.max_guns,
+        max_bombs: ss.max_bombs,
+        use_flagger: s.soccer.use_flagger,
+        fire_cost_percent: s.flagger.fire_cost_percent,
+        repel_time: s.repel_time,
+        repel_distance: s.repel_distance,
+        settings: ss,
+        motion: Limits::new(&ss, &s),
     })
+}
+
+/// Maps for the motion checks, by map checksum. A [`MotionMap`] borrows its
+/// tile map and finds the wormholes once; each distinct map is kept for the
+/// life of the process (about a megabyte each).
+#[derive(Default)]
+struct MotionMaps(HashMap<u32, MotionMap<'static>>);
+
+fn motion_map(zone: &mut Zone, arena: ArenaId) -> Option<MotionMap<'static>> {
+    let (crc, grid) = {
+        let m = super::mapdata::arena_map(zone, arena)?;
+        (m.crc, m.grid.clone())
+    };
+    let maps = zone.res.get_or_default::<MotionMaps>();
+    if let Some(m) = maps.0.get(&crc) {
+        return Some(m.clone());
+    }
+    let tiles: &'static TileMap = Box::leak(Box::new(TileMap::from_cells(grid.cells())));
+    let m = MotionMap::new(tiles);
+    maps.0.insert(crc, m.clone());
+    Some(m)
 }
 
 fn exempt(zone: &mut Zone, p: PlayerId) -> bool {
@@ -283,6 +424,11 @@ fn notify_staff(zone: &mut Zone, text: &str) {
             text,
         );
     }
+}
+
+/// Seconds until trust climbs back to `target` at the configured rate.
+fn seconds_until(trust: i32, target: i32, per_minute: i32) -> Option<i64> {
+    (per_minute > 0).then(|| i64::from((target - trust).max(0)) * 60 / i64::from(per_minute))
 }
 
 /// Records a finding: lowers trust, logs, raises the event, maybe acts.
@@ -331,16 +477,16 @@ fn found(
                 .get(arena)
                 .map_or(8025, super::arenaman::spec_freq);
             super::game::set_ship_and_freq(zone, p, Ship::SPEC, sf);
-            message(
-                zone,
-                p,
-                "You have been moved to spectator mode by the anti-cheat checks.",
-            );
+            message(zone, p, &check.player_reason(&detail));
+            let out = seconds_until(trust, cfg.spec_trust, cfg.recover_per_minute)
+                .map_or("until staff clear it".to_owned(), |s| {
+                    format!("for about {s}s")
+                });
             tracing::warn!(target: "anticheat", pid = p.0, %name, trust, "specced");
             notify_staff(
                 zone,
                 &format!(
-                    "[anticheat] {name} specced (trust {trust}; last: {}: {detail})",
+                    "[anticheat] {name} specced, out {out} (trust {trust}; {}: {detail}). ?trust -r on them clears it.",
                     check.name()
                 ),
             );
@@ -351,12 +497,72 @@ fn found(
         notify_staff(
             zone,
             &format!(
-                "[anticheat] {name} kicked (trust {trust}; last: {}: {detail})",
+                "[anticheat] {name} kicked (trust {trust}; {}: {detail})",
                 check.name()
             ),
         );
         super::core::kick(zone, p);
     }
+}
+
+/// The clock check: the client's elapsed time against the server's, over a
+/// window. Returns the client's speed ratio when the drift has lasted
+/// `ClockWindows` windows.
+fn clock_check(a: &mut Ac, cfg: &AcConfig, now: Ticks, time: u32) -> Option<f64> {
+    let Some((s0, c0)) = a.clock_start else {
+        a.clock_start = Some((now, time));
+        return None;
+    };
+    let server = now.since(s0);
+    if server < cfg.clock_window {
+        return None;
+    }
+    a.clock_start = Some((now, time));
+    let client = time.wrapping_sub(c0);
+    // A timestamp behind the window's start (a resynchronised clock, or
+    // packets out of order across a wrap) reads as nearly 2^32: not a hack,
+    // just start again. Any forward delta, however large, is judged.
+    if client >= 0x8000_0000 {
+        a.clock_streak = 0;
+        return None;
+    }
+    let ratio = f64::from(client) / server as f64;
+    if ratio > 1.0 + cfg.clock_drift {
+        a.clock_streak += 1;
+        (a.clock_streak >= cfg.clock_windows).then_some(ratio)
+    } else {
+        a.clock_streak = 0;
+        None
+    }
+}
+
+/// Recent repels in an arena: (when, x, y, freq).
+#[derive(Default)]
+struct Repels(Vec<(Ticks, i32, i32, u16)>);
+
+fn repelled_near(
+    zone: &Zone,
+    arena: ArenaId,
+    lim: &ShipLimits,
+    freq: u16,
+    pts: [(i32, i32); 2],
+) -> bool {
+    let now = zone.now();
+    let window = u64::from(lim.repel_time) + 100;
+    let reach = i64::from(lim.repel_distance) + 32;
+    zone.arenas
+        .get(arena)
+        .and_then(|a| a.ext.get::<Repels>())
+        .is_some_and(|r| {
+            r.0.iter().any(|&(t, x, y, f)| {
+                f != freq
+                    && now.since(t) <= window
+                    && pts.iter().any(|&(px, py)| {
+                        let (dx, dy) = (i64::from(px - x), i64::from(py - y));
+                        dx * dx + dy * dy <= reach * reach
+                    })
+            })
+        })
 }
 
 fn on_position(zone: &mut Zone, p: PlayerId, pkt: &[u8]) {
@@ -366,18 +572,26 @@ fn on_position(zone: &mut Zone, p: PlayerId, pkt: &[u8]) {
     let (Some(arena), PlayerStatus::Playing) = (pl.arena, pl.status) else {
         return;
     };
-    let ship = pl.ship;
-    let flags = pl.flags_carried;
+    let (ship, freq, flags, attached) = (pl.ship, pl.freq, pl.flags_carried, pl.attached);
     if !enabled_in(zone, arena) {
         return;
     }
-    let Some(cfg) = arena_cfg(zone, arena) else {
+    let Ok(pos) = C2SPosition::decode(pkt) else {
         return;
     };
-    if !cfg.enabled || exempt(zone, p) {
+    // remember enemy repels for everyone's motion checks
+    if pos.weapon.kind() == weapon_type::REPEL && !ship.is_spec() {
+        let now = zone.now();
+        if let Some(a) = zone.arenas.get_mut(arena) {
+            let r = a.ext.get_or_default::<Repels>();
+            r.0.retain(|(t, ..)| now.since(*t) < 3000);
+            r.0.push((now, i32::from(pos.x), i32::from(pos.y), freq));
+        }
+    }
+    if exempt(zone, p) {
         return;
     }
-    let Ok(pos) = C2SPosition::decode(pkt) else {
+    let Some(cfg) = arena_cfg(zone, arena) else {
         return;
     };
     let now = zone.now();
@@ -406,27 +620,8 @@ fn on_position(zone: &mut Zone, p: PlayerId, pkt: &[u8]) {
         );
     }
 
-    // clock: client time against server time over a window
-    let clock = {
-        let Some(a) = state(zone, p) else { return };
-        match a.clock_start {
-            None => {
-                a.clock_start = Some((now, pos.time));
-                None
-            }
-            Some((s0, c0)) => {
-                let server = now.since(s0);
-                if server >= cfg.clock_window {
-                    let client = u64::from(pos.time.wrapping_sub(c0));
-                    a.clock_start = Some((now, pos.time));
-                    let ratio = client as f64 / server as f64;
-                    (ratio > 1.0 + cfg.clock_drift && client < server * 10).then_some(ratio)
-                } else {
-                    None
-                }
-            }
-        }
-    };
+    // clock
+    let clock = state(zone, p).and_then(|a| clock_check(a, &cfg, now, pos.time));
     if let Some(r) = clock {
         found(
             zone,
@@ -434,15 +629,11 @@ fn on_position(zone: &mut Zone, p: PlayerId, pkt: &[u8]) {
             arena,
             &cfg,
             Check::Clock,
-            format!("client clock running {:.1}% fast", (r - 1.0) * 100.0),
+            format!("{:.1}% ahead of the server's clock", (r - 1.0) * 100.0),
         );
     }
 
     if ship.is_spec() {
-        return;
-    }
-    let kind = pos.weapon.kind();
-    if kind == weapon_type::NONE {
         return;
     }
     // the ship's limits, recomputed when ship or arena changes
@@ -458,33 +649,86 @@ fn on_position(zone: &mut Zone, p: PlayerId, pkt: &[u8]) {
     if let Some(a) = state(zone, p) {
         a.limits = Some(lim);
     }
-    let level = pos.weapon.level() + 1;
-    let flagger = u8::from(flags > 0);
-    let (class, max, delay) = match kind {
-        weapon_type::BULLET | weapon_type::BOUNCE_BULLET => (0, lim.max_guns, lim.bullet_delay),
-        weapon_type::BOMB | weapon_type::PROX_BOMB if pos.weapon.alternate() => {
-            (2, lim.max_bombs, lim.mine_delay)
+    // Flag:Flagger* upgrades apply to flag carriers, and to ball carriers
+    // when Soccer:UseFlagger is set
+    let carrying_ball = lim.use_flagger
+        && super::balls::balls(zone, arena)
+            .iter()
+            .any(|b| b.carrier == Some(p));
+    let flagger = flags > 0 || carrying_ball;
+
+    if let Some(f) = weapon_checks(zone, p, arena, &cfg, &lim, &pos, flagger) {
+        let free = state(zone, p)
+            .and_then(|a| a.super_until)
+            .is_some_and(|t| now < t);
+        if !free {
+            let mut cost = oss_sim::fire_cost(&lim.settings, f);
+            if flagger {
+                cost = oss_sim::flagger_cost(cost, lim.fire_cost_percent);
+            }
+            if let Some(a) = state(zone, p) {
+                a.spent = a.spent.saturating_add(cost / 1000);
+            }
         }
-        weapon_type::BOMB | weapon_type::PROX_BOMB => (1, lim.max_bombs, lim.bomb_delay),
-        _ => return,
+    }
+
+    if cfg.motion && attached.is_none() {
+        motion_checks(zone, p, arena, &cfg, &lim, &pos, freq, now);
+    }
+}
+
+/// Weapon level and fire rate; returns what was fired, for the energy check.
+fn weapon_checks(
+    zone: &mut Zone,
+    p: PlayerId,
+    arena: ArenaId,
+    cfg: &AcConfig,
+    lim: &ShipLimits,
+    pos: &C2SPosition,
+    flagger: bool,
+) -> Option<Fired> {
+    let kind = pos.weapon.kind();
+    let level = pos.weapon.level();
+    let (class, max, delay, fired) = match kind {
+        weapon_type::BULLET | weapon_type::BOUNCE_BULLET => (
+            0,
+            lim.max_guns,
+            lim.bullet_delay,
+            Fired::Bullet {
+                level,
+                multifire: pos.weapon.alternate(),
+            },
+        ),
+        weapon_type::BOMB | weapon_type::PROX_BOMB if pos.weapon.alternate() => {
+            (2, lim.max_bombs, lim.mine_delay, Fired::Mine { level })
+        }
+        weapon_type::BOMB | weapon_type::PROX_BOMB => {
+            (1, lim.max_bombs, lim.bomb_delay, Fired::Bomb { level })
+        }
+        _ => return None,
     };
-    if level > max + flagger {
+    let shown = level + 1;
+    if shown > max + u8::from(flagger) {
         found(
             zone,
             p,
             arena,
-            &cfg,
+            cfg,
             Check::WeaponLevel,
-            format!("level {level} weapon (type {kind}) on a ship allowing {max}"),
+            format!("level {shown} weapon (type {kind}) on a ship allowing {max}"),
         );
     }
     let gap = {
-        let Some(a) = state(zone, p) else { return };
+        let a = state(zone, p)?;
         let last = match class {
             0 => &mut a.last_bullet,
             1 => &mut a.last_bomb,
             _ => &mut a.last_mine,
         };
+        // a duplicated packet carries the same timestamp: not a second shot
+        if *last == Some(pos.time) {
+            return None;
+        }
         let gap = last.map(|t| pos.time.wrapping_sub(t));
         *last = Some(pos.time);
         gap
@@ -497,10 +741,108 @@ fn on_position(zone: &mut Zone, p: PlayerId, pkt: &[u8]) {
             zone,
             p,
             arena,
-            &cfg,
+            cfg,
             Check::FireRate,
             format!("fired {g} ticks after the last shot; the ship allows {delay}"),
         );
+    }
+    Some(fired)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn motion_checks(
+    zone: &mut Zone,
+    p: PlayerId,
+    arena: ArenaId,
+    cfg: &AcConfig,
+    lim: &ShipLimits,
+    pos: &C2SPosition,
+    freq: u16,
+    now: Ticks,
+) {
+    let next = Sample {
+        time: pos.time,
+        x: i32::from(pos.x),
+        y: i32::from(pos.y),
+        x_speed: i32::from(pos.x_speed),
+        y_speed: i32::from(pos.y_speed),
+        rotation: pos.rotation as u8,
+        status: pos.status,
+        energy: i32::from(pos.energy),
+    };
+    let Some(a) = state(zone, p) else { return };
+    let Some((prev, prev_at)) = a.prev else {
+        a.prev = Some((next, now));
+        a.spent = 0;
+        a.jumped = false;
+        a.refilled = false;
+        return;
+    };
+    // an older or duplicated packet: nothing to judge
+    let dt = next.time.wrapping_sub(prev.time);
+    if dt == 0 || dt >= 0x8000_0000 {
+        return;
+    }
+    let (jumped, refilled, spent) = (a.jumped, a.refilled, a.spent);
+    a.prev = Some((next, now));
+    a.spent = 0;
+    a.jumped = false;
+    a.refilled = false;
+    let server_ticks = u32::try_from(now.since(prev_at)).unwrap_or(u32::MAX);
+    let repelled = repelled_near(zone, arena, lim, freq, [(prev.x, prev.y), (next.x, next.y)]);
+    let Some(map) = motion_map(zone, arena) else {
+        return;
+    };
+    let context = Context {
+        jumped,
+        repelled,
+        refilled,
+        spent,
+        max_ticks: Some(server_ticks.saturating_add(cfg.clock_slack)),
+    };
+    let verdict = oss_sim::check_motion(
+        &lim.motion,
+        &map,
+        &prev,
+        &next,
+        &context,
+        &Tolerance::default(),
+    );
+    let over = 100 + cfg.motion_margin;
+    for f in verdict.findings() {
+        let (check, detail) = match f {
+            // a flash means a warp or portal, which the server can't see
+            Finding::Teleport { flash: true, .. } => continue,
+            Finding::Teleport { percent, .. } if percent > over => (
+                Check::Teleport,
+                format!(
+                    "moved {percent}% of the furthest the ship could go in {} ticks",
+                    verdict.ticks
+                ),
+            ),
+            Finding::Speed { percent } if percent > over => (
+                Check::Speed,
+                format!("reported {percent}% of the ship's top speed"),
+            ),
+            Finding::Rotation { percent } if percent > over => (
+                Check::Rotation,
+                format!("turned {percent}% of the most the ship can"),
+            ),
+            Finding::ThroughWall => (Check::Wall, "passed through a wall".to_owned()),
+            Finding::InsideWall => (Check::Wall, "inside a wall".to_owned()),
+            Finding::Energy { excess, percent } if percent > cfg.energy_margin => (
+                Check::Energy,
+                format!(
+                    "{excess} more energy than the ship could have ({percent}% of its maximum)"
+                ),
+            ),
+            Finding::Status { bits } => (
+                Check::Status,
+                format!("status bits {bits:#04x} without the capability"),
+            ),
+            _ => continue,
+        };
+        found(zone, p, arena, cfg, check, detail);
     }
 }
 
@@ -534,11 +876,11 @@ fn c_trust(zone: &mut Zone, inv: &Invocation<'_>) {
         .get(t)
         .map(|x| x.name.clone())
         .unwrap_or_default();
-    let reset = inv.params.trim() == "-r";
-    if reset {
+    if inv.params.trim() == "-r" {
         if let Some(a) = state(zone, t) {
             *a = Ac::default();
         }
+        tracing::info!(target: "anticheat", pid = t.0, %name, "trust reset by staff");
         message(
             zone,
             inv.sender,
@@ -569,6 +911,31 @@ fn c_trust(zone: &mut Zone, inv: &Invocation<'_>) {
     }
 }
 
+/// SubSpace prize numbers the physics checks care about.
+const PRIZE_WARP: i32 = 7;
+const PRIZE_SUPER: i32 = 17;
+const PRIZE_MULTI: i32 = 25;
+
+/// A prize changes what the next sample may show: any prize may refill
+/// energy (full charge, or a capability the arena doesn't allow); a warp
+/// moves the ship; Super makes shots free for up to `SuperTime`.
+pub fn prize_taken(zone: &mut Zone, p: PlayerId, prize: i32) {
+    let jump = prize == PRIZE_WARP || prize == PRIZE_MULTI;
+    excuse(zone, p, if jump { Excuse::Both } else { Excuse::Refill });
+    if prize == PRIZE_SUPER || prize == PRIZE_MULTI {
+        let now = zone.now();
+        let super_time = zone
+            .players
+            .get(p)
+            .and_then(|x| x.ext.get::<Ac>())
+            .and_then(|a| a.limits)
+            .map_or(6000, |l| u64::from(l.settings.super_time) + 100);
+        if let Some(a) = state(zone, p) {
+            a.super_until = Some(Ticks(now.0 + super_time));
+        }
+    }
+}
+
 /// The `anticheat` module.
 pub struct AntiCheatModule;
 
@@ -596,6 +963,7 @@ impl Module for AntiCheatModule {
                 a.last_bullet = None;
                 a.last_bomb = None;
                 a.last_mine = None;
+                a.prev = None;
             }
         });
         zone.on::<super::core::PlayerAction>(me, Scope::Global, |z, ev| {
@@ -607,7 +975,20 @@ impl Module for AntiCheatModule {
             {
                 a.limits = None;
                 a.clock_start = None;
+                a.clock_streak = 0;
+                a.prev = None;
             }
+        });
+        // deaths respawn the ship somewhere else with full energy
+        zone.on::<super::game::KillAnnounced>(me, Scope::Global, |z, ev| {
+            excuse(z, ev.killed, Excuse::Both);
+        });
+        // prizes: warp moves, full charge refills, super makes shots free
+        zone.on::<super::game::GreenPickup>(me, Scope::Global, |z, ev| {
+            prize_taken(z, ev.player, i32::from(ev.prize));
+        });
+        zone.on::<super::game::Attach>(me, Scope::Global, |z, ev| {
+            excuse(z, ev.player, Excuse::Jump);
         });
         zone.set_timer(me, 100, 100, recover);
         zone.add_command(
@@ -634,5 +1015,45 @@ mod tests {
         assert!(!c.enabled);
         assert_eq!(c.action, 0);
         assert!(c.spec_trust > c.kick_trust);
+        assert!(c.clock_windows >= 2);
+    }
+
+    fn cfg() -> AcConfig {
+        AcConfig {
+            clock_window: 1000,
+            clock_windows: 2,
+            ..AcConfig::load(&crate::config::ConfigFile::default())
+        }
+    }
+
+    #[test]
+    fn clock_needs_a_streak_and_catches_blatant_hacks() {
+        let c = cfg();
+        let mut a = Ac::default();
+        assert_eq!(clock_check(&mut a, &c, Ticks(0), 0), None);
+        // one fast window doesn't count; two in a row do
+        assert_eq!(clock_check(&mut a, &c, Ticks(1000), 1200), None);
+        assert!(clock_check(&mut a, &c, Ticks(2000), 2400).is_some());
+        // ten times faster is a hack too (it used to be ignored)
+        let mut b = Ac::default();
+        clock_check(&mut b, &c, Ticks(0), 0);
+        clock_check(&mut b, &c, Ticks(1000), 10_000);
+        assert!(clock_check(&mut b, &c, Ticks(2000), 20_000).unwrap_or(0.0) > 9.0);
+        // a clock that jumped backwards just restarts
+        let mut d = Ac::default();
+        clock_check(&mut d, &c, Ticks(0), 5000);
+        assert_eq!(clock_check(&mut d, &c, Ticks(1000), 100), None);
+        assert_eq!(d.clock_streak, 0);
+        // a forward wrap of the counter is ordinary time
+        let mut e = Ac::default();
+        clock_check(&mut e, &c, Ticks(0), u32::MAX - 500);
+        assert_eq!(clock_check(&mut e, &c, Ticks(1000), 499), None);
+    }
+
+    #[test]
+    fn recovery_time() {
+        assert_eq!(seconds_until(25, 40, 10), Some(90));
+        assert_eq!(seconds_until(10, 40, 10), Some(180));
+        assert_eq!(seconds_until(10, 40, 0), None);
     }
 }

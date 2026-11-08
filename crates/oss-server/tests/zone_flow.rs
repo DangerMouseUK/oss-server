@@ -513,3 +513,63 @@ fn simultaneous_entries_are_announced_once() {
         );
     }
 }
+
+#[test]
+fn flood_obscenity_and_restricted_chat() {
+    let global = "[Chat]\nFloodLimit = 3\nFloodShutup = 60\nObscene = darn ?urpx\n";
+    let mut h = H::with_conf(ARENA_CONF, global);
+    let (alice, _) = h.login("alice", "x");
+    let (bob, _) = h.login("bob", "secret");
+    h.enter(alice);
+    h.enter(bob);
+    h.take(alice);
+    if let Some(p) = h.zone.players.get_mut(bob) {
+        p.obscenity_filter = true;
+    }
+
+    // bob (filter on) gets the word replaced; rot-13 entries work too
+    h.chat(alice, chat_type::PUBLIC, 0, "well DARN, heck");
+    let got = chats(&h.take(bob));
+    let text = String::from_utf8_lossy(&got[0].text).into_owned();
+    assert!(
+        !text.to_ascii_lowercase().contains("darn") && !text.contains("heck"),
+        "{text}"
+    );
+    assert!(text.starts_with("well ") && text.len() == "well DARN, heck".len());
+
+    // the third message inside a second trips flood control; the fourth is dropped
+    h.chat(alice, chat_type::PUBLIC, 0, "two");
+    assert!(chats(&h.take(alice)).is_empty());
+    h.chat(alice, chat_type::PUBLIC, 0, "three");
+    let got = chats(&h.take(alice));
+    assert!(
+        String::from_utf8_lossy(&got[0].text).contains("shut up for 60 seconds"),
+        "{got:?}"
+    );
+    h.take(bob);
+    h.chat(alice, chat_type::PUBLIC, 0, "four");
+    assert!(chats(&h.take(bob)).is_empty());
+    // commands are still allowed while shut up (they count toward flooding too)
+    h.chat(alice, chat_type::PUBLIC, 0, "?version");
+    let got = chats(&h.take(alice));
+    assert!(
+        got.iter()
+            .any(|c| String::from_utf8_lossy(&c.text).contains("Open SubSpace"))
+    );
+}
+
+#[test]
+fn arena_chat_restrictions() {
+    // RestrictChat bit 2 = public messages
+    let conf = format!("{ARENA_CONF}[Chat]\nRestrictChat = 4\n");
+    let mut h = H::with_conf(&conf, "[Chat]\n");
+    let (alice, _) = h.login("alice", "x");
+    let (bob, _) = h.login("bob", "secret");
+    h.enter(alice);
+    h.enter(bob);
+    h.take(bob);
+    h.chat(alice, chat_type::PUBLIC, 0, "hello");
+    assert!(chats(&h.take(bob)).is_empty());
+    h.chat(alice, chat_type::PRIVATE, bob.0 as i16, "psst");
+    assert_eq!(chats(&h.take(bob)).len(), 1);
+}

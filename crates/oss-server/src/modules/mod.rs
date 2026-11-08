@@ -20,6 +20,7 @@ pub mod jackpot;
 pub mod koth;
 pub mod mapdata;
 pub mod mapnewsdl;
+pub mod obscene;
 pub mod periodic;
 pub mod persist;
 pub mod playercmd;
@@ -40,6 +41,7 @@ pub const DEFAULT_MODULES: &[&str] = &[
     "clientset",
     "cmdman",
     "chat",
+    "obscene",
     "game",
     "mapdata",
     "mapnewsdl",
@@ -74,6 +76,7 @@ pub fn builtin_catalog() -> ModuleCatalog {
     c.register("clientset", &[], || clientset::ClientSetModule);
     c.register("cmdman", &[], || cmdman::CmdManModule);
     c.register("chat", &[], || chat::ChatModule);
+    c.register("obscene", &[], || obscene::ObsceneModule);
     c.register("game", &[], || game::GameModule);
     c.register("mapdata", &[], || mapdata::MapDataModule);
     c.register("mapnewsdl", &[], || mapnewsdl::MapNewsDlModule);

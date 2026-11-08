@@ -161,10 +161,27 @@ fn run_commands(zone: &mut Zone, p: PlayerId, text: &str, target: Target) {
 }
 
 fn reply(zone: &mut Zone, to: &[PlayerId], kind: u8, sound: u8, from: i16, text: &str) {
-    ChatImpl.send_any_message(zone, to, kind, sound, from, text);
+    // players with the obscenity filter on get a filtered copy (or none,
+    // with Chat:FilterMode = 0), as in ASSS send_reply
+    let Some(ob) = zone.iface::<dyn super::obscene::Obscene>() else {
+        ChatImpl.send_any_message(zone, to, kind, sound, from, text);
+        return;
+    };
+    let (filtered, plain): (Vec<PlayerId>, Vec<PlayerId>) = to
+        .iter()
+        .partition(|p| zone.players.get(**p).is_some_and(|x| x.obscenity_filter));
+    ChatImpl.send_any_message(zone, &plain, kind, sound, from, text);
+    if filtered.is_empty() {
+        return;
+    }
+    let mut clean = text.to_owned();
+    let hit = ob.filter(zone, &mut clean);
+    if !hit || zone.cfg.global().get_int("Chat", "FilterMode", 1) != 0 {
+        ChatImpl.send_any_message(zone, &filtered, kind, sound, from, &clean);
+    }
 }
 
-fn on_chat(zone: &mut Zone, p: PlayerId, pkt: &[u8]) {
+fn route_chat(zone: &mut Zone, p: PlayerId, pkt: &[u8]) {
     if pkt.len() < 6 || pkt.len() > 500 {
         tracing::warn!(target: "chat", pid = p.0, len = pkt.len(), "bad chat packet length");
         return;
@@ -393,6 +410,232 @@ impl Module for ChatModule {
         zone.reg
             .provide::<dyn Chat>(me, Scope::Global, Arc::new(ChatImpl));
         zone.on_packet(me, c2s::kind::CHAT, on_chat);
+        zone.on::<super::arenaman::ArenaAction>(me, Scope::Global, |z, ev| {
+            use super::arenaman::ArenaActionKind;
+            if matches!(
+                ev.action,
+                ArenaActionKind::Create | ArenaActionKind::ConfChanged
+            ) {
+                load_arena_mask(z, ev.arena);
+            }
+        });
         Ok(())
     }
+}
+
+/// ASSS message types used in chat masks (`MSG_*`).
+pub mod mask_type {
+    /// Public macros.
+    pub const PUB_MACRO: u8 = 1;
+    /// Public messages.
+    pub const PUB: u8 = 2;
+    /// Team messages.
+    pub const FREQ: u8 = 3;
+    /// Messages to another team.
+    pub const NMEFREQ: u8 = 4;
+    /// Private messages.
+    pub const PRIV: u8 = 5;
+    /// Remote private messages.
+    pub const REMOTE_PRIV: u8 = 7;
+    /// Chat channel messages.
+    pub const CHAT: u8 = 9;
+    /// Staff chat.
+    pub const MODCHAT: u8 = 10;
+    /// Commands.
+    pub const COMMAND: u8 = 11;
+    /// Commands for the biller.
+    pub const BCOMMAND: u8 = 12;
+}
+
+/// May send everything flood control would stop (ASSS `CAP_CANSPAM`).
+pub const CAP_CAN_SPAM: &str = "unlimitedchat";
+
+#[derive(Default)]
+struct PlayerMask {
+    mask: u16,
+    /// unix time the mask expires; 0 = session-long
+    expires: u64,
+    msgs: i32,
+    last_check: u64,
+}
+
+/// An arena's chat mask (`Chat:RestrictChat`).
+#[derive(Default)]
+struct ArenaMask(u16);
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+}
+
+fn expire_mask(zone: &mut Zone, p: PlayerId) -> u16 {
+    let now_ticks = zone.now().0;
+    let Some(pm) = zone
+        .players
+        .get_mut(p)
+        .map(|x| x.ext.get_or_default::<PlayerMask>())
+    else {
+        return 0;
+    };
+    if pm.expires > 0 && unix_now() > pm.expires {
+        pm.mask = 0;
+        pm.expires = 0;
+    }
+    let d = now_ticks.saturating_sub(pm.last_check) / 100;
+    pm.msgs = if d >= 31 { 0 } else { pm.msgs >> d };
+    pm.last_check = now_ticks;
+    pm.mask
+}
+
+/// ASSS `ok()`: may `p` send a message of `kind` (a [`mask_type`])?
+pub fn allowed(zone: &mut Zone, p: PlayerId, kind: u8) -> bool {
+    let pmask = expire_mask(zone, p);
+    let amask = zone
+        .players
+        .get(p)
+        .and_then(|x| x.arena)
+        .and_then(|a| zone.arenas.get(a))
+        .and_then(|a| a.ext.get::<ArenaMask>())
+        .map_or(0, |m| m.0);
+    (pmask | amask) & (1 << kind) == 0
+}
+
+/// ASSS `SetPlayerChatMask`: `timeout` in seconds, 0 for the session.
+pub fn set_player_chat_mask(zone: &mut Zone, p: PlayerId, mask: u16, timeout: u64) {
+    if let Some(pm) = zone
+        .players
+        .get_mut(p)
+        .map(|x| x.ext.get_or_default::<PlayerMask>())
+    {
+        pm.mask = mask;
+        pm.expires = if timeout == 0 {
+            0
+        } else {
+            unix_now() + timeout
+        };
+    }
+}
+
+/// A player's current chat mask.
+pub fn player_chat_mask(zone: &mut Zone, p: PlayerId) -> u16 {
+    expire_mask(zone, p)
+}
+
+/// Sets an arena's chat mask (until its config changes).
+pub fn set_arena_chat_mask(zone: &mut Zone, a: crate::arena::ArenaId, mask: u16) {
+    if let Some(x) = zone.arenas.get_mut(a) {
+        x.ext.insert(ArenaMask(mask));
+    }
+}
+
+/// ASSS `check_flood`.
+fn check_flood(zone: &mut Zone, p: PlayerId) {
+    let limit = zone.cfg.global().get_int("Chat", "FloodLimit", 10);
+    let shutup = u64::try_from(zone.cfg.global().get_int("Chat", "FloodShutup", 60)).unwrap_or(60);
+    let over = zone
+        .players
+        .get_mut(p)
+        .map(|x| x.ext.get_or_default::<PlayerMask>())
+        .is_some_and(|pm| {
+            pm.msgs += 1;
+            limit > 0 && pm.msgs >= limit
+        });
+    if !over || has_cap(zone, p, CAP_CAN_SPAM) {
+        return;
+    }
+    if let Some(pm) = zone
+        .players
+        .get_mut(p)
+        .map(|x| x.ext.get_or_default::<PlayerMask>())
+    {
+        pm.msgs >>= 1;
+        if pm.expires != 0 {
+            pm.expires += shutup;
+        } else if pm.mask == 0 {
+            pm.expires = unix_now() + shutup;
+        }
+        use mask_type::*;
+        pm.mask |= 1 << PUB_MACRO
+            | 1 << PUB
+            | 1 << FREQ
+            | 1 << NMEFREQ
+            | 1 << PRIV
+            | 1 << REMOTE_PRIV
+            | 1 << CHAT
+            | 1 << MODCHAT
+            | 1 << BCOMMAND;
+    }
+    message(
+        zone,
+        p,
+        &format!("You have been shut up for {shutup} seconds for flooding."),
+    );
+    tracing::info!(target: "chat", pid = p.0, "flooded chat, shut up for {shutup} seconds");
+}
+
+/// Which mask type a chat packet is, for the mask check.
+fn classify(body: &oss_proto::s2c::ChatBody) -> u8 {
+    let text = &body.text;
+    let cmd = |t: &[u8]| matches!(t.first(), Some(b'?' | b'*')) && t.len() > 1;
+    match body.kind {
+        chat_type::PUBLIC | chat_type::PUBLIC_MACRO if text.first() == Some(&b'\\') => {
+            mask_type::MODCHAT
+        }
+        chat_type::PUBLIC
+        | chat_type::PUBLIC_MACRO
+        | chat_type::FREQ
+        | chat_type::ENEMY_FREQ
+        | chat_type::PRIVATE
+            if cmd(text) =>
+        {
+            mask_type::COMMAND
+        }
+        chat_type::PUBLIC_MACRO => mask_type::PUB_MACRO,
+        chat_type::PUBLIC => mask_type::PUB,
+        chat_type::FREQ => mask_type::FREQ,
+        chat_type::ENEMY_FREQ => mask_type::NMEFREQ,
+        chat_type::PRIVATE => mask_type::PRIV,
+        chat_type::REMOTE_PRIVATE => {
+            let rest = text.splitn(3, |&b| b == b':').nth(2).unwrap_or(&[]);
+            if cmd(rest) {
+                mask_type::COMMAND
+            } else {
+                mask_type::REMOTE_PRIV
+            }
+        }
+        chat_type::CHANNEL => mask_type::CHAT,
+        _ => 0,
+    }
+}
+
+fn on_chat(zone: &mut Zone, p: PlayerId, pkt: &[u8]) {
+    if let Ok(c2s::C2SChat(body)) = c2s::C2SChat::decode(pkt)
+        && zone
+            .players
+            .get(p)
+            .is_some_and(|x| x.status == PlayerStatus::Playing && x.arena.is_some())
+    {
+        let kind = classify(&body);
+        if kind == 0 || allowed(zone, p, kind) {
+            route_chat(zone, p, pkt);
+        } else if kind == mask_type::MODCHAT {
+            message(
+                zone,
+                p,
+                "You aren't allowed to use the staff chat. If you need to send a message to the zone staff, use ?cheater.",
+            );
+        }
+        check_flood(zone, p);
+    } else {
+        route_chat(zone, p, pkt);
+    }
+}
+
+fn load_arena_mask(zone: &mut Zone, a: crate::arena::ArenaId) {
+    let m = zone
+        .arenas
+        .get(a)
+        .map_or(0, |x| x.cfg.get_int("Chat", "RestrictChat", 0));
+    set_arena_chat_mask(zone, a, m as u16);
 }

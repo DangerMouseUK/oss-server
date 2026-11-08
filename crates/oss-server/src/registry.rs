@@ -246,11 +246,40 @@ impl<H: ?Sized> Entry<H> {
     }
 }
 
+/// Hashes a `TypeId`, which is already a hash, by passing it through instead
+/// of running SipHash: type-map lookups sit on the game loop's hot paths
+/// (per-player data in the position relay).
+#[derive(Default)]
+pub struct TypeIdHasher(u64);
+
+impl std::hash::Hasher for TypeIdHasher {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        // not used by TypeId today; fold anything else in FNV-1a style
+        for &b in bytes {
+            self.0 = (self.0 ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3);
+        }
+    }
+
+    fn write_u64(&mut self, n: u64) {
+        self.0 ^= n;
+    }
+
+    fn write_u128(&mut self, n: u128) {
+        self.0 ^= n as u64 ^ (n >> 64) as u64;
+    }
+}
+
+type TypeMap = HashMap<TypeId, Box<dyn Any + Send>, std::hash::BuildHasherDefault<TypeIdHasher>>;
+
 /// Typed per-zone state owned by modules (ASSS module-local globals), keyed by
 /// type. Only one value of each type exists.
 #[derive(Default)]
 pub struct Resources {
-    map: HashMap<TypeId, Box<dyn Any + Send>>,
+    map: TypeMap,
 }
 
 impl Resources {

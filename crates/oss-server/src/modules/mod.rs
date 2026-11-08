@@ -17,6 +17,7 @@ pub mod fg_wz;
 pub mod flagcore;
 pub mod game;
 pub mod jackpot;
+pub mod koth;
 pub mod mapdata;
 pub mod mapnewsdl;
 pub mod playercmd;
@@ -48,6 +49,7 @@ pub const DEFAULT_MODULES: &[&str] = &[
     "flagcore",
     "balls",
     "bricks",
+    "koth",
     "points_goal",
     "fg_wz",
     "fg_turf",
@@ -83,6 +85,7 @@ pub fn builtin_catalog() -> ModuleCatalog {
     c.register("flagcore", &[], || flagcore::FlagCoreModule);
     c.register("balls", &[], || balls::BallsModule);
     c.register("bricks", &[], || bricks::BricksModule);
+    c.register("koth", &[], || koth::KothModule);
     c.register("points_goal", &["scoring:points_goal"], || {
         points_goal::PointsGoalModule
     });

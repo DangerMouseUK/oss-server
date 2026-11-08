@@ -495,3 +495,44 @@ fn turrets_attach_and_kickoff() {
     attach(&mut h, c, -1);
     assert_eq!(h.zone.players.get(c).and_then(|p| p.attached), None);
 }
+
+#[test]
+fn king_of_the_hill() {
+    let conf = "[Modules]\nAttachModules = koth\n[King]\nMinPlaying = 2\nExpireTime = 1000\nDeathCount = 0\n[Team]\nDesiredTeams = 2\n";
+    let mut h = H::new(conf, None);
+    let a = h.player("alpha", 0);
+    let b = h.player("bravo", 1);
+    h.take(a);
+    h.take(b);
+    // the check timer starts a round: both get a crown
+    h.tick(500);
+    for p in [a, b] {
+        let k = s2c::Koth::decode(&of(&h.take(p), s2c::kind::KOTH)[0]).expect("0x2C");
+        assert_eq!((k.action, k.time, k.pid), (1, 1000, -1));
+        assert!(oss_server::modules::koth::has_crown(&h.zone, p));
+    }
+    // b dies once (DeathCount 0): loses the crown; a's timer is reset
+    let mut buf = Vec::new();
+    c2s::Death {
+        killer: a.0 as i16,
+        bounty: 0,
+    }
+    .encode(&mut buf);
+    h.send(b, &buf);
+    assert!(!oss_server::modules::koth::has_crown(&h.zone, b));
+    let to_a: Vec<_> = of(&h.take(a), s2c::kind::KOTH)
+        .iter()
+        .map(|k| s2c::Koth::decode(k).expect("0x2C"))
+        .collect();
+    assert!(to_a.iter().any(|k| k.action == 0 && k.pid == b.0 as i16));
+    assert!(to_a.iter().any(|k| k.action == 1 && k.pid == -1));
+    // after the next check, a is the only king; when a.s crown expires a
+    // wins 1000 alone (crowns lost within one check window share the win)
+    h.tick(500);
+    h.send(a, &[c2s::kind::KOTH_EXPIRED]);
+    h.tick(500);
+    assert_eq!(
+        h.zone.players.get(a).map(|p| p.score.flag_points),
+        Some(1000)
+    );
+}

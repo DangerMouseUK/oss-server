@@ -430,7 +430,7 @@ pub fn player_data(p: &Player) -> PlayerData {
         losses: p.score.losses,
         attached_to: p.attached.map_or(-1, |h| h.0 as i16),
         flags_carried: p.flags_carried,
-        misc_bits: 0,
+        misc_bits: super::koth::crown_bit(p),
     }
 }
 

@@ -11,8 +11,11 @@ pub mod clientset;
 pub mod cmdman;
 pub mod core;
 pub mod game;
+pub mod mapdata;
 pub mod mapnewsdl;
 pub mod playercmd;
+pub mod security;
+pub mod stats;
 
 use crate::module::ModuleCatalog;
 use crate::net::Transport;
@@ -28,8 +31,13 @@ pub const DEFAULT_MODULES: &[&str] = &[
     "cmdman",
     "chat",
     "game",
+    "mapdata",
     "mapnewsdl",
+    "stats",
+    "basicstats",
     "auth_file",
+    "security",
+    "points_kill",
     "playercmd",
 ];
 
@@ -45,7 +53,18 @@ pub fn builtin_catalog() -> ModuleCatalog {
     c.register("cmdman", &[], || cmdman::CmdManModule);
     c.register("chat", &[], || chat::ChatModule);
     c.register("game", &[], || game::GameModule);
+    c.register("mapdata", &[], || mapdata::MapDataModule);
     c.register("mapnewsdl", &[], || mapnewsdl::MapNewsDlModule);
+    c.register("stats", &["scoring:stats"], || stats::StatsModule);
+    c.register("basicstats", &["scoring:basicstats"], || {
+        stats::BasicStatsModule
+    });
+    c.register("points_kill", &["scoring:points_kill"], || {
+        stats::PointsKillModule
+    });
+    c.register("security", &["security:security"], || {
+        security::SecurityModule
+    });
     c.register("auth_file", &[], || auth_file::AuthFileModule);
     c.register("playercmd", &[], || playercmd::PlayerCmdModule);
     c

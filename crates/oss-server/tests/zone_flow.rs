@@ -28,15 +28,16 @@ struct H {
 
 impl H {
     fn new() -> Self {
+        Self::with_conf(ARENA_CONF, "[Chat]\nMessageReliable = 1\n")
+    }
+
+    fn with_conf(arena_conf: &str, global: &str) -> Self {
         let passwd = format!(
             "[General]\nAllowUnknown = yes\n[Users]\nbob = {}\nlocked = lock\n",
             hash_password("Bob", "secret")
         );
         let src = MemSource::new([
-            (
-                "conf/global.conf",
-                "[Chat]\nMessageReliable = 1\n".to_owned(),
-            ),
+            ("conf/global.conf", global.to_owned()),
             ("conf/passwd.conf", passwd),
             (
                 "conf/groupdef.conf",
@@ -45,7 +46,7 @@ impl H {
                     .to_owned(),
             ),
             ("conf/staff.conf", "[(global)]\nbob = mod\n".to_owned()),
-            ("arenas/(default)/arena.conf", ARENA_CONF.to_owned()),
+            ("arenas/(default)/arena.conf", arena_conf.to_owned()),
         ]);
         let zone = ServerBuilder::with_source(src).build_zone().expect("zone");
         Self {
@@ -203,7 +204,8 @@ fn login_enter_chat_leave() {
             s2c::kind::PLAYER_ENTERING,
             s2c::kind::MAP_FILENAME,
             s2c::kind::BRICK,
-            s2c::kind::ENTERING_ARENA
+            s2c::kind::ENTERING_ARENA,
+            s2c::kind::SECURITY
         ]
     );
     assert_eq!(&pkts[0], &[0x01, bob.0 as u8, (bob.0 >> 8) as u8]);

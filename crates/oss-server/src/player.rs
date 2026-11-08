@@ -108,6 +108,19 @@ pub struct Position {
     pub time: u32,
 }
 
+/// The scores sent in player records and score updates.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Score {
+    /// Kill points.
+    pub kill_points: i32,
+    /// Flag points.
+    pub flag_points: i32,
+    /// Kills.
+    pub wins: i16,
+    /// Deaths.
+    pub losses: i16,
+}
+
 /// One player.
 pub struct Player {
     /// Wire id.
@@ -156,6 +169,8 @@ pub struct Player {
     pub want_all_lvz: bool,
     /// Human-readable client description.
     pub client_name: String,
+    /// Scores shown to other players (kept by the stats module).
+    pub score: Score,
     /// Module-owned per-player data.
     pub ext: Extensions,
 }
@@ -186,6 +201,7 @@ impl Player {
             obscenity_filter: false,
             want_all_lvz: false,
             client_name: String::new(),
+            score: Score::default(),
             ext: Extensions::default(),
         }
     }

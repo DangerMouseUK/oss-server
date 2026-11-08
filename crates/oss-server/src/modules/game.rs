@@ -18,7 +18,7 @@ use std::sync::Arc;
 use oss_proto::Packet;
 use oss_proto::c2s;
 use oss_proto::position::{C2SPosition, PositionTail, S2CPosition, S2CWeapon, status, weapon_type};
-use oss_proto::s2c::{FreqChange, ShipChange};
+use oss_proto::s2c::{FreqChange, Green as S2CGreen, Kill as S2CKill, ShipChange};
 
 use crate::arena::{ArenaId, ArenaStatus};
 use crate::module::{Module, ModuleError};
@@ -84,6 +84,10 @@ struct GameData {
     status: u8,
     have_pos: bool,
     speccing: Option<PlayerId>,
+    /// fired a weapon since the last death
+    sent_wpn: bool,
+    /// deaths in a row without firing
+    deaths_without_firing: i32,
     see_nrg: SeeEnergy,
     see_nrg_spec: SeeEnergy,
     see_epd: bool,
@@ -176,6 +180,12 @@ fn on_position(zone: &mut Zone, pid: PlayerId, pkt: &[u8]) {
     let is_newer = !had || (pos.time.wrapping_sub(old_time) as i32) > 0;
 
     if !ship.is_spec() {
+        if pos.weapon.kind() != weapon_type::NONE
+            && let Some(d) = gd(zone, pid)
+        {
+            d.sent_wpn = true;
+            d.deaths_without_firing = 0;
+        }
         if !is_newer && !fake && pos.weapon.kind() == weapon_type::NONE {
             return;
         }
@@ -561,6 +571,8 @@ impl Module for GameModule {
         zone.on_packet(me, c2s::kind::SET_SHIP, on_set_ship);
         zone.on_packet(me, c2s::kind::SET_FREQ, on_set_freq);
         zone.on_packet(me, c2s::kind::SPEC_REQUEST, on_spec_request);
+        zone.on_packet(me, c2s::kind::DEATH, on_death);
+        zone.on_packet(me, c2s::kind::TAKE_GREEN, on_green);
         if zone.iface::<dyn FreqManager>().is_none() {
             zone.reg
                 .provide::<dyn FreqManager>(me, Scope::Global, Arc::new(BalancedFreqs));
@@ -584,4 +596,221 @@ impl Module for GameModule {
         });
         Ok(())
     }
+}
+
+/// ASSS `CB_KILL`: a player died. Handlers add kill points to `points` and
+/// may pick the prize left behind by setting `green` (-1 = let the server pick
+/// a weighted random prize). Raised before the kill is announced.
+#[derive(Debug)]
+pub struct Kill {
+    /// The arena.
+    pub arena: ArenaId,
+    /// Who killed.
+    pub killer: PlayerId,
+    /// Who died.
+    pub killed: PlayerId,
+    /// The killed player's bounty, as reported by their client.
+    pub bounty: i16,
+    /// Flags the killed player carried.
+    pub flags: i16,
+    /// Kill points to award (sent in the kill packet).
+    pub points: std::cell::Cell<i32>,
+    /// Prize left at the death spot.
+    pub green: std::cell::Cell<i32>,
+}
+
+impl Event for Kill {
+    fn arena(&self) -> Option<ArenaId> {
+        Some(self.arena)
+    }
+}
+
+/// ASSS `CB_KILL_POST_NOTIFY`: raised after the kill packet was sent, with
+/// the final points and prize.
+#[derive(Debug, Clone, Copy)]
+pub struct KillAnnounced {
+    /// The arena.
+    pub arena: ArenaId,
+    /// Who killed.
+    pub killer: PlayerId,
+    /// Who died.
+    pub killed: PlayerId,
+    /// Points awarded.
+    pub points: i32,
+    /// Flags transferred.
+    pub flags: i16,
+    /// Prize left behind.
+    pub green: i32,
+}
+
+impl Event for KillAnnounced {
+    fn arena(&self) -> Option<ArenaId> {
+        Some(self.arena)
+    }
+}
+
+/// ASSS `CB_GREEN`: a player picked up a prize.
+#[derive(Debug, Clone, Copy)]
+pub struct GreenPickup {
+    /// The arena.
+    pub arena: ArenaId,
+    /// Who picked it up.
+    pub player: PlayerId,
+    /// Tile x.
+    pub x: i16,
+    /// Tile y.
+    pub y: i16,
+    /// Prize number (negative = bad prize).
+    pub prize: i16,
+}
+
+impl Event for GreenPickup {
+    fn arena(&self) -> Option<ArenaId> {
+        Some(self.arena)
+    }
+}
+
+/// True once the player has sent a position packet in their current arena
+/// (which means the client has the map and settings).
+pub fn has_sent_position(zone: &Zone, player: PlayerId) -> bool {
+    zone.players
+        .get(player)
+        .and_then(|p| p.ext.get::<GameData>())
+        .is_some_and(|d| d.have_pos)
+}
+
+fn on_death(zone: &mut Zone, pid: PlayerId, pkt: &[u8]) {
+    if pkt.len() != 5 {
+        tracing::warn!(target: "game", pid = pid.0, len = pkt.len(), "bad death packet length");
+        return;
+    }
+    let Ok(d) = c2s::Death::decode(pkt) else {
+        return;
+    };
+    let Some(p) = zone.players.get(pid) else {
+        return;
+    };
+    let (Some(arena), PlayerStatus::Playing) = (p.arena, p.status) else {
+        tracing::warn!(target: "game", pid = pid.0, "death packet from bad state");
+        return;
+    };
+    let killer = u16::try_from(d.killer).ok().map(PlayerId);
+    let Some(killer) =
+        killer.filter(|k| zone.players.get(*k).is_some_and(|k| k.is_playing_in(arena)))
+    else {
+        tracing::warn!(target: "game", pid = pid.0, killer = d.killer, "reported kill by bad pid");
+        return;
+    };
+    // flags aren't implemented yet, so nobody carries any
+    let flags = 0i16;
+    let ev = Kill {
+        arena,
+        killer,
+        killed: pid,
+        bounty: d.bounty,
+        flags,
+        points: std::cell::Cell::new(0),
+        green: std::cell::Cell::new(-1),
+    };
+    zone.fire(&ev);
+    let pts = ev.points.get();
+    if pts != 0
+        && let Some(st) = zone.iface_in::<dyn super::stats::Stats>(arena)
+    {
+        st.increment(zone, killer, super::stats::stat::KILL_POINTS, pts);
+    }
+    let mut green = ev.green.get();
+    if green == -1 {
+        green = match zone.iface_in::<dyn super::clientset::ClientSettings>(arena) {
+            Some(cs) => {
+                let mut rng = std::mem::take(rand(zone));
+                let g = cs.random_prize(zone, arena, &mut |n| rng.below(n));
+                *rand(zone) = rng;
+                i32::from(g)
+            }
+            None => 0,
+        };
+    }
+    let mut buf = Vec::with_capacity(11);
+    S2CKill {
+        green: green as u8,
+        killer: killer.0 as i16,
+        killed: pid.0 as i16,
+        bounty: pts as i16,
+        flags,
+    }
+    .encode(&mut buf);
+    zone.send_to_arena(arena, None, &buf, SendFlags::RELIABLE);
+    zone.fire(&KillAnnounced {
+        arena,
+        killer,
+        killed: pid,
+        points: pts,
+        flags,
+        green,
+    });
+    tracing::debug!(target: "game", killed = pid.0, killer = killer.0, bounty = d.bounty, pts, "kill");
+
+    // spectate players who keep dying without ever firing
+    let max = zone
+        .arenas
+        .get(arena)
+        .map_or(5, |a| a.cfg.get_int("Security", "MaxDeathWithoutFiring", 5));
+    let spec = zone.arenas.get(arena).map_or(8025, spec_freq);
+    let Some(d) = gd(zone, pid) else { return };
+    let too_many = if d.sent_wpn {
+        false
+    } else {
+        let before = d.deaths_without_firing;
+        d.deaths_without_firing += 1;
+        before == max
+    };
+    d.sent_wpn = false;
+    if too_many {
+        tracing::debug!(target: "game", pid = pid.0, "specced for too many deaths without firing");
+        set_ship_and_freq(zone, pid, Ship::SPEC, spec);
+    }
+}
+
+fn on_green(zone: &mut Zone, pid: PlayerId, pkt: &[u8]) {
+    if pkt.len() != 11 {
+        tracing::warn!(target: "game", pid = pid.0, len = pkt.len(), "bad green packet length");
+        return;
+    }
+    let Ok(g) = c2s::TakeGreen::decode(pkt) else {
+        return;
+    };
+    let Some(p) = zone.players.get(pid) else {
+        return;
+    };
+    let (Some(arena), PlayerStatus::Playing) = (p.arena, p.status) else {
+        return;
+    };
+    let cfg = zone.arenas.get(arena).map(|a| a.cfg.clone());
+    let personal = |key: &str| {
+        cfg.as_ref()
+            .is_some_and(|c| c.get_int("Prize", key, 0) != 0)
+    };
+    let private = (g.prize == oss_proto::common::prize::THOR && personal("DontShareThor"))
+        || (g.prize == oss_proto::common::prize::BURST && personal("DontShareBurst"))
+        || (g.prize == oss_proto::common::prize::BRICK && personal("DontShareBrick"));
+    if !private {
+        let mut buf = Vec::with_capacity(11);
+        S2CGreen {
+            time: g.time,
+            x: g.x,
+            y: g.y,
+            prize: g.prize,
+            pid: pid.0 as i16,
+        }
+        .encode(&mut buf);
+        zone.send_to_arena(arena, Some(pid), &buf, SendFlags::UNRELIABLE);
+    }
+    zone.fire(&GreenPickup {
+        arena,
+        player: pid,
+        x: g.x,
+        y: g.y,
+        prize: g.prize,
+    });
 }

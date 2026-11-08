@@ -24,14 +24,19 @@ fn default_zone_loads_every_listed_module() {
         loaded,
         vec![
             "arenaman",
+            "mapdata",
             "capman",
             "mapnewsdl",
             "core",
             "clientset",
             "cmdman",
             "chat",
+            "stats",
+            "basicstats",
             "auth_file",
+            "security",
             "game",
+            "points_kill",
             "playercmd"
         ]
     );
@@ -99,6 +104,36 @@ fn init_zone_writes_a_runnable_copy() {
     let zone = ServerBuilder::new(&dir)
         .build_zone()
         .expect("zone from disk");
-    assert_eq!(zone.modules.loaded().count(), 10);
+    assert_eq!(zone.modules.loaded().count(), 15);
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The security map checksum and Continuum map CRC computed from the bundled
+/// maps match ASSS's `mapdata.c` for every key in the vectors.
+#[test]
+fn map_checksums_match_asss() {
+    let zone = ServerBuilder::default_zone().build_zone().expect("zone");
+    let src = zone.cfg.source();
+    let mut map = None;
+    let mut n = 0;
+    for line in MAPS.lines() {
+        let f: Vec<&str> = line.split_whitespace().collect();
+        match f.as_slice() {
+            ["map", "asss", rel, ..] => {
+                let data = src.read(Path::new(rel)).expect("bundled map");
+                map = Some(oss_server::modules::mapdata::ArenaMap::from_bytes(&data));
+            }
+            ["map", ..] => map = None,
+            ["checksum", key, sum] => {
+                if let Some(m) = &map {
+                    let key = u32::from_str_radix(key, 16).expect("key");
+                    let sum = u32::from_str_radix(sum, 16).expect("sum");
+                    assert_eq!(m.checksum(key), sum, "key {key:08x}");
+                    n += 1;
+                }
+            }
+            _ => {}
+        }
+    }
+    assert!(n >= 60, "{n} checksums checked");
 }

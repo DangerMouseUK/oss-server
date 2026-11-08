@@ -110,6 +110,10 @@ impl Module for PointsFlagModule {
             if on_freq > 0 && cfg.get_int("Flag", "SplitPoints", 0) != 0 {
                 points /= on_freq;
             }
+            // Deliberate difference: ASSS adds the jackpot in 32-bit ints
+            // with no clamp, so an absurd jackpot or FlagReward can wrap into
+            // a negative award. warzone_reward() still wraps like ASSS (that
+            // part is pinned by vectors); the total here is kept in 0..=i32::MAX.
             ev.points.set(
                 ev.points
                     .get()

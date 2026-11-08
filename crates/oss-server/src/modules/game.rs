@@ -15,6 +15,11 @@
 //! changes (ASSS: the count halves every 10 seconds; going over it blocks
 //! changes for about 30 seconds).
 //!
+//! Every `Misc:RegionCheckInterval` ticks a player's position is checked
+//! against the map's eLVL regions: entering or leaving one raises
+//! [`RegionChange`] (ASSS `CB_REGION`), and inside no-weapons or
+//! no-antiwarp regions weapons and antiwarp are stripped before relaying.
+//!
 //! Not yet ported: the "during change" ack wait.
 
 use std::sync::Arc;
@@ -110,6 +115,11 @@ struct GameData {
     /// recent ship changes (halved every 10 seconds) and when last decayed
     changes: u32,
     changes_checked: crate::time::Ticks,
+    /// regions the player was in at the last check (ascending ids)
+    regions: Vec<usize>,
+    region_checked: crate::time::Ticks,
+    rgn_no_anti: bool,
+    rgn_no_weapons: bool,
     see_nrg: SeeEnergy,
     see_nrg_spec: SeeEnergy,
     see_epd: bool,
@@ -161,6 +171,76 @@ enum Tail {
     Extra,
 }
 
+/// A player entered or left an eLVL region (ASSS `CB_REGION`).
+#[derive(Debug, Clone)]
+pub struct RegionChange {
+    /// The player.
+    pub player: PlayerId,
+    /// Their arena.
+    pub arena: ArenaId,
+    /// The region's id (index in [`super::mapdata::ArenaMap::regions`]).
+    pub region: usize,
+    /// Tile position at the check.
+    pub x: i32,
+    /// Tile position at the check.
+    pub y: i32,
+    /// True when entering, false when leaving.
+    pub entering: bool,
+}
+
+impl Event for RegionChange {
+    fn arena(&self) -> Option<ArenaId> {
+        Some(self.arena)
+    }
+}
+
+/// `Misc:RegionCheckInterval`, cached per arena.
+struct RegionInterval(u64);
+
+/// The regions a player was in at the last check.
+pub fn player_regions(zone: &Zone, pid: PlayerId) -> Vec<usize> {
+    zone.players
+        .get(pid)
+        .and_then(|p| p.ext.get::<GameData>())
+        .map(|d| d.regions.clone())
+        .unwrap_or_default()
+}
+
+/// ASSS `update_regions`: diffs the regions at tile (`x`, `y`) with the last
+/// set and raises enter/exit events.
+fn update_regions(zone: &mut Zone, pid: PlayerId, arena: ArenaId, x: i32, y: i32) {
+    let (now_in, no_anti, no_wpn) = match super::mapdata::arena_map(zone, arena) {
+        Some(m) if !m.regions.is_empty() => {
+            let ids: Vec<usize> = m.regions_at(x, y).collect();
+            let anti = ids.iter().any(|&i| m.regions[i].no_antiwarp);
+            let wpn = ids.iter().any(|&i| m.regions[i].no_weapons);
+            (ids, anti, wpn)
+        }
+        _ => (Vec::new(), false, false),
+    };
+    let Some(d) = gd(zone, pid) else { return };
+    d.rgn_no_anti = no_anti;
+    d.rgn_no_weapons = no_wpn;
+    if d.regions == now_in {
+        return;
+    }
+    let old = std::mem::replace(&mut d.regions, now_in.clone());
+    let ev = |region, entering| RegionChange {
+        player: pid,
+        arena,
+        region,
+        x,
+        y,
+        entering,
+    };
+    for r in old.iter().filter(|r| !now_in.contains(r)) {
+        zone.fire(&ev(*r, false));
+    }
+    for r in now_in.iter().filter(|r| !old.contains(r)) {
+        zone.fire(&ev(*r, true));
+    }
+}
+
 fn on_position(zone: &mut Zone, pid: PlayerId, pkt: &[u8]) {
     if pkt.len() != 22 && pkt.len() != 32 {
         tracing::warn!(target: "game", pid = pid.0, len = pkt.len(), "bad position packet length");
@@ -210,6 +290,29 @@ fn on_position(zone: &mut Zone, pid: PlayerId, pkt: &[u8]) {
     let is_newer = !had || (pos.time.wrapping_sub(old_time) as i32) > 0;
 
     if !ship.is_spec() {
+        // region tracking, for real players, once in a while
+        let interval = zone
+            .arenas
+            .get(arena)
+            .and_then(|a| a.ext.get::<RegionInterval>())
+            .map_or(100, |r| r.0);
+        let due = zone
+            .players
+            .get(pid)
+            .and_then(|p| p.ext.get::<GameData>())
+            .is_some_and(|d| now.since(d.region_checked) >= interval);
+        if is_newer && !fake && due {
+            update_regions(
+                zone,
+                pid,
+                arena,
+                i32::from(pos.x) >> 4,
+                i32::from(pos.y) >> 4,
+            );
+            if let Some(d) = gd(zone, pid) {
+                d.region_checked = now;
+            }
+        }
         if pos.weapon.kind() != weapon_type::NONE
             && let Some(d) = gd(zone, pid)
         {
@@ -217,13 +320,19 @@ fn on_position(zone: &mut Zone, pid: PlayerId, pkt: &[u8]) {
             d.deaths_without_firing = 0;
         }
         // lagaction's weapon-ignore share (after the "fired" bookkeeping)
-        let ignore = zone
+        let (ignore, no_wpn, no_anti) = zone
             .players
             .get(pid)
             .and_then(|p| p.ext.get::<GameData>())
-            .map_or(0.0, |d| d.ignore_weapons);
-        if ignore > 0.0 && f64::from(rand(zone).below(1 << 16)) < ignore * 65536.0 {
+            .map_or((0.0, false, false), |d| {
+                (d.ignore_weapons, d.rgn_no_weapons, d.rgn_no_anti)
+            });
+        if (ignore > 0.0 && f64::from(rand(zone).below(1 << 16)) < ignore * 65536.0) || no_wpn {
             pos.weapon.set_kind(weapon_type::NONE);
+        }
+        // and antiwarp, in no-antiwarp regions
+        if no_anti {
+            pos.status &= !status::ANTIWARP;
         }
         if !is_newer && !fake && pos.weapon.kind() == weapon_type::NONE {
             return;
@@ -717,6 +826,23 @@ impl Module for GameModule {
             {
                 p.attached = None;
             }
+            if ev.action == Action::LeaveArena
+                && let Some(d) = gd(z, ev.player)
+            {
+                d.regions.clear();
+            }
+        });
+        zone.on::<super::arenaman::ArenaAction>(me, Scope::Global, |z, ev| {
+            use super::arenaman::ArenaActionKind;
+            if matches!(
+                ev.action,
+                ArenaActionKind::Create | ArenaActionKind::ConfChanged
+            ) && let Some(a) = z.arenas.get_mut(ev.arena)
+            {
+                let every = a.cfg.get_int("Misc", "RegionCheckInterval", 100);
+                a.ext
+                    .insert(RegionInterval(u64::try_from(every).unwrap_or(100)));
+            }
         });
         if zone.iface::<dyn FreqManager>().is_none() {
             zone.reg
@@ -736,6 +862,7 @@ impl Module for GameModule {
                 *d = GameData {
                     ignore_weapons,
                     changes_checked: now,
+                    region_checked: now,
                     see_nrg: SeeEnergy::from_cfg(cfg.get_int("Misc", "SeeEnergy", 0)),
                     see_nrg_spec: SeeEnergy::from_cfg(cfg.get_int("Misc", "SpecSeeEnergy", 0)),
                     see_epd: cfg.get_int("Misc", "SpecSeeExtra", 0) != 0,

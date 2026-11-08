@@ -9,7 +9,8 @@
 //! transfer. If the map can't be read, ASSS's built-in "tinymap.lvl" is used.
 //!
 //! The news file (`General:NewsFile`, default `news.txt`) is served the same
-//! way for C2S `0x0D`; its CRC-32 goes in the login response.
+//! way for C2S `0x0D`; its CRC-32 goes in the login response. It is re-read
+//! when it changes, checked every `General:NewsRefreshMinutes` (default 5).
 
 use std::io::Write;
 use std::path::PathBuf;
@@ -356,9 +357,16 @@ impl Module for MapNewsDlModule {
                 packet: None,
             });
             refresh_news(zone);
-            zone.set_timer(me, 3000, 3000, |z| {
+            // ASSS: checked 0.5 s after load, then every
+            // General:NewsRefreshMinutes (0 = only that once)
+            let minutes = zone
+                .cfg
+                .global()
+                .get_int("General", "NewsRefreshMinutes", 5);
+            let every = u64::try_from(minutes).unwrap_or(0) * 60 * 100;
+            zone.set_timer(me, 50, every, move |z| {
                 refresh_news(z);
-                true
+                every > 0
             });
         }
         Ok(())

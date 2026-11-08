@@ -8,6 +8,10 @@
 //! every `Persist:SyncSeconds` (default 180). Data belongs to an interval
 //! (forever, reset, game, ...); [`end_interval`] starts a new period for an
 //! arena group, so per-game stats start over after a flag or soccer win.
+//! The forever, reset and map-rotation intervals are shared by an arena
+//! group: arenas with the same `General:ScoreGroup`, or by default the same
+//! base name (`turf1` and `turf2`); per-game and non-shared data belong to
+//! one arena name.
 //!
 //! The database is `data/oss.db` in the zone directory (`Persist:Database`
 //! overrides the path), or in memory for zones without a directory.
@@ -108,9 +112,22 @@ pub fn unregister_player_data(zone: &mut Zone, owner: Owner) {
 
 const GLOBAL_GROUP: &str = "(global)";
 
-fn group(zone: &Zone, arena: Option<ArenaId>) -> String {
+/// ASSS `INTERVAL_IS_SHARED`: these intervals are shared by the arenas of
+/// a score group; the rest belong to one arena.
+pub fn is_shared(interval: Interval) -> bool {
+    (interval as i64) < 5
+}
+
+/// The key data for `interval` is stored under (ASSS `fill_in_ag`): the
+/// global group for global data; for shared intervals the arena's
+/// `General:ScoreGroup`, or its base name; otherwise the arena's own name.
+fn group(zone: &Zone, arena: Option<ArenaId>, interval: Interval) -> String {
     match arena.and_then(|a| zone.arenas.get(a)) {
-        Some(a) => a.basename.clone(),
+        Some(a) if is_shared(interval) => a
+            .cfg
+            .get("General", "ScoreGroup")
+            .map_or_else(|| a.basename.clone(), str::to_owned),
+        Some(a) => a.name.clone(),
         None => GLOBAL_GROUP.to_owned(),
     }
 }
@@ -152,8 +169,8 @@ fn load_player(zone: &mut Zone, pid: PlayerId, arena: Option<ArenaId>) {
     let Some(name) = zone.players.get(pid).map(|p| p.name.to_ascii_lowercase()) else {
         return;
     };
-    let grp = group(zone, arena);
     for slot in slots(zone, arena) {
+        let grp = group(zone, arena, slot.interval);
         let blob: Option<Vec<u8>> = zone.res.get::<Db>().and_then(|db| {
             let s = serial(&db.0, &grp, slot.interval);
             db.0.query_row(
@@ -176,8 +193,8 @@ fn save_player(zone: &mut Zone, pid: PlayerId, arena: Option<ArenaId>) {
     let Some(name) = zone.players.get(pid).map(|p| p.name.to_ascii_lowercase()) else {
         return;
     };
-    let grp = group(zone, arena);
     for slot in slots(zone, arena) {
+        let grp = group(zone, arena, slot.interval);
         let blob = (slot.get)(zone, pid, arena);
         let Some(db) = zone.res.get::<Db>() else {
             return;
@@ -203,7 +220,7 @@ fn save_player(zone: &mut Zone, pid: PlayerId, arena: Option<ArenaId>) {
 /// ASSS `EndInterval`: starts a new period of `interval` for an arena's group
 /// (or every group with `None`); players there have that data cleared.
 pub fn end_interval(zone: &mut Zone, arena: Option<ArenaId>, interval: Interval) {
-    let grp = arena.map(|a| group(zone, Some(a)));
+    let grp = arena.map(|a| group(zone, Some(a), interval));
     end_group_interval(zone, grp, arena, interval);
 }
 
@@ -231,7 +248,9 @@ fn end_group_interval(
         .iter()
         .filter(|p| p.status == PlayerStatus::Playing)
         .filter_map(|p| p.arena.map(|a| (p.id, a)))
-        .filter(|(_, a)| grp.is_none() || grp.as_deref() == Some(group(zone, Some(*a)).as_str()))
+        .filter(|(_, a)| {
+            grp.is_none() || grp.as_deref() == Some(group(zone, Some(*a), interval).as_str())
+        })
         .collect();
     for (pid, a) in &affected {
         save_player(zone, *pid, Some(*a));

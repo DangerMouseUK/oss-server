@@ -2,12 +2,15 @@
 //! server needs so far): tile lookups, the security map checksum and the
 //! Continuum map CRC. The level is found and read like `mapnewsdl` does
 //! (`General:Map` on the level search path) and big objects are expanded the
-//! way the server-side reference does.
+//! way the server-side reference does. eLVL regions are kept for region
+//! tracking (see `game`).
 
 use std::path::Path;
 use std::sync::Arc;
 
+use oss_formats::elvl::AutoWarp;
 use oss_formats::lvl::{Level, TileGrid};
+use oss_formats::region::RegionBitmap;
 
 use crate::arena::ArenaId;
 use crate::module::{Module, ModuleError};
@@ -25,19 +28,63 @@ pub struct ArenaMap {
     pub crc: u32,
     /// Number of turf (static) flags in the map.
     pub turf_flags: usize,
+    /// eLVL regions, in file order (a region's index is its id).
+    pub regions: Arc<Vec<MapRegion>>,
+}
+
+/// An eLVL region (ASSS `Region`).
+#[derive(Debug, Clone)]
+pub struct MapRegion {
+    /// Name.
+    pub name: String,
+    /// Its tiles.
+    pub tiles: RegionBitmap,
+    /// Marked as a base.
+    pub is_base: bool,
+    /// Antiwarp doesn't work here.
+    pub no_antiwarp: bool,
+    /// Weapons don't work here.
+    pub no_weapons: bool,
+    /// Flags dropped here respawn.
+    pub no_flag_drops: bool,
+    /// Where entering players are warped, if anywhere.
+    pub auto_warp: Option<AutoWarp>,
 }
 
 impl ArenaMap {
     /// Builds from level file bytes (an empty map if they don't parse).
     pub fn from_bytes(data: &[u8]) -> Self {
-        let (grid, turf_flags) = match Level::parse(data) {
+        let (grid, turf_flags, regions) = match Level::parse(data) {
             Ok(level) => {
                 let (g, stats) = level.server_tile_grid();
-                (g, stats.turf_flags)
+                let regions = level
+                    .metadata
+                    .as_ref()
+                    .map(|m| {
+                        m.regions()
+                            .filter_map(|r| match r.tiles() {
+                                Ok(tiles) => Some(MapRegion {
+                                    name: r.name().unwrap_or_default().to_owned(),
+                                    tiles,
+                                    is_base: r.is_base(),
+                                    no_antiwarp: r.no_antiwarp(),
+                                    no_weapons: r.no_weapons(),
+                                    no_flag_drops: r.no_flag_drops(),
+                                    auto_warp: r.auto_warp(),
+                                }),
+                                Err(e) => {
+                                    tracing::warn!(target: "mapdata", "bad region {:?}: {e}", r.name());
+                                    None
+                                }
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                (g, stats.turf_flags, regions)
             }
             Err(e) => {
                 tracing::warn!(target: "mapdata", "bad level file: {e}");
-                (TileGrid::new(), 0)
+                (TileGrid::new(), 0, Vec::new())
             }
         };
         let crc = oss_proto::checksum::map_crc32(grid.cells());
@@ -45,7 +92,22 @@ impl ArenaMap {
             grid: Arc::new(grid),
             crc,
             turf_flags,
+            regions: Arc::new(regions),
         }
+    }
+
+    /// Ids of the regions containing tile (`x`, `y`), ascending (ASSS
+    /// `EnumContaining`).
+    pub fn regions_at(&self, x: i32, y: i32) -> impl Iterator<Item = usize> + '_ {
+        let (x, y) = (u32::try_from(x).ok(), u32::try_from(y).ok());
+        self.regions
+            .iter()
+            .enumerate()
+            .filter(move |(_, r)| match (x, y) {
+                (Some(x), Some(y)) => r.tiles.contains(x, y),
+                _ => false,
+            })
+            .map(|(i, _)| i)
     }
 
     /// The tile at `(x, y)` with coordinates wrapped mod 1024, the way ASSS's

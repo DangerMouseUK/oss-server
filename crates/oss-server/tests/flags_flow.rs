@@ -558,3 +558,84 @@ fn periodic_turf_rewards() {
         Some(100)
     );
 }
+
+/// eLVL regions: entering and leaving raise events every
+/// `Misc:RegionCheckInterval`, and no-weapons / no-antiwarp regions strip
+/// those from relayed positions.
+#[test]
+fn regions() {
+    use oss_formats::{Chunk, Level, Metadata, Region, RegionBitmap, RegionChunk};
+    use oss_server::modules::game::RegionChange;
+    use oss_server::registry::{Owner, Scope};
+    use std::sync::{Arc, Mutex};
+
+    let mut tiles = RegionBitmap::new();
+    for x in 100..110 {
+        for y in 100..110 {
+            tiles.set(x, y, true);
+        }
+    }
+    let mut safe = Region::new("calm", &tiles);
+    safe.chunks.push(RegionChunk::NoWeapons);
+    safe.chunks.push(RegionChunk::NoAntiwarp);
+    let level = Level {
+        metadata: Some(Metadata {
+            reserved: 0,
+            chunks: vec![Chunk::Region(safe)],
+        }),
+        ..Level::default()
+    };
+    let conf = "[General]\nMap = test.lvl\n[Misc]\nRegionCheckInterval = 50\n";
+    let mut h = H::new(conf, Some(level.to_bytes()));
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let s2 = seen.clone();
+    h.zone
+        .on::<RegionChange>(Owner(999), Scope::Global, move |_, ev| {
+            s2.lock().expect("lock").push((ev.region, ev.entering));
+        });
+    let a = h.player("alpha", 0);
+    let b = h.player("bravo", 1);
+    h.at(b, 104, 104);
+    h.tick(60);
+    h.at(a, 50, 50);
+    h.tick(60);
+    h.at(a, 105, 105);
+    assert_eq!(*seen.lock().expect("lock"), vec![(0, true)]);
+    assert_eq!(
+        oss_server::modules::game::player_regions(&h.zone, a),
+        vec![0]
+    );
+
+    // alpha fires with antiwarp on inside the region: bravo sees neither
+    h.take(b);
+    let mut w = oss_proto::position::WeaponInfo::default();
+    w.set_kind(oss_proto::position::weapon_type::BULLET);
+    let pos = C2SPosition {
+        time: h.t as u32 + 2,
+        x: 105 * 16,
+        y: 105 * 16,
+        status: oss_proto::position::status::ANTIWARP,
+        weapon: w,
+        ..Default::default()
+    };
+    let mut buf = Vec::new();
+    pos.encode(&mut buf);
+    h.send(a, &buf);
+    let got = h.take(b);
+    assert!(!got.is_empty());
+    for d in &got {
+        if d[0] == s2c::kind::WEAPON {
+            let w = oss_proto::position::S2CWeapon::decode(d).expect("0x05");
+            assert_eq!(w.weapon.kind(), 0);
+            assert_eq!(w.status & oss_proto::position::status::ANTIWARP, 0);
+        } else if d[0] == s2c::kind::POSITION {
+            let p = oss_proto::position::S2CPosition::decode(d).expect("0x28");
+            assert_eq!(p.status & oss_proto::position::status::ANTIWARP, 0);
+        }
+    }
+
+    // leaving
+    h.tick(60);
+    h.at(a, 50, 50);
+    assert_eq!(*seen.lock().expect("lock"), vec![(0, true), (0, false)]);
+}

@@ -30,12 +30,16 @@ struct H {
 
 impl H {
     fn new() -> Self {
+        Self::with_arena(ARENA)
+    }
+
+    fn with_arena(arena: &str) -> Self {
         let src = MemSource::new([
             ("conf/global.conf", "[Security]\nSecurityKickoff = 1\n"),
             ("conf/passwd.conf", "[General]\nAllowUnknown = yes\n"),
-            ("conf/groupdef.conf", "[default]\n"),
+            ("conf/groupdef.conf", "[default]\ncmd_go = 1\n"),
             ("conf/staff.conf", ""),
-            ("arenas/(default)/arena.conf", ARENA),
+            ("arenas/(default)/arena.conf", arena),
         ]);
         let zone = ServerBuilder::with_source(src).build_zone().expect("zone");
         Self {
@@ -280,6 +284,60 @@ fn scores_persist_across_logins() {
         .find(|p| p.name.as_bytes() == b"Alpha")
         .expect("own record");
     assert_eq!(me.kill_points, 7);
+}
+
+fn go(h: &mut H, p: PlayerId, arena: &str) {
+    let go = GoArena {
+        ship: 8,
+        x_res: 1024,
+        y_res: 768,
+        arena_type: -3,
+        arena: FixedStr::new(arena.as_bytes()),
+        ..Default::default()
+    };
+    let mut buf = Vec::new();
+    go.encode(&mut buf);
+    h.send(p, &buf);
+    h.tick(20);
+}
+
+/// Shared scores follow `General:ScoreGroup`: without it the public arena
+/// and "duel" keep separate scores; with the same group they share them.
+#[test]
+fn score_groups() {
+    for (conf, want) in [
+        (String::from(ARENA), 0),
+        (
+            format!(
+                "{ARENA}[General]
+ScoreGroup = league
+"
+            ),
+            7,
+        ),
+    ] {
+        let mut h = H::with_arena(&conf);
+        let (a, _) = h.player("alpha");
+        let (b, _) = h.player("bravo");
+        h.send(a, &[c2s::kind::SET_SHIP, 0]);
+        h.send(b, &[c2s::kind::SET_SHIP, 1]);
+        h.position(a, 500, weapon_type::BULLET);
+        h.die(b, a, 7);
+        assert_eq!(h.zone.players.get(a).map(|p| p.score.kill_points), Some(7));
+        go(&mut h, a, "duel");
+        let arena = h.zone.players.get(a).and_then(|p| p.arena);
+        assert_eq!(
+            arena
+                .and_then(|x| h.zone.arenas.get(x))
+                .map(|x| x.name.clone()),
+            Some("duel".to_owned())
+        );
+        assert_eq!(
+            h.zone.players.get(a).map(|p| p.score.kill_points),
+            Some(want),
+            "{conf}"
+        );
+    }
 }
 
 /// lagaction moves a player whose positions arrive very late to spectator

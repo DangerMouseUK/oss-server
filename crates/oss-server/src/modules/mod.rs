@@ -20,6 +20,7 @@ pub mod jackpot;
 pub mod mapdata;
 pub mod mapnewsdl;
 pub mod playercmd;
+pub mod points_goal;
 pub mod security;
 pub mod stats;
 
@@ -47,6 +48,7 @@ pub const DEFAULT_MODULES: &[&str] = &[
     "flagcore",
     "balls",
     "bricks",
+    "points_goal",
     "fg_wz",
     "fg_turf",
     "jackpot",
@@ -81,6 +83,9 @@ pub fn builtin_catalog() -> ModuleCatalog {
     c.register("flagcore", &[], || flagcore::FlagCoreModule);
     c.register("balls", &[], || balls::BallsModule);
     c.register("bricks", &[], || bricks::BricksModule);
+    c.register("points_goal", &["scoring:points_goal"], || {
+        points_goal::PointsGoalModule
+    });
     c.register("fg_wz", &["<py> fg_wz"], || fg_wz::FgWzModule);
     c.register("fg_turf", &["<py> fg_turf"], || fg_turf::FgTurfModule);
     c.register("jackpot", &["scoring:jackpot"], || jackpot::JackpotModule);

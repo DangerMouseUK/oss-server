@@ -393,3 +393,75 @@ fn bricks_drop_resend_and_expire() {
     h.send(later, &buf);
     assert!(of(&h.take(a), s2c::kind::BRICK).is_empty());
 }
+
+#[test]
+fn soccer_scoring() {
+    let conf = "[Modules]\nAttachModules = points_goal\n\
+        [Soccer]\nBallCount = 1\nSpawnRadius = 1\nMode = GOAL_LEFTRIGHT\nCapturePoints = -2\nReward = -100\nNewGameDelay = 100\n\
+        [Team]\nDesiredTeams = 2\n";
+    let mut h = H::new(conf, None);
+    let a = h.player("alpha", 0);
+    let _b = h.player("bravo", 1);
+    let arena = h.arena(a);
+    let score_goal = |h: &mut H| {
+        let ball = oss_server::modules::balls::balls(&h.zone, arena)[0];
+        let mut buf = Vec::new();
+        c2s::PickupBall {
+            ball_id: 0,
+            time: ball.time,
+        }
+        .encode(&mut buf);
+        h.send(a, &buf);
+        buf.clear();
+        c2s::ShootBall {
+            ball_id: 0,
+            x: 9600,
+            y: 8000,
+            x_speed: 0,
+            y_speed: 0,
+            pid: a.0 as i16,
+            time: 5,
+        }
+        .encode(&mut buf);
+        h.send(a, &buf);
+        buf.clear();
+        c2s::Goal {
+            ball_id: 0,
+            x: 600,
+            y: 500,
+        }
+        .encode(&mut buf);
+        h.send(a, &buf);
+    };
+    h.take(a);
+    score_goal(&mut h);
+    let texts: Vec<String> = of(&h.take(a), s2c::kind::CHAT)
+        .iter()
+        .map(|c| {
+            String::from_utf8_lossy(&s2c::S2CChat::decode(c).expect("chat").0.text).into_owned()
+        })
+        .collect();
+    assert!(
+        texts.iter().any(|t| t.starts_with("Team Goal! by alpha")),
+        "{texts:?}"
+    );
+    assert!(
+        texts.iter().any(|t| t == "SCORE: Evens:1 Odds:0"),
+        "{texts:?}"
+    );
+    score_goal(&mut h);
+    let texts: Vec<String> = of(&h.take(a), s2c::kind::CHAT)
+        .iter()
+        .map(|c| {
+            String::from_utf8_lossy(&s2c::S2CChat::decode(c).expect("chat").0.text).into_owned()
+        })
+        .collect();
+    assert!(texts.iter().any(|t| t == "Soccer game over."), "{texts:?}");
+    // Reward is paid on each goal and again on winning (as in ASSS)
+    assert_eq!(
+        h.zone.players.get(a).map(|p| p.score.flag_points),
+        Some(300)
+    );
+    let ball = oss_server::modules::balls::balls(&h.zone, arena)[0];
+    assert_eq!(ball.state, oss_server::modules::balls::BallState::Waiting);
+}

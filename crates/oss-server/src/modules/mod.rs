@@ -21,6 +21,7 @@ pub mod koth;
 pub mod mapdata;
 pub mod mapnewsdl;
 pub mod periodic;
+pub mod persist;
 pub mod playercmd;
 pub mod points_goal;
 pub mod security;
@@ -42,6 +43,7 @@ pub const DEFAULT_MODULES: &[&str] = &[
     "game",
     "mapdata",
     "mapnewsdl",
+    "persist",
     "stats",
     "basicstats",
     "auth_file",
@@ -89,6 +91,7 @@ pub fn builtin_catalog() -> ModuleCatalog {
     c.register("balls", &[], || balls::BallsModule);
     c.register("bricks", &[], || bricks::BricksModule);
     c.register("koth", &[], || koth::KothModule);
+    c.register("persist", &["scoring:persist"], || persist::PersistModule);
     c.register("periodic", &["scoring:periodic"], || {
         periodic::PeriodicModule
     });

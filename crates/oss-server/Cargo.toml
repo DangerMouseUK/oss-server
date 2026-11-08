@@ -18,6 +18,7 @@ tokio = { version = "1", features = ["rt-multi-thread", "net", "macros", "signal
 clap = { version = "4", features = ["derive"] }
 md-5 = "0.10"
 flate2 = "1"
+rusqlite = { version = "0.37", features = ["bundled"] }
 
 [dev-dependencies]
 

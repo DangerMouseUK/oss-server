@@ -579,6 +579,10 @@ pub fn flag_reset(zone: &mut Zone, a: ArenaId, freq: i16, points: i32) {
         freq,
         points,
     });
+    // after the callbacks, so rewards land in the game that just ended
+    if mode != Some(CARRY_NONE) {
+        super::persist::end_interval(zone, Some(a), super::persist::Interval::Game);
+    }
 }
 
 fn on_kill(zone: &mut Zone, k: &KillAnnounced) {

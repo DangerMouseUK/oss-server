@@ -277,6 +277,7 @@ pub fn end_game(zone: &mut Zone, a: ArenaId) {
             b.time = when;
         }
     }
+    super::persist::end_interval(zone, Some(a), super::persist::Interval::Game);
 }
 
 fn load_settings(zone: &mut Zone, a: ArenaId, spawn_balls: bool) {

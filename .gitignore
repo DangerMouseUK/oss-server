@@ -7,3 +7,4 @@ CLAUDE.local.md
 # Continuum/SubSpace game assets are never redistributed from this repo
 *.bm2
 *.wa2
+/zone/data/

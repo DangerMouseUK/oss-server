@@ -249,3 +249,35 @@ fn kills_scores_greens_and_security() {
         "no answer kicks b (SecurityKickoff)"
     );
 }
+
+/// Scores survive leaving and logging back in (persist, in-memory SQLite
+/// for zones without a directory).
+#[test]
+fn scores_persist_across_logins() {
+    let mut h = H::new();
+    let (a, _) = h.player("alpha");
+    let (b, _) = h.player("bravo");
+    h.send(a, &[c2s::kind::SET_SHIP, 0]);
+    h.send(b, &[c2s::kind::SET_SHIP, 1]);
+    h.position(a, 500, weapon_type::BULLET);
+    h.die(b, a, 7);
+    assert_eq!(h.zone.players.get(a).map(|p| p.score.kill_points), Some(7));
+    core_mod::kick(&mut h.zone, a);
+    h.tick(20);
+    assert!(h.zone.players.get(a).is_none());
+    let (a2, pkts) = h.player("Alpha");
+    assert_eq!(
+        h.zone
+            .players
+            .get(a2)
+            .map(|p| (p.score.kill_points, p.score.wins)),
+        Some((7, 1))
+    );
+    // other players see the restored score in the entering record
+    let me = find(&pkts, s2c::kind::PLAYER_ENTERING)
+        .iter()
+        .map(|d| s2c::PlayerEntering::decode(d).expect("0x03").players[0].clone())
+        .find(|p| p.name.as_bytes() == b"Alpha")
+        .expect("own record");
+    assert_eq!(me.kill_points, 7);
+}

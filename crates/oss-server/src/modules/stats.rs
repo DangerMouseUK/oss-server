@@ -22,6 +22,7 @@ use crate::zone::Zone;
 
 use super::core::{Action, PlayerAction};
 use super::game::Kill;
+use super::persist::{Interval, PersistScope, PlayerData, register_player_data};
 
 /// ASSS stat codes (`statcodes.h`).
 pub mod stat {
@@ -75,8 +76,43 @@ pub trait Stats: Send + Sync {
 
 #[derive(Default)]
 struct PlayerStats {
+    /// the "reset" interval: what scores show
     values: HashMap<u16, i32>,
+    forever: HashMap<u16, i32>,
+    game: HashMap<u16, i32>,
     dirty: bool,
+}
+
+impl PlayerStats {
+    fn interval(&mut self, i: Interval) -> &mut HashMap<u16, i32> {
+        match i {
+            Interval::Forever | Interval::ForeverNonshared => &mut self.forever,
+            Interval::Game => &mut self.game,
+            Interval::Reset | Interval::MapRotation => &mut self.values,
+        }
+    }
+}
+
+fn encode_stats(m: &HashMap<u16, i32>) -> Vec<u8> {
+    let mut v: Vec<(&u16, &i32)> = m.iter().collect();
+    v.sort();
+    let mut out = Vec::with_capacity(6 * v.len());
+    for (k, val) in v {
+        out.extend_from_slice(&k.to_le_bytes());
+        out.extend_from_slice(&val.to_le_bytes());
+    }
+    out
+}
+
+fn decode_stats(b: &[u8]) -> HashMap<u16, i32> {
+    b.chunks_exact(6)
+        .map(|c| {
+            (
+                u16::from_le_bytes([c[0], c[1]]),
+                i32::from_le_bytes([c[2], c[3], c[4], c[5]]),
+            )
+        })
+        .collect()
 }
 
 fn mirror(zone: &mut Zone, player: PlayerId) {
@@ -103,8 +139,10 @@ impl Stats for StatsImpl {
     fn increment(&self, zone: &mut Zone, player: PlayerId, stat: u16, amount: i32) {
         if let Some(p) = zone.players.get_mut(player) {
             let s = p.ext.get_or_default::<PlayerStats>();
-            let v = s.values.entry(stat).or_default();
-            *v = v.wrapping_add(amount);
+            for m in [&mut s.values, &mut s.forever, &mut s.game] {
+                let v = m.entry(stat).or_default();
+                *v = v.wrapping_add(amount);
+            }
             s.dirty = true;
         }
         mirror(zone, player);
@@ -167,13 +205,51 @@ impl Module for StatsModule {
         zone.reg
             .provide::<dyn Stats>(me, Scope::Global, Arc::new(StatsImpl));
         zone.on::<PlayerAction>(me, Scope::Global, |z, ev| {
-            if matches!(ev.action, Action::PreEnterArena | Action::LeaveArena)
+            // cleared on entry; persist (if loaded) then restores saved stats
+            if ev.action == Action::PreEnterArena
                 && let Some(p) = z.players.get_mut(ev.player)
             {
                 p.ext.remove::<PlayerStats>();
                 p.score = Default::default();
             }
         });
+        for interval in [Interval::Forever, Interval::Reset, Interval::Game] {
+            register_player_data(
+                zone,
+                me,
+                PlayerData {
+                    key: 1,
+                    interval,
+                    scope: PersistScope::PerArena,
+                    get: Arc::new(move |z, p, _| {
+                        let s = z.players.get(p)?.ext.get::<PlayerStats>()?;
+                        let m = match interval {
+                            Interval::Forever => &s.forever,
+                            Interval::Game => &s.game,
+                            _ => &s.values,
+                        };
+                        (!m.is_empty()).then(|| encode_stats(m))
+                    }),
+                    set: Arc::new(move |z, p, _, b| {
+                        if let Some(pl) = z.players.get_mut(p) {
+                            let s = pl.ext.get_or_default::<PlayerStats>();
+                            *s.interval(interval) = decode_stats(b);
+                            s.dirty = true;
+                        }
+                        mirror(z, p);
+                    }),
+                    clear: Arc::new(move |z, p, _| {
+                        if let Some(pl) = z.players.get_mut(p) {
+                            pl.ext
+                                .get_or_default::<PlayerStats>()
+                                .interval(interval)
+                                .clear();
+                        }
+                        mirror(z, p);
+                    }),
+                },
+            );
+        }
         zone.set_timer(me, 500, 500, |z| {
             StatsImpl.send_updates(z, None);
             true

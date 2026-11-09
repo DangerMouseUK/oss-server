@@ -240,26 +240,6 @@ fn on_response(zone: &mut Zone, pid: PlayerId, pkt: &[u8]) {
         return;
     };
     let (kind, arena) = (p.kind, p.arena);
-    let want = if kind == ClientKind::Continuum {
-        SecurityResponse::CONT_LEN
-    } else {
-        SecurityResponse::VIE_LEN
-    };
-    if pkt.len() != want {
-        malicious(
-            zone,
-            pid,
-            &format!("invalid security response length {}", pkt.len()),
-        );
-        return;
-    }
-    let Some(arena) = arena else {
-        malicious(zone, pid, "security response outside an arena");
-        return;
-    };
-    let Ok(r) = SecurityResponse::decode(pkt) else {
-        return;
-    };
     let (sent, cancelled, settings) = zone
         .players
         .get(pid)
@@ -267,6 +247,9 @@ fn on_response(zone: &mut Zone, pid: PlayerId, pkt: &[u8]) {
         .map_or((false, false, None), |d| {
             (d.sent, d.cancelled, d.settings_checksum)
         });
+    // Cleared before any early return below: a malformed answer is still an
+    // answer, and leaving the flag set makes `check_answers` kick the player
+    // 15 s later for "no security packet response", naming the wrong cause.
     if let Some(d) = zone
         .players
         .get_mut(pid)
@@ -281,6 +264,30 @@ fn on_response(zone: &mut Zone, pid: PlayerId, pkt: &[u8]) {
         }
         return;
     }
+    // Continuum 0.40 answers with the timer drift and stops
+    // ([`SecurityResponse::CONT_LEN`]); later builds append a map CRC-32
+    // ([`SecurityResponse::CONT_CRC_LEN`]). Both are genuine.
+    let len_ok = if kind == ClientKind::Continuum {
+        SecurityResponse::is_continuum_len(pkt.len())
+    } else {
+        pkt.len() == SecurityResponse::VIE_LEN
+    };
+    if !len_ok {
+        malicious(
+            zone,
+            pid,
+            &format!("invalid security response length {}", pkt.len()),
+        );
+        kick(zone, pid);
+        return;
+    }
+    let Some(arena) = arena else {
+        malicious(zone, pid, "security response outside an arena");
+        return;
+    };
+    let Ok(r) = SecurityResponse::decode(pkt) else {
+        return;
+    };
     let (map_sum, map_crc) = zone
         .arenas
         .get(arena)
@@ -302,7 +309,7 @@ fn on_response(zone: &mut Zone, pid: PlayerId, pkt: &[u8]) {
     let exe_ok = match kind {
         ClientKind::Vie => r.exe_checksum == vie_exe,
         ClientKind::Continuum => {
-            if let (Some(crc), Some((_, client_crc))) = (map_crc, r.continuum)
+            if let (Some(crc), Some((_, Some(client_crc)))) = (map_crc, r.continuum)
                 && crc != client_crc
             {
                 malicious(zone, pid, "map CRC-32 mismatch");

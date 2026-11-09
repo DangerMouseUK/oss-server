@@ -1023,6 +1023,11 @@ fn process_packet(zone: &mut Zone, data: &[u8]) {
         BillerToServer::ZoneMessage {
             kind, sound, text, ..
         } => process_zone_message(zone, kind, sound, &text),
+        BillerToServer::Permit { name, .. } => {
+            // Another zone asked the biller to add this name to our permit list.
+            // ASSS keeps no permit list and acts only on kind 2, so drop it.
+            tracing::info!(target: "billing_ssc", name = %latin1(&name), "ignoring permit entry from biller");
+        }
         BillerToServer::Kick {
             connection_id,
             reason,

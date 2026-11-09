@@ -478,7 +478,7 @@ pub fn send_arena_response(zone: &mut Zone, player: PlayerId) {
         let mut buf = Vec::with_capacity(4);
         oss_proto::s2c::PlayerId {
             pid: player.0 as i16,
-            extra: None,
+            arena: None,
         }
         .encode(&mut buf);
         zone.send(player, &buf, SendFlags::RELIABLE);

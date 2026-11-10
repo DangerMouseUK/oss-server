@@ -224,6 +224,16 @@ pub fn end_interval(zone: &mut Zone, arena: Option<ArenaId>, interval: Interval)
     end_group_interval(zone, grp, arena, interval);
 }
 
+/// [`end_interval`] for a named arena group (ASSS `?endinterval -a`).
+pub fn end_named_interval(zone: &mut Zone, group: &str, interval: Interval) {
+    let arena = zone
+        .arenas
+        .iter()
+        .find(|a| self::group(zone, Some(a.id), interval) == group)
+        .map(|a| a.id);
+    end_group_interval(zone, Some(group.to_owned()), arena, interval);
+}
+
 /// [`end_interval`] for the public arenas' group (ASSS `AG_PUBLIC`), whether
 /// or not a public arena exists right now.
 pub fn end_public_interval(zone: &mut Zone, interval: Interval) {

@@ -476,6 +476,93 @@ fn c_reloadconf(zone: &mut Zone, inv: &Invocation<'_>) {
     );
 }
 
+/// ASSS `Cset_generic`'s parse: an optional `-t`, then `section:key`
+/// terminated by `=` or by a second `:`, then the value. Returns
+/// (permanent, section, key, value).
+fn parse_setting(params: &str) -> Option<(bool, &str, &str, &str)> {
+    let mut t = params.trim_start();
+    let mut permanent = true;
+    if let Some(rest) = t.strip_prefix("-t") {
+        permanent = false;
+        t = rest.trim_start();
+    }
+    let (section, rest) = t.split_once(':')?;
+    // the key ends at the `=` or at the second `:`, whichever comes first
+    let end = rest.find(['=', ':'])?;
+    let (key, value) = (&rest[..end], &rest[end + 1..]);
+    (!section.is_empty() && !key.is_empty()).then_some((permanent, section, key, value))
+}
+
+fn set_generic(zone: &mut Zone, inv: &Invocation<'_>, arena: bool) {
+    let Some((permanent, section, key, value)) = parse_setting(inv.params) else {
+        message(
+            zone,
+            inv.sender,
+            "Usage: ?setg [-t] section:key=value (no spaces around : or =).",
+        );
+        return;
+    };
+    let old = if arena {
+        let Some(a) = inv.arena.and_then(|a| zone.arenas.get(a)) else {
+            return;
+        };
+        a.cfg.clone()
+    } else {
+        zone.cfg.global().clone()
+    };
+    // ASSS writes "set by <name> on <ctime>"; the server has no date
+    // formatter, so the time is unix seconds
+    let unix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    let info = format!("set by {} at {unix}", sender_name(zone, inv));
+    let new = zone
+        .cfg
+        .set(&old, section, key, value, Some(&info), permanent);
+    super::arenaman::config_updated(zone, &old, &new);
+    let kind = if permanent { "set" } else { "set temporarily" };
+    message(
+        zone,
+        inv.sender,
+        &format!("{section}:{key} {kind} to {value}"),
+    );
+}
+
+fn get_generic(zone: &mut Zone, inv: &Invocation<'_>, arena: bool) {
+    let full = inv.params.trim();
+    let Some((section, key)) = full.split_once(':') else {
+        message(zone, inv.sender, "Usage: ?getg section:key");
+        return;
+    };
+    let file = if arena {
+        inv.arena.and_then(|a| zone.arenas.get(a)).map(|a| &a.cfg)
+    } else {
+        Some(zone.cfg.global())
+    };
+    let found = file.and_then(|f| f.get(section, key)).map(str::to_owned);
+    let text = match found {
+        Some(v) => format!("{full}={v}"),
+        None => format!("{full} not found"),
+    };
+    message(zone, inv.sender, &text);
+}
+
+fn c_setg(zone: &mut Zone, inv: &Invocation<'_>) {
+    set_generic(zone, inv, false);
+}
+
+fn c_seta(zone: &mut Zone, inv: &Invocation<'_>) {
+    set_generic(zone, inv, true);
+}
+
+fn c_getg(zone: &mut Zone, inv: &Invocation<'_>) {
+    get_generic(zone, inv, false);
+}
+
+fn c_geta(zone: &mut Zone, inv: &Invocation<'_>) {
+    get_generic(zone, inv, true);
+}
+
 fn c_flagreset(zone: &mut Zone, inv: &Invocation<'_>) {
     if let Some(a) = inv.arena {
         super::flagcore::flag_reset(zone, a, -1, 0);
@@ -862,6 +949,26 @@ const COMMANDS: &[(&str, Handler, &str)] = &[
         "reloadconf",
         c_reloadconf,
         "Args: none\nRe-reads changed config files.",
+    ),
+    (
+        "setg",
+        c_setg,
+        "Targets: none\nArgs: [-t] section:key=value\nSets a global setting. No spaces around the colon or the equals sign. -t makes it temporary (not written to the file).",
+    ),
+    (
+        "seta",
+        c_seta,
+        "Targets: none\nArgs: [-t] section:key=value\nSets a setting in this arena's config, as ?setg does for the global one.",
+    ),
+    (
+        "getg",
+        c_getg,
+        "Targets: none\nArgs: section:key\nShows the value of a global setting.",
+    ),
+    (
+        "geta",
+        c_geta,
+        "Targets: none\nArgs: section:key\nShows the value of a setting in this arena's config.",
     ),
     (
         "flagreset",

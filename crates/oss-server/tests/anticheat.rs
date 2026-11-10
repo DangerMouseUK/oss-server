@@ -40,8 +40,13 @@ impl H {
     }
 
     fn with(ac: &str, extra: &str) -> Self {
+        Self::with_map(ac, extra, None)
+    }
+
+    /// `map` is a raw (uncompressed) `.lvl` tile list.
+    fn with_map(ac: &str, extra: &str, map: Option<Vec<u8>>) -> Self {
         let arena = format!("{SHIP}{extra}[AntiCheat]\n{ac}");
-        let src = MemSource::new([
+        let mut src = MemSource::new([
             ("conf/global.conf", String::new()),
             (
                 "conf/passwd.conf",
@@ -54,6 +59,9 @@ impl H {
             ("conf/staff.conf", String::new()),
             ("arenas/(default)/arena.conf", arena),
         ]);
+        if let Some(m) = map {
+            src.insert("maps/test.lvl", m);
+        }
         let mut zone = ServerBuilder::with_source(src).build_zone().expect("zone");
         let seen = Arc::new(Mutex::new(Vec::new()));
         let s = seen.clone();
@@ -149,6 +157,23 @@ impl H {
     /// Standing still at (8000, 8000) with ordinary energy, firing `kind`.
     fn pos(&mut self, p: PlayerId, time: u32, kind: u8, level: u8) {
         self.send_pos(p, time, 8000, 8000, 0, 1000, kind, level);
+    }
+
+    /// A position packet with the client's flash bit set: a warp, a portal
+    /// or an uncloak, as the client tells it.
+    fn flash_pos(&mut self, p: PlayerId, time: u32, x: i16, y: i16, energy: i16) {
+        let mut buf = Vec::new();
+        C2SPosition {
+            time,
+            x,
+            y,
+            energy,
+            status: oss_proto::position::status::FLASH,
+            ..Default::default()
+        }
+        .encode(&mut buf);
+        self.zone.handle_packet(p, &buf);
+        self.lo.collect(&mut self.zone);
     }
 
     fn seen(&self) -> Vec<Check> {
@@ -421,41 +446,99 @@ fn random_spawn_prizes_make_items_unknown() {
 
 #[test]
 fn flash_bit_alone_explains_nothing() {
-    use oss_proto::position::status;
-    let mut h = H::with(
-        "Enabled = 1\nCooldown = 0\n",
-        "[Warbird]\nPortalMax = 0\nInitialPortal = 0\n",
-    );
+    // the spawn area is tile (300, 300), radius 20: pixel (4800, 4800)
+    let spawn = "[Warbird]\nPortalMax = 0\nInitialPortal = 0\n\
+                 [Spawn]\nTeam0-X = 300\nTeam0-Y = 300\nTeam0-Radius = 20\n";
+    let mut h = H::with("Enabled = 1\nCooldown = 0\n", spawn);
     let p = h.player("alice");
     let t0 = h.t as u32;
-    let flash_jump = |h: &mut H, t: u32, x: i16, e_before: i16, e_after: i16| {
+    let flash_jump = |h: &mut H, t: u32, x: i16, y: i16, e_before: i16, e_after: i16| {
+        // the ship starts each jump where the server put it, charged up
+        oss_server::modules::anticheat::excuse(
+            &mut h.zone,
+            p,
+            oss_server::modules::anticheat::Excuse::Both,
+        );
         h.tick(10);
         h.send_pos(p, t, 4000, 4000, 0, e_before, 0, 0);
         h.tick(10);
-        let mut buf = Vec::new();
-        C2SPosition {
-            time: t + 10,
-            x,
-            y: 4000,
-            energy: e_after,
-            status: status::FLASH,
-            ..Default::default()
-        }
-        .encode(&mut buf);
-        h.zone.handle_packet(p, &buf);
+        h.flash_pos(p, t + 10, x, y, e_after);
     };
     // pinning the flash bit doesn't excuse a jump
-    flash_jump(&mut h, t0, 9000, 1000, 1000);
+    flash_jump(&mut h, t0, 9000, 4000, 1000, 1000);
     assert_eq!(h.seen(), vec![Check::Teleport]);
-    // a real warp to spawn: full energy before, drained after (the server
-    // put the ship back and refilled it first, as after a death)
+    // nor does the energy signature of a warp on its own: the client picks
+    // both numbers, and this one came out nowhere near a spawn
+    flash_jump(&mut h, t0 + 100, 9000, 4000, 1700, 1);
+    assert_eq!(h.seen(), vec![Check::Teleport, Check::Teleport]);
+    // a real warp to spawn: full energy before, drained after, and the ship
+    // comes out in the arena's spawn area
+    flash_jump(&mut h, t0 + 200, 4800, 4800, 1700, 1);
+    assert_eq!(h.seen().len(), 2, "{:?}", h.seen());
+}
+
+/// One flash-bit hop across the wall at tile 300: the server puts the ship
+/// back on the left of it (a jump the server knows about and excuses), then
+/// the client claims the crossing with the flash bit alone.
+fn flash_hop(h: &mut H, p: PlayerId, t: u32) {
     oss_server::modules::anticheat::excuse(
         &mut h.zone,
         p,
-        oss_server::modules::anticheat::Excuse::Both,
+        oss_server::modules::anticheat::Excuse::Jump,
     );
-    flash_jump(&mut h, t0 + 100, 9000, 1700, 1);
-    assert_eq!(h.seen().len(), 1, "{:?}", h.seen());
+    h.tick(10);
+    h.send_pos(p, t, 4796, 4800, 0, 1000, 0, 0);
+    h.tick(10);
+    h.flash_pos(p, t + 10, 4820, 4800, 1000);
+}
+
+#[test]
+fn flash_jumps_through_a_wall_cost_a_portal() {
+    // a wall column the ship can't get round in the distance it may travel
+    let mut map = Vec::new();
+    for y in 295..=305u32 {
+        map.extend_from_slice(&(300u32 | (y << 12) | (1u32 << 24)).to_le_bytes());
+    }
+    let mut h = H::with_map(
+        "Enabled = 1\nCooldown = 0\n",
+        "[General]\nMap = test.lvl\n[Warbird]\nPortalMax = 2\nInitialPortal = 2\n",
+        Some(map),
+    );
+    let p = h.player("alice");
+    let t0 = h.t as u32;
+    // two portals, two hops the server can't disprove
+    flash_hop(&mut h, p, t0);
+    assert!(h.seen().is_empty(), "{:?}", h.seen());
+    flash_hop(&mut h, p, t0 + 100);
+    assert!(h.seen().is_empty(), "{:?}", h.seen());
+    // the third has nothing behind it: this is the wall hack
+    flash_hop(&mut h, p, t0 + 200);
+    assert_eq!(h.seen(), vec![Check::Wall]);
+    flash_hop(&mut h, p, t0 + 300);
+    assert_eq!(h.seen(), vec![Check::Wall, Check::Wall]);
+    // a portal prize (28) buys one more hop, and only one
+    oss_server::modules::anticheat::prize_taken(&mut h.zone, p, 28);
+    flash_hop(&mut h, p, t0 + 400);
+    assert_eq!(h.seen().len(), 2, "{:?}", h.seen());
+    flash_hop(&mut h, p, t0 + 500);
+    assert_eq!(h.seen().len(), 3, "{:?}", h.seen());
+}
+
+#[test]
+fn a_ship_with_no_portals_never_gets_a_free_wall_crossing() {
+    let mut map = Vec::new();
+    for y in 295..=305u32 {
+        map.extend_from_slice(&(300u32 | (y << 12) | (1u32 << 24)).to_le_bytes());
+    }
+    let mut h = H::with_map(
+        "Enabled = 1\nCooldown = 0\n",
+        "[General]\nMap = test.lvl\n[Warbird]\nPortalMax = 0\nInitialPortal = 0\n",
+        Some(map),
+    );
+    let p = h.player("alice");
+    let t0 = h.t as u32;
+    flash_hop(&mut h, p, t0);
+    assert_eq!(h.seen(), vec![Check::Wall]);
 }
 
 #[test]

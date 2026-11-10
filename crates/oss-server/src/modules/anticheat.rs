@@ -44,8 +44,16 @@
 //! `ClientClock` (how far its timestamps have ever run ahead of the server's
 //! clock, plus `MotionClockSlack` ticks, default 30), so a client can't widen
 //! the bounds by skewing its timestamps, while packets bunched after a lag
-//! spike are still judged fairly; this also catches a short burst of clock
-//! speed that the clock check's long window averages away. Energy is judged
+//! spike are still judged fairly. That slack is per packet, so on its own a
+//! client could claim it again on every packet — ten packets a second of it
+//! is three seconds of free time a second. Claimed time beyond what the
+//! server's own clock saw is therefore spent from a budget:
+//! `MotionClockBudget` ticks (default 300, three seconds), refilled at
+//! `MotionClockRefill` ticks a second (default 10, which is twice the clock
+//! check's tolerance). A backlog after a lag spike spends from it once; a
+//! client running fast spends on every packet and soon has the bounds
+//! measured by the server's clock alone. This is what catches a short burst
+//! of clock speed that the clock check's long window averages away. Energy is judged
 //! between consecutive packets and, to count the shots fired, over spans of
 //! at least three seconds. Teleport, speed and rotation
 //! count only `MotionMargin` percent past their bound, energy `EnergyMargin`
@@ -229,6 +237,10 @@ pub struct AcConfig {
     pub energy_margin: u32,
     /// Ticks added to the server's elapsed time when capping the client's.
     pub clock_slack: u32,
+    /// Ticks of claimed time, beyond the server's own, a client may build up.
+    pub clock_budget: u32,
+    /// Ticks of that budget given back per second.
+    pub clock_refill: u32,
 }
 
 impl AcConfig {
@@ -265,6 +277,8 @@ impl AcConfig {
             motion_margin: u("MotionMargin", 25),
             energy_margin: u("EnergyMargin", 10),
             clock_slack: u("MotionClockSlack", 30),
+            clock_budget: u("MotionClockBudget", 300),
+            clock_refill: u("MotionClockRefill", 10),
         }
     }
 }
@@ -393,11 +407,17 @@ struct Ac {
     benched: bool,
     /// last sample the physics checks accepted
     prev: Option<Sample>,
+    /// when that sample arrived, by the server's clock
+    prev_at: Option<Ticks>,
+    /// claimed time the client may still run ahead of the server's clock
+    lead_budget: i64,
     /// the player's clock as the server has seen it run
     clock: ClientClock,
     /// older sample the energy check spans from, the cheapest cost of the
     /// shots seen strictly after it, and whether energy was refilled since
     anchor: Option<Sample>,
+    /// when that sample arrived, by the server's clock
+    anchor_at: Option<Ticks>,
     anchor_spent: i32,
     anchor_refilled: bool,
     jumped: bool,
@@ -1023,7 +1043,10 @@ fn motion_checks(
     let Some(prev) = a.prev else {
         a.clock.observe(next.time, server_now);
         a.prev = Some(next);
+        a.prev_at = Some(now);
+        a.lead_budget = i64::from(cfg.clock_budget);
         a.anchor = Some(next);
+        a.anchor_at = Some(now);
         a.anchor_spent = 0;
         a.anchor_refilled = false;
         a.jumped = false;
@@ -1041,14 +1064,34 @@ fn motion_checks(
     // this packet is observed
     let max_ticks = a.clock.max_ticks(prev.time, server_now, cfg.clock_slack);
     let span_cap = a.anchor.map_or(0, |an| {
-        a.clock.max_ticks(an.time, server_now, cfg.clock_slack)
+        let by_clock = a.clock.max_ticks(an.time, server_now, cfg.clock_slack);
+        // the same budget over the whole span: claimed time may run ahead
+        // of the server's by at most the budget, however it is divided up
+        let gap = u32::try_from(a.anchor_at.map_or(0, |t| now.since(t))).unwrap_or(u32::MAX);
+        by_clock.min(gap.saturating_add(cfg.clock_budget))
     });
+    // That slack is granted on every packet, so on its own it would let a
+    // client claim it again and again and keep a burst of fast clock inside
+    // the bounds. Claimed time beyond the server's own elapsed time is
+    // spent from a budget instead: enough for the backlog after a lag
+    // spike, not enough to run fast for long.
+    let max_ticks = if reordered {
+        max_ticks
+    } else {
+        let gap = u32::try_from(a.prev_at.map_or(0, |t| now.since(t))).unwrap_or(u32::MAX);
+        let refill = i64::from(gap) * i64::from(cfg.clock_refill) / 100;
+        a.lead_budget = (a.lead_budget + refill).clamp(0, i64::from(cfg.clock_budget));
+        let spend = i64::from(dt.saturating_sub(gap)).min(a.lead_budget);
+        a.lead_budget -= spend;
+        max_ticks.min(gap.saturating_add(u32::try_from(spend).unwrap_or(0)))
+    };
     a.clock.observe(next.time, server_now);
     let (jumped, refilled) = (a.jumped, a.refilled);
     let anchor = a.anchor;
     let (anchor_spent, anchor_refilled) = (a.anchor_spent, a.anchor_refilled || refilled);
     if !reordered {
         a.prev = Some(next);
+        a.prev_at = Some(now);
         a.jumped = false;
         a.refilled = false;
     }
@@ -1198,6 +1241,7 @@ fn motion_checks(
             }
             if let Some(a) = state(zone, p) {
                 a.anchor = Some(next);
+                a.anchor_at = Some(now);
                 a.anchor_spent = 0;
                 a.anchor_refilled = false;
             }

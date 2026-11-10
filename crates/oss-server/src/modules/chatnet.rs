@@ -25,7 +25,7 @@
 //! `Net:ChatMessageDelay` ticks (default 20). It listens on `Net:ChatListen`
 //! (`port` or `ip:port`; default: the game port) once the server starts.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::io::{ErrorKind, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 
@@ -43,15 +43,17 @@ use crate::registry::{Owner, Scope};
 use crate::time::Ticks;
 use crate::zone::{Zone, ZoneStarted};
 
-/// Longest line accepted from a client (ASSS `MAXMSGSIZE`).
+/// Longest line ASSS will handle (`MAXMSGSIZE`).
 pub const MAX_LINE: usize = 2035;
+/// Bytes the inbound buffer holds.
+const MAX_BUFFERED: usize = MAX_LINE;
+/// Characters of an outbound line, before its terminator.
+const MAX_OUT_TEXT: usize = MAX_LINE - 2;
 /// Unsent output a client may have before it is dropped.
 const MAX_PENDING_OUT: usize = 256 * 1024;
 /// Idle ticks (both ways) before a `NOOP` is sent.
 const NOOP_AFTER: u64 = 18000;
 
-/// Queues a text line for a chat-protocol player, in order with the
-/// translated game packets. Does nothing useful for other players.
 /// Sends one ready-made line to every chat client in `arena` (ASSS
 /// `chatnet->SendToArena`). Game clients see nothing; this is the text
 /// protocol only.
@@ -62,6 +64,8 @@ pub fn send_arena_line(zone: &mut Zone, arena: crate::arena::ArenaId, line: &str
     }
 }
 
+/// Queues a text line for a chat-protocol player, in order with the
+/// translated game packets. Does nothing useful for other players.
 pub fn send_line(zone: &mut Zone, p: PlayerId, line: &str) {
     let mut b = Vec::with_capacity(line.len() + 1);
     // no game packet starts with 0: it marks a ready-made line
@@ -70,10 +74,101 @@ pub fn send_line(zone: &mut Zone, p: PlayerId, line: &str) {
     zone.send(p, &b, SendFlags::RELIABLE);
 }
 
+/// Formats one line the way it goes on the wire.
+///
+/// The terminator is a bare LF, not CRLF, and the text is cut at
+/// `MAX_OUT_TEXT` however long the message was.
+pub fn out_line(line: &str) -> Vec<u8> {
+    let mut b = to_latin1(line);
+    b.truncate(MAX_OUT_TEXT);
+    b.push(b'\n');
+    b
+}
+
+/// A line ends at either of these, and every one of them that follows is
+/// part of the same ending (ASSS `protutil.c`).
+fn is_terminator(b: u8) -> bool {
+    b == b'\n' || b == b'\r'
+}
+
+/// The chat protocol's line framing, with no socket in it.
+///
+/// Bytes go in as they arrive and come out one whole line at a time, which
+/// is the shape ASSS's `do_sp_read` and `do_sp_process` have: the buffer
+/// holds raw bytes, and a call takes ONE line out of it rather than
+/// draining everything. A bot that sends two commands in one segment has
+/// the second held until the next pass of the server's loop.
+#[derive(Debug, Default)]
+pub struct LineBuffer {
+    buf: Vec<u8>,
+}
+
+impl LineBuffer {
+    /// How many more bytes will fit. Zero means nothing more is accepted.
+    pub fn room(&self) -> usize {
+        MAX_BUFFERED.saturating_sub(self.buf.len())
+    }
+
+    /// Takes what fits of `bytes` and returns how many were taken.
+    ///
+    /// A full buffer simply refuses what it cannot hold, as ASSS's `recv`
+    /// does by asking for `LEFT(buf)` bytes: nothing is discarded here.
+    pub fn feed(&mut self, bytes: &[u8]) -> usize {
+        let take = bytes.len().min(self.room());
+        self.buf.extend_from_slice(&bytes[..take]);
+        take
+    }
+
+    /// One pass of ASSS's `do_sp_process`: the next whole line, without its
+    /// terminator, or `None` while one is still arriving. One per call, so
+    /// a bot that sends two commands in one segment has the second held
+    /// until the next pass of the server's loop.
+    ///
+    /// `None` also covers the over-long case. Once the buffer is full with
+    /// no terminator anywhere in it the line can never complete, so the
+    /// WHOLE buffer is discarded rather than truncated. Nothing arriving
+    /// behind the over-long run survives either: it was refused by `feed`
+    /// while the buffer was full, and a bot cannot recover by sending a
+    /// newline for the same reason. A complete line sitting in FRONT of
+    /// the run is unaffected -- the search looks anywhere in the buffer,
+    /// not just at the front -- and so is anything that glues onto the end
+    /// of the run after a line is taken out: that becomes part of one
+    /// enormous command, which dispatch then drops as unknown.
+    pub fn process(&mut self) -> Option<Vec<u8>> {
+        let Some(i) = self.buf.iter().copied().position(is_terminator) else {
+            if self.room() == 0 {
+                self.buf.clear();
+            }
+            return None;
+        };
+        let line: Vec<u8> = self.buf.drain(..i).collect();
+        // the ending is every terminator in a row, so CRLF, LFCR and a
+        // blank line between two commands are all one ending
+        let end = self
+            .buf
+            .iter()
+            .copied()
+            .position(|b| !is_terminator(b))
+            .unwrap_or(self.buf.len());
+        self.buf.drain(..end);
+        Some(line)
+    }
+
+    /// Whether anything at all is buffered. ASSS tests `cli->inbuf` for
+    /// this, to decide whether a connection is worth a process pass.
+    pub fn is_empty(&self) -> bool {
+        self.buf.is_empty()
+    }
+
+    /// What is still buffered, waiting for its terminator.
+    pub fn pending(&self) -> &[u8] {
+        &self.buf
+    }
+}
+
 struct Conn {
     stream: TcpStream,
-    inbuf: Vec<u8>,
-    lines: VecDeque<Vec<u8>>,
+    lines: LineBuffer,
     out: Vec<u8>,
     last_proc: Ticks,
     last_send: Ticks,
@@ -158,8 +253,7 @@ fn accept(zone: &mut Zone) {
             pid,
             Conn {
                 stream,
-                inbuf: Vec::new(),
-                lines: VecDeque::new(),
+                lines: LineBuffer::default(),
                 out: Vec::new(),
                 last_proc: Ticks(0),
                 last_send: now,
@@ -175,26 +269,17 @@ fn accept(zone: &mut Zone) {
 fn read(c: &mut Conn, now: Ticks) -> bool {
     let mut buf = [0u8; 4096];
     loop {
-        if c.inbuf.len() >= MAX_LINE {
-            // a full buffer without a newline: the line is too long
-            if !c.inbuf.iter().any(|&b| b == b'\n' || b == b'\r') {
-                c.inbuf.clear();
-            }
+        // the framing itself is in LineBuffer, which knows nothing about
+        // sockets; all this does is move bytes from one to the other
+        let room = c.lines.room().min(buf.len());
+        if room == 0 {
             return true;
         }
-        let room = (MAX_LINE - c.inbuf.len()).min(buf.len());
         match c.stream.read(&mut buf[..room]) {
             Ok(0) => return false,
             Ok(n) => {
-                c.inbuf.extend_from_slice(&buf[..n]);
+                c.lines.feed(&buf[..n]);
                 c.last_recv = now;
-                while let Some(i) = c.inbuf.iter().position(|&b| b == b'\n' || b == b'\r') {
-                    let line: Vec<u8> = c.inbuf.drain(..i).collect();
-                    while matches!(c.inbuf.first(), Some(b'\n' | b'\r')) {
-                        c.inbuf.remove(0);
-                    }
-                    c.lines.push_back(line);
-                }
             }
             Err(e) if e.kind() == ErrorKind::WouldBlock => return true,
             Err(e) if e.kind() == ErrorKind::Interrupted => {}
@@ -492,14 +577,24 @@ fn on_login(zone: &mut Zone, p: PlayerId, rest: &[u8]) {
     zone.handle_packet(p, &buf);
 }
 
+/// Splits a line into its command and the rest, at the FIRST colon only:
+/// everything after it, colons included, is the rest. A line with no colon
+/// has no rest at all -- ASSS passes a null there and turns it into an
+/// empty string before any handler sees it, so the two are the same from
+/// outside.
+pub fn split_command(line: &[u8]) -> (String, Vec<u8>) {
+    match line.iter().position(|&b| b == b':') {
+        Some(i) => (latin1(&line[..i]), line[i + 1..].to_vec()),
+        None => (latin1(line), Vec::new()),
+    }
+}
+
 fn dispatch(zone: &mut Zone, p: PlayerId, line: &[u8]) {
-    let (ty, rest) = match line.iter().position(|&b| b == b':') {
-        Some(i) => (&line[..i], &line[i + 1..]),
-        None => (line, &b""[..]),
-    };
-    match ty {
-        b"LOGIN" => on_login(zone, p, rest),
-        b"GO" => {
+    let (ty, rest) = split_command(line);
+    let rest = rest.as_slice();
+    match ty.as_str() {
+        "LOGIN" => on_login(zone, p, rest),
+        "GO" => {
             let name = latin1(rest);
             let name = if name.is_empty() {
                 "0".to_owned()
@@ -521,9 +616,9 @@ fn dispatch(zone: &mut Zone, p: PlayerId, line: &[u8]) {
                 },
             );
         }
-        b"LEAVE" => super::arenaman::leave_arena(zone, p),
-        b"SEND" => on_send(zone, p, rest),
-        b"CHANGEFREQ" => {
+        "LEAVE" => super::arenaman::leave_arena(zone, p),
+        "SEND" => on_send(zone, p, rest),
+        "CHANGEFREQ" => {
             if let Ok(f) = latin1(rest).trim().parse::<i16>() {
                 let mut buf = vec![c2s::kind::SET_FREQ];
                 buf.extend_from_slice(&f.to_le_bytes());
@@ -548,10 +643,7 @@ fn iterate(zone: &mut Zone) -> bool {
             lines.clear();
             translate(zone, pid, c, &pkt, &mut lines);
             for l in &lines {
-                let mut b = to_latin1(l);
-                b.truncate(MAX_LINE - 2);
-                c.out.extend_from_slice(&b);
-                c.out.push(b'\n');
+                c.out.extend_from_slice(&out_line(l));
                 c.last_send = now;
             }
         }
@@ -577,13 +669,13 @@ fn iterate(zone: &mut Zone) -> bool {
             to_kick.push(*pid);
             c.closing = true;
         }
-        if !c.closing
-            && !c.lines.is_empty()
-            && now.since(c.last_proc) > cn.delay
-            && let Some(l) = c.lines.pop_front()
-        {
-            c.last_proc = now;
-            to_run.push((*pid, l));
+        if !c.closing && !c.lines.is_empty() && now.since(c.last_proc) > cn.delay {
+            // the pass happens whether or not a line comes out of it: it
+            // is also where an over-long line is thrown away
+            if let Some(l) = c.lines.process() {
+                c.last_proc = now;
+                to_run.push((*pid, l));
+            }
         }
         if now.since(c.last_send) > NOOP_AFTER && now.since(c.last_recv) > NOOP_AFTER {
             c.out.extend_from_slice(b"NOOP\n");

@@ -48,13 +48,20 @@ const MAX_WARNINGS: usize = 5;
 /// how many ticks are left. Zero with `enabled` false means there is no
 /// timer at all.
 #[derive(Debug, Default, Clone)]
-struct TimerData {
+pub struct TimerData {
     /// `Misc:TimedGame` in ticks; 0 when the arena has no fixed game length.
-    game_len: u64,
-    enabled: bool,
-    timeout: u64,
+    pub game_len: u64,
+    /// Whether a timer is running.
+    pub enabled: bool,
+    /// The tick the game ends on, or the ticks left while paused.
+    pub timeout: u64,
     /// `Misc:TimerWarnings`, in seconds.
-    warn: Vec<u64>,
+    pub warn: Vec<u64>,
+}
+
+/// An arena's timer state, all zero when it has none.
+pub fn timer_state(zone: &Zone, arena: ArenaId) -> TimerData {
+    read(zone, arena)
 }
 
 fn td(zone: &mut Zone, arena: ArenaId) -> Option<&mut TimerData> {
@@ -125,6 +132,12 @@ fn on_conf(zone: &mut Zone, arena: ArenaId, created: bool) {
 }
 
 /// Runs once a second: expires timers and sends the warnings.
+/// Runs the periodic check now (ASSS `TimerMaster`, which its mainloop
+/// calls every 100 ticks): fires warnings and ends a game that is up.
+pub fn check_timers(zone: &mut Zone) {
+    tick(zone);
+}
+
 fn tick(zone: &mut Zone) -> bool {
     let now = zone.now();
     for arena in zone.arenas.ids() {
@@ -132,7 +145,9 @@ fn tick(zone: &mut Zone) -> bool {
         if !data.enabled {
             continue;
         }
-        if now.0 >= data.timeout {
+        // TICK_GT: strictly past, so landing exactly on the timeout is not
+        // yet expired. The warning below then still has a chance to fire.
+        if now.0 > data.timeout {
             tracing::debug!(target: "game_timer", arena = arena.0, "timer expired");
             zone.fire(&TimesUp { arena });
             say_arena(zone, arena, SOUND_GAME_OVER, "NOTICE: Game over");
@@ -178,6 +193,15 @@ fn c_time(zone: &mut Zone, inv: &Invocation<'_>) {
     message(zone, inv.sender, &text);
 }
 
+/// C's `strtol`: leading spaces and digits, trailing junk ignored, and
+/// nothing at all when there are no digits to read. So `?timer 1junk` is one
+/// minute while `?timer abc` is refused.
+fn strtol(s: &str) -> Option<u64> {
+    let s = s.trim_start();
+    let end = s.find(|c: char| !c.is_ascii_digit()).unwrap_or(s.len());
+    s[..end].parse::<u64>().ok()
+}
+
 fn c_timer(zone: &mut Zone, inv: &Invocation<'_>) {
     let Some(arena) = inv.arena else { return };
     if read(zone, arena).game_len > 0 {
@@ -190,11 +214,8 @@ fn c_timer(zone: &mut Zone, inv: &Invocation<'_>) {
     }
     let params = inv.params.trim();
     let (mins, secs) = match params.split_once(':') {
-        Some((m, s)) => (
-            m.trim().parse::<u64>().ok(),
-            s.trim().parse::<u64>().unwrap_or(0),
-        ),
-        None => (params.parse::<u64>().ok(), 0),
+        Some((m, s)) => (strtol(m), strtol(s).unwrap_or(0)),
+        None => (strtol(params), 0),
     };
     let Some(mins) = mins else {
         message(zone, inv.sender, "timer format is: '?timer mins[:secs]'");

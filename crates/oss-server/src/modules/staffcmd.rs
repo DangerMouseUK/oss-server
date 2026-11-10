@@ -5,7 +5,11 @@
 //! Commands aimed at a target act on that player, everyone on that team, or
 //! (typed in public) everyone in the arena, as in ASSS.
 //!
-//! **Three of ASSS's commands are deliberately absent.** `?laghist` is a
+//! **Four of ASSS's commands are deliberately absent.** `?admlogfile`
+//! flushes and reopens the log file ASSS keeps; this server logs through
+//! `tracing` to stdout and has no file of its own, so there is nothing for
+//! it to act on — an operator redirects stdout and rotates it with their own
+//! tooling. `?laghist` is a
 //! stub in ASSS 1.4.4 (`Claghist` is an empty function with a FIXME), so
 //! there is nothing to port and a command that did nothing would only
 //! mislead. `?enablecmdgroup` and `?disablecmdgroup` load and unload the

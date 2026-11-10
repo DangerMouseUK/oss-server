@@ -1,0 +1,190 @@
+# Game timer from ASSS 1.4.4 src/core/game_timer.c (compiled unmodified).
+# A replayable transcript. '# <label>:' starts a scenario and zeroes the arena's
+# timerdata; the harness drives the clock, so every tick value here is exact.
+#   at <ticks>           set current_ticks() to this (1 tick = 10 ms)
+#   create / confchanged / destroy   ran ArenaAction(AA_CREATE/AA_CONFCHANGED/AA_DESTROY)
+#   tick                 ran TimerMaster(), which ASSS's mainloop calls every 100 ticks
+#   timer <args> / time / timereset / pausetimer   ran that ?command for the player
+#   state <enabled> <gamelen> <timeout>   the module's timerdata afterwards
+#   chat <player|arena> <sound|-> <text>  every line the module emitted since the
+#                        previous state line, in order; '-' means no sound code.
+# Rules these records pin:
+#   Misc:TimedGame is in TICKS, not seconds, and a non-zero value arms the timer at
+#     AA_CREATE. AA_CONFCHANGED arms it only when the OLD value was zero and the new
+#     one is not -- raising 3000 to 6000 leaves the running timeout alone.
+#   TimerMaster fires when TICK_GT(now, timeout), i.e. strictly past; landing exactly
+#     on the timeout is not yet expired. On expiry a TimedGame arena re-arms to
+#     now+gamelen and keeps going; a ?timer-created one (gamelen 0) disables itself
+#     and zeroes timeout.
+#   Warnings come from Misc:TimerWarnings, split on spaces and commas, at most 5
+#     values kept (strsplit is only called while i < 5, so a 6th is never read).
+#     A warning fires only on the tick where (timeout - now)/100 EQUALS the value,
+#     so a tick that steps over it is silently missed. A value that is a multiple of
+#     60 is announced in minutes, with 60 itself as the only singular 'minute'.
+#   ?timer only works when TimedGame is 0, and parses '<mins>[:<secs>]' with strtol,
+#     so trailing junk is ignored but a non-numeric start is rejected. It replies by
+#     calling ?time, which is why those records carry two chat lines.
+#   ?pausetimer subtracts current_ticks() from timeout to park a remaining duration
+#     there, and adds it back on resume -- while paused, 'timeout' is a DURATION, and
+#     ?time reports it with the 'paused at' wording. It does nothing in a TimedGame
+#     arena. ?timereset only works in one.
+# TimedGame 0, arena create does not arm: TimedGame 0 TimerWarnings [] t0 1000
+create
+state 0 0 0
+tick
+state 0 0 0
+time
+state 0 0 0
+chat player - Time left: 0 minutes 0 seconds
+# ?timer in a non-TimedGame arena: TimedGame 0 TimerWarnings [] t0 1000
+create
+state 0 0 0
+timer 5
+state 1 0 31000
+chat player - Time left: 5 minutes 0 seconds
+at 1500
+time
+state 1 0 31000
+chat player - Time left: 4 minutes 55 seconds
+timer 2:30
+state 1 0 16500
+chat player - Time left: 2 minutes 30 seconds
+timer 0:7
+state 1 0 2200
+chat player - Time left: 0 minutes 7 seconds
+timer abc
+state 1 0 2200
+chat player - timer format is: '?timer mins[:secs]'
+timer 1junk
+state 1 0 7500
+chat player - Time left: 1 minutes 0 seconds
+timereset
+state 1 0 7500
+# ?pausetimer round trip: TimedGame 0 TimerWarnings [] t0 10000
+create
+state 0 0 0
+timer 1
+state 1 0 16000
+chat player - Time left: 1 minutes 0 seconds
+at 12000
+pausetimer
+state 0 0 4000
+chat player - Timer paused at:  0 minutes 40 seconds
+time
+state 0 0 4000
+chat player - Timer paused at:  0 minutes 40 seconds
+tick
+state 0 0 4000
+at 50000
+pausetimer
+state 1 0 54000
+chat player - Timer resumed at: 0 minutes 40 seconds
+time
+state 1 0 54000
+chat player - Time left: 0 minutes 40 seconds
+# ?timer expiry disables the timer: TimedGame 0 TimerWarnings [] t0 1000
+create
+state 0 0 0
+timer 0:10
+state 1 0 2000
+chat player - Time left: 0 minutes 10 seconds
+at 2000
+tick
+state 1 0 2000
+at 2001
+tick
+state 0 0 0
+chat arena 5 NOTICE: Game over
+tick
+state 0 0 0
+time
+state 0 0 0
+chat player - Time left: 0 minutes 0 seconds
+# TimedGame 1000 re-arms on expiry: TimedGame 1000 TimerWarnings [] t0 5000
+create
+state 1 1000 6000
+timer 5
+state 1 1000 6000
+chat player - Timer is fixed to Misc:TimedGame setting.
+pausetimer
+state 1 1000 6000
+at 6001
+tick
+state 1 1000 7001
+chat arena 5 NOTICE: Game over
+at 7002
+tick
+state 1 1000 8002
+chat arena 5 NOTICE: Game over
+timereset
+state 1 1000 8002
+chat player - Time left: 0 minutes 10 seconds
+# TimerWarnings, minutes and seconds: TimedGame 18000 TimerWarnings [120,60 30 10 1] t0 100
+create
+state 1 18000 18100
+at 6100
+tick
+state 1 18000 18100
+chat arena - NOTICE: 2 minutes remaining.
+at 12100
+tick
+state 1 18000 18100
+chat arena - NOTICE: 1 minute remaining.
+at 15100
+tick
+state 1 18000 18100
+chat arena - NOTICE: 30 seconds remaining.
+at 15101
+tick
+state 1 18000 18100
+at 17100
+tick
+state 1 18000 18100
+chat arena - NOTICE: 10 seconds remaining.
+at 18000
+tick
+state 1 18000 18100
+chat arena - NOTICE: 1 seconds remaining.
+at 18100
+tick
+state 1 18000 18100
+# TimerWarnings, only the first five are kept: TimedGame 18000 TimerWarnings [600 300 120 60 30 10] t0 100
+create
+state 1 18000 18100
+at 17100
+tick
+state 1 18000 18100
+at 15100
+tick
+state 1 18000 18100
+chat arena - NOTICE: 30 seconds remaining.
+# AA_CONFCHANGED arms only when the old gamelen was 0: TimedGame 0 TimerWarnings [] t0 1000
+create
+state 0 0 0
+conf TimedGame 3000
+at 2000
+confchanged
+state 1 3000 5000
+conf TimedGame 6000
+at 3000
+confchanged
+state 1 6000 5000
+timer 5
+state 1 6000 5000
+chat player - Timer is fixed to Misc:TimedGame setting.
+destroy
+state 0 6000 0
+# ?time wording across a minute boundary: TimedGame 0 TimerWarnings [] t0 0
+create
+state 0 0 0
+timer 3:5
+state 1 0 18500
+chat player - Time left: 3 minutes 5 seconds
+at 6000
+time
+state 1 0 18500
+chat player - Time left: 2 minutes 5 seconds
+at 18400
+time
+state 1 0 18500
+chat player - Time left: 0 minutes 1 seconds

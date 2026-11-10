@@ -101,9 +101,15 @@ fn init_zone_writes_a_runnable_copy() {
 }
 
 /// The security map checksum and Continuum map CRC computed from the bundled
-/// maps match ASSS's `mapdata.c` for every key in the vectors.
+/// maps match the Continuum client for every key in the vectors.
+///
+/// Not ASSS: on keys with the top bit set ASSS takes its two modulos on a
+/// signed copy of the key and its sparse array then wraps coordinates mod
+/// 1024, which the client's loop at 0x00423B2D does not do. Those rows carry
+/// both sums and we assert the client's -- a server that matched ASSS here
+/// would kick real clients on about half of all challenge rounds.
 #[test]
-fn map_checksums_match_asss() {
+fn map_checksums_match_the_client() {
     let zone = ServerBuilder::default_zone().build_zone().expect("zone");
     let src = zone.cfg.source();
     let mut map = None;
@@ -116,7 +122,9 @@ fn map_checksums_match_asss() {
                 map = Some(oss_server::modules::mapdata::ArenaMap::from_bytes(&data));
             }
             ["map", ..] => map = None,
-            ["checksum", key, sum] => {
+            // `checksum <key> <sum>`, or `checksum <key> <asss sum> <client
+            // sum>` where the two disagree. The client's value is always last.
+            ["checksum", key, sum] | ["checksum", key, _, sum] => {
                 if let Some(m) = &map {
                     let key = u32::from_str_radix(key, 16).expect("key");
                     let sum = u32::from_str_radix(sum, 16).expect("sum");

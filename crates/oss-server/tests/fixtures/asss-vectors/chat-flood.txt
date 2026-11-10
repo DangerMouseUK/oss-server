@@ -1,0 +1,181 @@
+# Chat flood control and chat masks from ASSS 1.4.4 src/core/chat.c
+# (compiled unmodified; see the driver for the one substitution, a
+# harness-driven clock in place of time(), which is what makes the expiry
+# times in this file plain numbers of seconds rather than wall-clock values).
+#
+#   # <label>   starts a scenario; 'settings' gives the globals chat.c read
+#   seat <n>    seated n players and ran PA_PREENTERARENA on each
+#   at ticks=<n> wall=<n>   set the tick clock and the second clock
+#   flood <player> x<n>     ran expire_mask then check_flood, n times
+#   expire <player>         ran expire_mask alone
+#   canspam <0|1>           what capman now answers for CAP_CANSPAM
+#   preenter <player>       ran the PA_PREENTERARENA player action
+#   setmask <player> <mask> timeout=<n>   called Ichat::SetPlayerChatMask
+#   getmask <player> -> <mask>            called Ichat::GetPlayerChatMask
+#   msg <text>  each chat line the module sent
+#   state <player>:<mask>/<seconds until expiry>/<msgs>/<lastcheck>... arena:<mask>
+#      an expiry of 0 means no expiry -- a session-long mask, or none at all
+#
+# Rules these records pin:
+#
+# 1. THE MESSAGE COUNTER DECAYS BY A RIGHT SHIFT, not by subtraction: on every
+#    check it computes d = (now - lastcheck) / 100, i.e. whole seconds, and does
+#    msgs >>= d. So the count halves once per second of silence, and a burst
+#    inside one second decays not at all. lastcheck moves to now every time,
+#    even when d is zero, so a player checked twice within a second never decays.
+# 2. THE SHUTUP TEST IS msgs >= FloodLimit AFTER the increment, so a limit of N
+#    trips on the Nth message in a window, not the N+1th. A FloodLimit of 0 or
+#    less disables flood control entirely, and the counter still runs.
+# 3. ON TRIPPING, THE COUNTER IS HALVED rather than cleared, so a player who keeps
+#    talking trips again almost immediately -- every second message, once the
+#    count is at the limit. Each trip extends the shutup.
+# 4. HOW THE EXPIRY IS SET DEPENDS ON WHAT WAS THERE. If the player already has an
+#    expiry it is EXTENDED by FloodShutup. If there is no expiry and no mask, a
+#    fresh one is set to now + FloodShutup. But if there is a mask with NO expiry
+#    -- a session-long mask set by a moderator -- neither branch runs, so the
+#    flood bits are OR'd in and NEVER EXPIRE. That player is silenced until they
+#    leave the arena, and no record anywhere says why. Driven below.
+# 5. THE FLOOD MASK IS NINE SPECIFIC BITS, OR'd into whatever is already there:
+#    pubmacro, pub, freq, nmefreq, priv, remotepriv, chat, modchat and bcommand.
+#    Notably it does NOT include the command types, so a shut-up player can still
+#    use commands.
+# 6. CAP_CANSPAM SKIPS THE WHOLE CHECK, but only after the counter has already
+#    been incremented -- so a staff member's count still climbs, and if the
+#    capability is ever lost the accumulated count applies immediately.
+# 7. SetPlayerChatMask with timeout 0 is a SESSION-LONG mask (expires 0); any
+#    other timeout sets expires to now + timeout. expire_mask clears the mask
+#    entirely once the wall clock passes it -- and the test is strictly greater,
+#    so the mask survives the second it expires on.
+# 8. PA_PREENTERARENA clears the mask, the expiry AND the counter, and resets
+#    lastcheck to now -- so changing arena resets a flood shutup.
+# 9. Chat:RestrictChat is read at AA_CREATE and AA_CONFCHANGED into a per-arena
+#    mask that is separate from the per-player one.
+#
+# UNDEFINED BEHAVIOUR, DOCUMENTED AND NOT DRIVEN. The decay is 'msgs >>= d' with d
+# a whole number of seconds and msgs an int, so a player silent for 32 seconds or
+# more shifts by at least the width of the type, which C leaves undefined. On x86
+# the shift count is taken mod 32, which means a silence of exactly 32 seconds
+# decays the count by NOTHING at all while 31 seconds clears it. No record here
+# goes past d = 31; a port should clamp the shift, which is a deliberate
+# divergence worth writing down rather than an accident.
+floodbits 16be
+# FloodLimit 5: the fifth message in a window trips it
+settings floodlimit=5 floodshutup=60 restrictchat=0 canspam=0 ticks=1000 wall=500
+seat 2
+state 0:0000/0/0/1000 1:0000/0/0/1000 arena:0000
+flood 0 x4
+state 0:0000/0/4/1000 1:0000/0/0/1000 arena:0000
+flood 0 x1
+state 0:16be/60/2/1000 1:0000/0/0/1000 arena:0000
+flood 0 x1
+state 0:16be/60/3/1000 1:0000/0/0/1000 arena:0000
+flood 0 x1
+state 0:16be/60/4/1000 1:0000/0/0/1000 arena:0000
+flood 0 x1
+state 0:16be/120/2/1000 1:0000/0/0/1000 arena:0000
+# the counter halves once per second of silence
+settings floodlimit=5 floodshutup=60 restrictchat=0 canspam=0 ticks=1000 wall=500
+seat 1
+state 0:0000/0/0/1000 arena:0000
+flood 0 x4
+state 0:0000/0/4/1000 arena:0000
+at ticks=1050 wall=500
+expire 0
+state 0:0000/0/4/1050 arena:0000
+at ticks=1100 wall=501
+expire 0
+state 0:0000/0/4/1100 arena:0000
+at ticks=1300 wall=503
+expire 0
+state 0:0000/0/1/1300 arena:0000
+at ticks=1400 wall=504
+expire 0
+state 0:0000/0/0/1400 arena:0000
+# a burst inside one second does not decay at all
+settings floodlimit=10 floodshutup=60 restrictchat=0 canspam=0 ticks=1000 wall=500
+seat 1
+state 0:0000/0/0/1000 arena:0000
+flood 0 x9
+state 0:0000/0/9/1000 arena:0000
+at ticks=1099 wall=500
+flood 0 x1
+state 0:16be/60/5/1099 arena:0000
+# FloodLimit 0 disables the check but the counter still runs
+settings floodlimit=0 floodshutup=60 restrictchat=0 canspam=0 ticks=1000 wall=500
+seat 1
+state 0:0000/0/0/1000 arena:0000
+flood 0 x20
+state 0:0000/0/20/1000 arena:0000
+# CAP_CANSPAM skips the check, but the counter still climbs
+settings floodlimit=5 floodshutup=60 restrictchat=0 canspam=1 ticks=1000 wall=500
+seat 1
+state 0:0000/0/0/1000 arena:0000
+flood 0 x20
+state 0:0000/0/20/1000 arena:0000
+# the capability is withdrawn: the accumulated count trips at once
+canspam 0
+flood 0 x1
+state 0:16be/60/10/1000 arena:0000
+# a session-long mask plus a flood: the shutup NEVER expires
+settings floodlimit=3 floodshutup=60 restrictchat=0 canspam=0 ticks=1000 wall=500
+seat 1
+state 0:0000/0/0/1000 arena:0000
+setmask 0 0004 timeout=0
+state 0:0004/0/0/1000 arena:0000
+flood 0 x3
+state 0:16be/0/1/1000 arena:0000
+# expiry is still 0, so no amount of waiting clears these bits.
+# the tick clock moves only 30 seconds here while the wall clock moves
+# 99500: a tick gap of 32 seconds or more would make the decay shift
+# undefined, and no record in this file goes there.
+at ticks=4000 wall=100000
+expire 0
+state 0:16be/0/0/4000 arena:0000
+# the same flood with no prior mask does get an expiry
+settings floodlimit=3 floodshutup=60 restrictchat=0 canspam=0 ticks=1000 wall=500
+seat 1
+state 0:0000/0/0/1000 arena:0000
+flood 0 x3
+state 0:16be/60/1/1000 arena:0000
+at ticks=1000 wall=559
+expire 0
+state 0:16be/1/1/1000 arena:0000
+at ticks=1000 wall=560
+expire 0
+state 0:16be/0/1/1000 arena:0000
+at ticks=1000 wall=561
+expire 0
+state 0:0000/0/1/1000 arena:0000
+# SetPlayerChatMask, with and without a timeout
+settings floodlimit=10 floodshutup=60 restrictchat=0 canspam=0 ticks=1000 wall=500
+seat 2
+state 0:0000/0/0/1000 1:0000/0/0/1000 arena:0000
+setmask 0 000f timeout=30
+state 0:000f/30/0/1000 1:0000/0/0/1000 arena:0000
+getmask 0 -> 000f
+setmask 1 00f0 timeout=0
+state 0:000f/30/0/1000 1:00f0/0/0/1000 arena:0000
+getmask 1 -> 00f0
+at ticks=1000 wall=529
+expire 0
+state 0:000f/1/0/1000 1:00f0/0/0/1000 arena:0000
+at ticks=1000 wall=531
+expire 0
+state 0:0000/0/0/1000 1:00f0/0/0/1000 arena:0000
+getmask 1 -> 00f0
+# PA_PREENTERARENA clears a flood shutup
+settings floodlimit=3 floodshutup=60 restrictchat=0 canspam=0 ticks=1000 wall=500
+seat 1
+state 0:0000/0/0/1000 arena:0000
+flood 0 x3
+state 0:16be/60/1/1000 arena:0000
+# re-entering an arena resets mask, expiry and counter
+preenter 0
+state 0:0000/0/0/1000 arena:0000
+# Chat:RestrictChat sets a separate per-arena mask
+settings floodlimit=10 floodshutup=60 restrictchat=6 canspam=0 ticks=1000 wall=500
+seat 1
+state 0:0000/0/0/1000 arena:0006
+# the arena mask is independent of the player's
+setmask 0 0100 timeout=0
+state 0:0100/0/0/1000 arena:0006

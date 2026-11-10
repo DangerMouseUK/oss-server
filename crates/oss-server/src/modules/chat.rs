@@ -510,6 +510,14 @@ impl Module for ChatModule {
                 load_arena_mask(z, ev.arena);
             }
         });
+        zone.on::<super::core::PlayerAction>(me, Scope::Global, |z, ev| {
+            // ASSS clears the mask, its expiry and the flood counter on
+            // PA_PREENTERARENA, so changing arena lifts a flood shutup --
+            // including the session-long kind a flood turns permanent.
+            if ev.action == super::core::Action::PreEnterArena {
+                clear_mask(z, ev.player);
+            }
+        });
         Ok(())
     }
 }
@@ -541,20 +549,68 @@ pub mod mask_type {
 /// May send everything flood control would stop (ASSS `CAP_CANSPAM`).
 pub const CAP_CAN_SPAM: &str = "unlimitedchat";
 
-#[derive(Default)]
-struct PlayerMask {
-    mask: u16,
-    /// unix time the mask expires; 0 = session-long
-    expires: u64,
-    msgs: i32,
-    last_check: u64,
+/// A player's chat mask and flood counter (ASSS's per-player `pdata`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PlayerMask {
+    /// Bits of [`mask_type`] the player may not send.
+    pub mask: u16,
+    /// Unix time the mask expires; 0 = session-long, or no mask at all.
+    pub expires: u64,
+    /// Messages counted in the current window.
+    pub msgs: i32,
+    /// Tick the counter last decayed against.
+    pub last_check: u64,
 }
 
 /// An arena's chat mask (`Chat:RestrictChat`).
 #[derive(Default)]
 struct ArenaMask(u16);
 
-fn unix_now() -> u64 {
+/// Overrides the wall clock chat masks expire against, in seconds since the
+/// epoch. Absent means the real clock. The tick clock is injected the same
+/// way, and an expiry measured against real time cannot be exercised
+/// without this.
+#[derive(Debug, Clone, Copy)]
+pub struct WallClock(pub u64);
+
+/// Clears a player's mask, its expiry and the flood counter, and starts
+/// the decay window again (ASSS's `PA_PREENTERARENA` handler).
+pub fn clear_mask(zone: &mut Zone, p: PlayerId) {
+    let now = zone.now().0;
+    if let Some(pm) = zone
+        .players
+        .get_mut(p)
+        .map(|x| x.ext.get_or_default::<PlayerMask>())
+    {
+        *pm = PlayerMask {
+            last_check: now,
+            ..PlayerMask::default()
+        };
+    }
+}
+
+/// A player's mask and flood counter as they stand, without running the
+/// expiry first ([`player_chat_mask`] does that).
+pub fn mask_state(zone: &Zone, p: PlayerId) -> PlayerMask {
+    zone.players
+        .get(p)
+        .and_then(|x| x.ext.get::<PlayerMask>())
+        .copied()
+        .unwrap_or_default()
+}
+
+/// An arena's chat mask (`Chat:RestrictChat`).
+pub fn arena_chat_mask(zone: &Zone, a: crate::arena::ArenaId) -> u16 {
+    zone.arenas
+        .get(a)
+        .and_then(|x| x.ext.get::<ArenaMask>())
+        .map_or(0, |m| m.0)
+}
+
+fn unix_now(zone: &Zone) -> u64 {
+    if let Some(w) = zone.res.get::<WallClock>() {
+        return w.0;
+    }
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_secs())
@@ -562,6 +618,7 @@ fn unix_now() -> u64 {
 
 fn expire_mask(zone: &mut Zone, p: PlayerId) -> u16 {
     let now_ticks = zone.now().0;
+    let wall = unix_now(zone);
     let Some(pm) = zone
         .players
         .get_mut(p)
@@ -569,7 +626,7 @@ fn expire_mask(zone: &mut Zone, p: PlayerId) -> u16 {
     else {
         return 0;
     };
-    if pm.expires > 0 && unix_now() > pm.expires {
+    if pm.expires > 0 && wall > pm.expires {
         pm.mask = 0;
         pm.expires = 0;
     }
@@ -594,17 +651,14 @@ pub fn allowed(zone: &mut Zone, p: PlayerId, kind: u8) -> bool {
 
 /// ASSS `SetPlayerChatMask`: `timeout` in seconds, 0 for the session.
 pub fn set_player_chat_mask(zone: &mut Zone, p: PlayerId, mask: u16, timeout: u64) {
+    let wall = unix_now(zone);
     if let Some(pm) = zone
         .players
         .get_mut(p)
         .map(|x| x.ext.get_or_default::<PlayerMask>())
     {
         pm.mask = mask;
-        pm.expires = if timeout == 0 {
-            0
-        } else {
-            unix_now() + timeout
-        };
+        pm.expires = if timeout == 0 { 0 } else { wall + timeout };
     }
 }
 
@@ -620,8 +674,10 @@ pub fn set_arena_chat_mask(zone: &mut Zone, a: crate::arena::ArenaId, mask: u16)
     }
 }
 
-/// ASSS `check_flood`.
-fn check_flood(zone: &mut Zone, p: PlayerId) {
+/// ASSS `check_flood`: counts the message and, past `Chat:FloodLimit`,
+/// masks the nine chat types a flooding player loses.
+pub fn check_flood(zone: &mut Zone, p: PlayerId) {
+    let wall = unix_now(zone);
     let limit = zone.cfg.global().get_int("Chat", "FloodLimit", 10);
     let shutup = u64::try_from(zone.cfg.global().get_int("Chat", "FloodShutup", 60)).unwrap_or(60);
     let over = zone
@@ -644,7 +700,7 @@ fn check_flood(zone: &mut Zone, p: PlayerId) {
         if pm.expires != 0 {
             pm.expires += shutup;
         } else if pm.mask == 0 {
-            pm.expires = unix_now() + shutup;
+            pm.expires = wall + shutup;
         }
         use mask_type::*;
         pm.mask |= 1 << PUB_MACRO

@@ -28,6 +28,13 @@ pub struct Acceptors(Vec<Arc<dyn Acceptor>>);
 
 /// Registers an extra connection acceptor (call from a module's `load`).
 /// Acceptors registered earlier are asked first.
+///
+/// The contract for anything registered here: a cipher that cannot answer an
+/// in-session key exchange must refuse rather than return a key it guessed.
+/// Ignoring the packet, which is what [`oss_net::Cipher::handle_core`] does by
+/// default, is that refusal. A guessed key fails silently, with both ends
+/// talking on and neither able to tell the traffic from corruption, so a
+/// refusal an operator can see is always the better failure.
 pub fn register_acceptor(zone: &mut Zone, acceptor: Arc<dyn Acceptor>) {
     zone.res.get_or_default::<Acceptors>().0.push(acceptor);
 }

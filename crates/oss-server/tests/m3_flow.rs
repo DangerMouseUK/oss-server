@@ -44,7 +44,10 @@ impl H {
             ("conf/staff.conf", ""),
             ("arenas/(default)/arena.conf", arena),
         ]);
-        let zone = ServerBuilder::with_source(src).build_zone().expect("zone");
+        let mut zone = ServerBuilder::with_source(src).build_zone().expect("zone");
+        // fm_normal picks at random between equally populated teams, so the
+        // tests fix the seed to keep who lands where repeatable
+        zone.res.insert(oss_server::prng::Prng::new(1));
         Self {
             zone,
             lo: Loopback::default(),

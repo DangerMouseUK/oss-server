@@ -735,30 +735,200 @@ fn on_spec_request(zone: &mut Zone, pid: PlayerId, pkt: &[u8]) {
     }
 }
 
-/// Simple frequency manager (a subset of ASSS `fm_normal`): spectators go to
-/// the spectator frequency, players to the least populated of the first
-/// `Team:DesiredTeams` frequencies; requested frequencies above
-/// `Team:MaxFrequency` are refused.
+/// ASSS `fm_normal`: the frequency manager that decides what ship and
+/// frequency a player gets when they enter an arena, change ship or ask for
+/// another frequency.
+///
+/// Every setting `fm_normal.c` reads is read here: `Team:DesiredTeams`,
+/// `MaxFrequency`, `PrivFreqStart`, `MaxPerTeam`, `MaxPerPrivateTeam`,
+/// `IncludeSpectators`, `ForceEvenTeams`, `FrequencyShipTypes`,
+/// `InitialSpec`, `General:MaxPlaying` and `Misc:MaxXres`/`MaxYres`. On top
+/// of ASSS's `no_ship` lag flag it also keeps a player in spectator mode
+/// while the lag or anti-cheat checks say so.
 pub struct BalancedFreqs;
 
-fn balanced(zone: &Zone, arena: ArenaId, exclude: PlayerId) -> u16 {
-    let teams = zone
-        .arenas
-        .get(arena)
-        .map_or(2, |a| a.cfg.get_int("Team", "DesiredTeams", 2))
-        .max(1);
-    let teams = u16::try_from(teams).unwrap_or(2);
-    let mut counts = vec![0u32; usize::from(teams)];
+/// What `fm_normal` reads from an arena's config.
+#[derive(Debug, Clone, Copy)]
+struct FmCfg {
+    desired: u16,
+    max_freq: i32,
+    priv_start: i32,
+    max_per_team: i32,
+    max_per_private: i32,
+    incl_spec: bool,
+    force_even: bool,
+    ship_types: bool,
+    max_playing: i32,
+    initial_spec: bool,
+    max_x: i32,
+    max_y: i32,
+    spec_freq: u16,
+}
+
+/// ASSS `CFG_MAX_DESIRED`.
+const MAX_DESIRED: i32 = 10;
+
+fn fm_cfg(zone: &Zone, arena: ArenaId) -> FmCfg {
+    let Some(a) = zone.arenas.get(arena) else {
+        return FmCfg {
+            desired: 2,
+            max_freq: 10000,
+            priv_start: 100,
+            max_per_team: 0,
+            max_per_private: 0,
+            incl_spec: false,
+            force_even: false,
+            ship_types: false,
+            max_playing: 100,
+            initial_spec: false,
+            max_x: 0,
+            max_y: 0,
+            spec_freq: 8025,
+        };
+    };
+    let c = &a.cfg;
+    FmCfg {
+        desired: c.get_int("Team", "DesiredTeams", 2).clamp(1, MAX_DESIRED) as u16,
+        max_freq: c.get_int("Team", "MaxFrequency", 10000),
+        priv_start: c.get_int("Team", "PrivFreqStart", 100),
+        max_per_team: c.get_int("Team", "MaxPerTeam", 0),
+        max_per_private: c.get_int("Team", "MaxPerPrivateTeam", 0),
+        incl_spec: c.get_int("Team", "IncludeSpectators", 0) != 0,
+        force_even: c.get_int("Team", "ForceEvenTeams", 0) != 0,
+        ship_types: c.get_int("Team", "FrequencyShipTypes", 0) != 0,
+        max_playing: c.get_int("General", "MaxPlaying", 100),
+        initial_spec: c.get_int("Team", "InitialSpec", 0) != 0,
+        max_x: c.get_int("Misc", "MaxXres", 0),
+        max_y: c.get_int("Misc", "MaxYres", 0),
+        spec_freq: spec_freq(a),
+    }
+}
+
+impl FmCfg {
+    /// ASSS `get_max_for_freq`: private frequencies have their own limit.
+    fn max_for_freq(&self, freq: u16) -> i32 {
+        if freq > 0 && i32::from(freq) >= self.priv_start {
+            self.max_per_private
+        } else {
+            self.max_per_team
+        }
+    }
+}
+
+/// ASSS `count_current_playing`.
+fn count_playing(zone: &Zone, arena: ArenaId) -> i32 {
+    zone.players
+        .in_arena(arena)
+        .filter(|p| p.status == PlayerStatus::Playing && !p.ship.is_spec())
+        .count() as i32
+}
+
+/// ASSS `count_freq`.
+fn count_freq(zone: &Zone, arena: ArenaId, freq: u16, excl: PlayerId, incl_spec: bool) -> i32 {
+    zone.players
+        .in_arena(arena)
+        .filter(|p| p.freq == freq && p.id != excl && (!p.ship.is_spec() || incl_spec))
+        .count() as i32
+}
+
+/// ASSS `BalanceFreqs`: the least populated of the first `DesiredTeams`
+/// frequencies, picking at random between ties; if they are all full, the
+/// first frequency above them with room.
+fn balanced(zone: &mut Zone, arena: ArenaId, excl: PlayerId, cfg: &FmCfg) -> u16 {
+    let max = cfg.max_for_freq(0);
+    let mut counts = vec![0i32; usize::from(cfg.desired)];
     for p in zone.players.in_arena(arena) {
-        if p.id != exclude && !p.ship.is_spec() && p.freq < teams {
+        if p.freq < cfg.desired && p.id != excl && (!p.ship.is_spec() || cfg.incl_spec) {
             counts[usize::from(p.freq)] += 1;
         }
     }
-    counts
+    let min = counts.iter().copied().min().unwrap_or(0);
+    let best: Vec<u16> = counts
         .iter()
         .enumerate()
-        .min_by_key(|&(_, c)| *c)
-        .map_or(0, |(i, _)| i as u16)
+        .filter(|&(_, &c)| c == min)
+        .map(|(i, _)| i as u16)
+        .collect();
+    if best.is_empty() {
+        return 0;
+    }
+    if max == 0 || min < max {
+        let i = rand(zone).below(best.len() as u32) as usize;
+        return best[i];
+    }
+    // every desired freq is full: walk up until one has room
+    let mut f = cfg.desired;
+    while count_freq(zone, arena, f, excl, cfg.incl_spec) >= max {
+        let Some(next) = f.checked_add(1) else { break };
+        f = next;
+    }
+    f
+}
+
+/// ASSS `FindLegalShip`: with `Team:FrequencyShipTypes`, freq 0 flies
+/// warbirds, freq 1 javelins and so on, and any other freq only spectates.
+fn legal_ship(cfg: &FmCfg, freq: u16, ship: Ship) -> Ship {
+    if !cfg.ship_types {
+        return ship;
+    }
+    // speccers are left alone, even here
+    if ship.is_spec() || freq > 7 {
+        Ship::SPEC
+    } else {
+        Ship(freq as u8)
+    }
+}
+
+/// ASSS `screen_res_allowed`, which tells the player itself.
+fn res_allowed(zone: &mut Zone, player: PlayerId, cfg: &FmCfg) -> bool {
+    let Some(p) = zone.players.get(player) else {
+        return true;
+    };
+    let (x, y) = (i32::from(p.resolution.0), i32::from(p.resolution.1));
+    if (cfg.max_x == 0 || x <= cfg.max_x) && (cfg.max_y == 0 || y <= cfg.max_y) {
+        return true;
+    }
+    let (mx, my) = (cfg.max_x, cfg.max_y);
+    super::chat::message(
+        zone,
+        player,
+        &format!("Maximum allowed screen resolution is {mx}x{my} in this arena"),
+    );
+    false
+}
+
+/// The lag and anti-cheat holds, which are this server's `p->flags.no_ship`.
+/// `notify` sends the reason, as ASSS's ship change does.
+fn held_in_spec(zone: &mut Zone, player: PlayerId, notify: bool) -> bool {
+    if super::lagdata::no_ship(zone, player) {
+        if notify {
+            super::chat::message(zone, player, "You have too much lag to play in this arena.");
+        }
+        return true;
+    }
+    if super::anticheat::no_ship(zone, player) {
+        if notify {
+            super::chat::message(
+                zone,
+                player,
+                "The anti-cheat checks are keeping you in spectator mode for now.",
+            );
+        }
+        return true;
+    }
+    false
+}
+
+/// Where the balancer puts a player, falling back to spectator mode when
+/// even that frequency is out of range (ASSS does this at each call site).
+fn place(zone: &mut Zone, arena: ArenaId, player: PlayerId, cfg: &FmCfg, ship: &mut Ship) -> u16 {
+    let f = balanced(zone, arena, player, cfg);
+    if i32::from(f) >= cfg.max_freq {
+        *ship = Ship::SPEC;
+        cfg.spec_freq
+    } else {
+        f
+    }
 }
 
 impl FreqManager for BalancedFreqs {
@@ -766,49 +936,73 @@ impl FreqManager for BalancedFreqs {
         let Some(arena) = zone.players.get(player).and_then(|p| p.arena) else {
             return;
         };
-        // too lagged to play: start in spectator mode
-        if super::lagdata::no_ship(zone, player) || super::anticheat::no_ship(zone, player) {
+        let cfg = fm_cfg(zone, arena);
+        let too_many = cfg.max_playing > 0 && count_playing(zone, arena) >= cfg.max_playing;
+        if too_many
+            || held_in_spec(zone, player, false)
+            || !res_allowed(zone, player, &cfg)
+            || cfg.initial_spec
+            // the arena is locked to spectator mode (`?lockarena`)
+            || arena_lock(zone, arena).spec
+        {
             *ship = Ship::SPEC;
         }
-        // the arena is locked to spectator mode (`?lockarena`), or the zone
-        // always starts players there (`Team:InitialSpec`)
-        let initial_spec = zone
-            .arenas
-            .get(arena)
-            .is_some_and(|a| a.cfg.get_int("Team", "InitialSpec", 0) != 0);
-        if arena_lock(zone, arena).spec || initial_spec {
-            *ship = Ship::SPEC;
-        }
-        *freq = if ship.is_spec() {
-            zone.arenas.get(arena).map_or(8025, spec_freq)
+        if ship.is_spec() {
+            *freq = cfg.spec_freq;
         } else {
-            balanced(zone, arena, player)
-        };
+            *freq = place(zone, arena, player, &cfg, ship);
+            *ship = legal_ship(&cfg, *freq, *ship);
+        }
     }
 
     fn ship_change(&self, zone: &mut Zone, player: PlayerId, ship: &mut Ship, freq: &mut u16) {
         let Some(arena) = zone.players.get(player).and_then(|p| p.arena) else {
             return;
         };
-        let spec = zone.arenas.get(arena).map_or(8025, spec_freq);
+        let cfg = fm_cfg(zone, arena);
+        let Some((was_spec, old_ship, old_freq)) = zone
+            .players
+            .get(player)
+            .map(|p| (p.ship.is_spec(), p.ship, p.freq))
+        else {
+            return;
+        };
+        let mut deny = false;
         if ship.is_spec() {
-            *freq = spec;
-        } else if super::lagdata::no_ship(zone, player) {
-            super::chat::message(zone, player, "You have too much lag to play in this arena.");
-            if let Some(p) = zone.players.get(player) {
-                (*ship, *freq) = (p.ship, p.freq);
-            }
-        } else if super::anticheat::no_ship(zone, player) {
+            // changing to spectator mode is always allowed
+            *freq = cfg.spec_freq;
+        } else if held_in_spec(zone, player, true) || !res_allowed(zone, player, &cfg) {
+            deny = true;
+        } else if was_spec && cfg.max_playing > 0 && count_playing(zone, arena) >= cfg.max_playing {
             super::chat::message(
                 zone,
                 player,
-                "The anti-cheat checks are keeping you in spectator mode for now.",
+                "There are too many people playing in this arena.",
             );
-            if let Some(p) = zone.players.get(player) {
-                (*ship, *freq) = (p.ship, p.freq);
+            deny = true;
+        } else {
+            let mut need_balance = false;
+            if was_spec && *freq == cfg.spec_freq {
+                // leaving spec on the spec freq: always reassign
+                need_balance = true;
+            } else if cfg.ship_types {
+                *freq = u16::from(ship.0);
+                self.freq_change(zone, player, ship, freq);
+                return;
+            } else if was_spec {
+                // unspeccing onto a real freq: only reassign if it is full
+                let max = cfg.max_for_freq(*freq);
+                if max > 0 && count_freq(zone, arena, *freq, player, false) >= max {
+                    need_balance = true;
+                }
             }
-        } else if *freq == spec {
-            *freq = balanced(zone, arena, player);
+            if need_balance {
+                *freq = place(zone, arena, player, &cfg, ship);
+            }
+            *ship = legal_ship(&cfg, *freq, *ship);
+        }
+        if deny {
+            (*ship, *freq) = (old_ship, old_freq);
         }
     }
 
@@ -817,16 +1011,51 @@ impl FreqManager for BalancedFreqs {
             return;
         };
         let Some(arena) = p.arena else { return };
-        let current = p.freq;
-        let spec = zone.arenas.get(arena).map_or(8025, spec_freq);
-        let max = zone
-            .arenas
-            .get(arena)
-            .map_or(0, |a| a.cfg.get_int("Team", "MaxFrequency", 0));
-        if *freq == spec {
+        let (old_ship, old_freq, was_spec) = (p.ship, p.freq, p.ship.is_spec());
+        let cfg = fm_cfg(zone, arena);
+        // Asking for the spectator frequency is how a client asks to
+        // spectate (`=8025`), so it always lands in spectator mode. ASSS
+        // only short-circuits a spectator who is already there, and with
+        // its default `MaxFrequency` of 10000 a player in a ship who asks
+        // for 8025 keeps the ship and takes the frequency with them; no
+        // zone wants that, so this is a deliberate divergence.
+        if *freq == cfg.spec_freq {
             *ship = Ship::SPEC;
-        } else if max > 0 && i32::from(*freq) >= max {
-            *freq = current;
+            return;
+        }
+        if i32::from(*freq) >= cfg.max_freq {
+            *freq = place(zone, arena, player, &cfg, ship);
+        } else {
+            let count = count_freq(zone, arena, *freq, player, cfg.incl_spec);
+            let max = cfg.max_for_freq(*freq);
+            if max > 0 && count >= max {
+                *freq = place(zone, arena, player, &cfg, ship);
+            } else if cfg.force_even {
+                let old = count_freq(zone, arena, old_freq, player, cfg.incl_spec);
+                if old < count {
+                    super::chat::message(
+                        zone,
+                        player,
+                        "Changing frequencies would make the teams uneven.",
+                    );
+                    (*ship, *freq) = (old_ship, old_freq);
+                    return;
+                }
+            }
+        }
+        *ship = legal_ship(&cfg, *freq, *ship);
+        // did that bring them out of spec when the arena is already full?
+        if !ship.is_spec()
+            && was_spec
+            && cfg.max_playing > 0
+            && count_playing(zone, arena) >= cfg.max_playing
+        {
+            (*ship, *freq) = (old_ship, old_freq);
+            super::chat::message(
+                zone,
+                player,
+                "There are too many people playing in this arena.",
+            );
         }
     }
 }

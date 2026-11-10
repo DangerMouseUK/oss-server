@@ -137,3 +137,23 @@ fn map_checksums_match_the_client() {
     }
     assert!(n >= 60, "{n} checksums checked");
 }
+
+#[test]
+fn the_default_zone_can_turn_objects_on() {
+    // `objects` is commented out in the bundled modules.conf because ASSS
+    // 1.4.4's own modules.conf does not list it either, so check that the
+    // line works when a zone with LVZ objects uncomments it.
+    let src = oss_server::default_zone::source();
+    let mut listed = oss_server::module::read_modules_conf(&src).expect("modules.conf");
+    listed.push("objects".to_owned());
+    let zone = ServerBuilder::default_zone()
+        .modules(listed)
+        .build_zone()
+        .expect("zone");
+    let loaded: Vec<&str> = zone.modules.loaded().collect();
+    assert!(loaded.contains(&"objects"), "{loaded:?}");
+    assert!(
+        zone.iface::<dyn oss_server::modules::objects::Objects>()
+            .is_some()
+    );
+}

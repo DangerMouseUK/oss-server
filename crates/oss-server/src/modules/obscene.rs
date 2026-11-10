@@ -21,6 +21,17 @@ const REPLACE: &[u8] = b"%@$&%*!#@&%!#&*$#?@!*%@&!%#&%!?$*#!*$&@#&%$!*%@#&%!@&#$
 pub trait Obscene: Send + Sync {
     /// Replaces obscene words in `line`; returns whether any were found.
     fn filter(&self, zone: &Zone, line: &mut String) -> bool;
+
+    /// The module-wide replacement counter (ASSS `replace_count`). It is
+    /// never reset while the module is loaded, not even when the word list
+    /// is re-read, so the same word is masked differently every time --
+    /// across lines, arenas and players.
+    fn replace_count(&self) -> usize;
+
+    /// Sets that counter. Only for replaying a recorded transcript from a
+    /// known offset, which is the one thing ASSS's own harness reaches in
+    /// and changes.
+    fn set_replace_count(&self, n: usize);
 }
 
 #[derive(Default)]
@@ -84,6 +95,20 @@ impl Obscene for ObsceneImpl {
         }
         hit
     }
+
+    fn replace_count(&self) -> usize {
+        self.count.load(Ordering::Relaxed)
+    }
+
+    fn set_replace_count(&self, n: usize) {
+        self.count.store(n, Ordering::Relaxed);
+    }
+}
+
+/// Re-reads `Chat:Obscene`. The replacement counter is deliberately left
+/// alone, as in ASSS.
+pub fn reload_words(zone: &mut Zone) {
+    load(zone);
 }
 
 fn load(zone: &mut Zone) {

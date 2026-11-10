@@ -1,0 +1,150 @@
+# Obscenity filter from ASSS 1.4.4 src/core/obscene.c (compiled unmodified).
+#   # <label>: Chat:Obscene = [<raw setting>]   starts a scenario and reloads the list
+#   words <n> [<word>]...   the list load_obscene() parsed, in list order
+#   count <n>               the module's replace_count at that point
+#   filter [<in>] <filtered> [<out>] <count before> <count after>
+#   probe <n> [<string>]    n successive one-character replacements from offset 0
+#   mask [<string>] <length>  the replacement string, recovered from that probe
+# The mask is a function-local constant inside Filter and cannot be read from
+# outside it, so rather than copy it by hand the harness PROBES it with a
+# ONE-character word, which never wraps: filtering 'x' at counter k yields
+# mask[(5k) % length], so the probe sequence has period 'length' and probe k belongs
+# at index (5k) % length. The probe record is kept so the derivation can be redone.
+# The harness then sets replace_count back to 0 (the only place it touches the
+# module's state) so the scenarios below start from a known offset.
+# Rules these records pin:
+#   The list is split on spaces and tabs, lowercased, and a word starting '?' has
+#     the REST of it rot-13 decoded (the '?' itself is dropped). Decoding runs after
+#     lowercasing and only touches a-z.
+#   Matching is plain case-insensitive SUBSTRING matching with no word boundaries at
+#     all, so a short word in the list censors every longer word containing it.
+#   Filter walks the list in order and, for each word, replaces every occurrence,
+#     advancing by the word's length after each hit -- so overlapping occurrences are
+#     skipped, and the SECOND of two overlapping hits is not replaced.
+#   Replacements come from the 63-character mask below at offset
+#     (5 * replace_count++) % 63, and a word that would run off the end wraps round
+#     to the start of the mask. replace_count is a single module-wide counter that is
+#     only ever reset when the module loads: it keeps running across lines, across
+#     arenas and across players, so the same word gets a different mask each time.
+#     A port that derives the mask from the line, or resets per call, matches the
+#     first record here and then diverges.
+#   Filter edits the line IN PLACE and returns whether anything matched. A line with
+#     no match is returned untouched and does not advance the counter.
+#   Later words in the list search the ALREADY-MASKED line, so a word that overlaps
+#     an earlier replacement can no longer match.
+#
+# A hang worth knowing about, deliberately NOT driven here.
+#   strsplit never yields an empty token, but a list entry of a bare '?' becomes
+#   astrdup(word+1), i.e. the EMPTY STRING, and lands in the word list. ASSS's
+#   strcasestr returns the haystack unchanged for an empty needle, so Filter sets
+#   wlen = 0, copies nothing, and searches again from found + 0 -- the same address.
+#   Filter then spins forever on any non-empty line, incrementing replace_count,
+#   while holding obscene_words_mtx. So 'Chat:Obscene = ?' wedges the chat path of a
+#   live ASSS zone. This was read out of the source and confirmed by reading ASSS's
+#   own strcasestr (win32compat.c, copied verbatim into the harness); it is not
+#   driven because driving it would hang the harness, and a vector file cannot
+#   record an infinite loop. A port should reject empty words at load time.
+#
+# A second bug in the same function, half driven and half not.
+#   The wrapping copy is 'memcpy(found + atend, replace, leftover)' with
+#   leftover = pos + wlen - length. The mask array is length+1 bytes (it is a string
+#   literal, so it carries a NUL), and load_obscene's word buffer is 128 bytes, so a
+#   word can be up to 127 characters long. That makes leftover reach 126.
+#     leftover <= length      fine.
+#     leftover == length + 1  reads the mask's own NUL -- still inside the array, so
+#                             this is well defined -- and WRITES IT INTO THE LINE,
+#                             silently truncating the player's message at that
+#                             point and discarding everything after it. The
+#                             'a 127-character word truncates the line' scenario
+#                             below drives exactly this case.
+#     leftover >  length + 1  reads past the end of the array. That is undefined
+#                             behaviour, so it is NOT driven and no record here
+#                             contains its result; what it copies is whatever the
+#                             compiler happened to place after the literal.
+#   A port should either cap the copy at the mask length or reject words longer
+#   than the mask; the first makes the truncation case disappear too, which is a
+#   deliberate divergence worth recording rather than an accident.
+probe 240 [%*%$*%?*&%!!%@!!#%#$$%@@**$##?@&*&$#&@@&@&@&%#@!&#&?%&*!!!!#*%$$%*%$*%?*&%!!%@!!#%#$$%@@**$##?@&*&$#&@@&@&@&%#@!&#&?%&*!!!!#*%$$%*%$*%?*&%!!%@!!#%#$$%@@**$##?@&*&$#&@@&@&@&%#@!&#&?%&*!!!!#*%$$%*%$*%?*&%!!%@!!#%#$$%@@**$##?@&*&$#&@@&@&@&%#@!]
+mask [%@$&%*!#@&%!#&*$#?@!*%@&!%#&%!?$*#!*$&@#&%$!*%@#&%!@&#$!*@&$%*@?] 64
+# one short word: Chat:Obscene = [bad]
+words 1 [bad]
+count 0
+filter [nothing wrong here] 0 [nothing wrong here] 0 0
+filter [bad] 1 [%@$] 0 1
+filter [that is bad] 1 [that is *!#] 1 2
+filter [bad things happen to bad people] 1 [%!# things happen to $#? people] 2 4
+filter [BAD and BaD and bAd] 1 [*%@ and %#& and ?$*] 4 7
+filter [] 0 [] 7 7
+# a word that is a substring of innocent words: Chat:Obscene = [ass]
+words 1 [ass]
+count 7
+filter [a class of assassins passed by] 1 [a cl*$& of &%$%@#ins p!@&ed by] 7 11
+filter [ASSASSIN] 1 [!*@%*@IN] 11 13
+# overlapping occurrences: Chat:Obscene = [aa]
+words 1 [aa]
+count 13
+filter [aaaa] 1 [@$!#] 13 15
+filter [aaaaa] 1 [!##?a] 15 17
+filter [baaab] 1 [b%@ab] 17 18
+# two words, the second overlapping the first's hit: Chat:Obscene = [ab bc]
+words 2 [ab] [bc]
+count 18
+filter [abc] 1 [#&c] 18 19
+filter [xxabcxx] 1 [xx$*cxx] 19 20
+# the same two words in the other order: Chat:Obscene = [bc ab]
+words 2 [bc] [ab]
+count 20
+filter [abc] 1 [a$&] 20 21
+filter [xxabcxx] 1 [xxa%$xx] 21 22
+# rot-13 entries and tab separation: Chat:Obscene = [?onq	plain	?shpx]
+words 3 [bad] [plain] [fuck]
+count 22
+filter [bad is bad] 1 [@#& is @&#] 22 24
+filter [plain as day] 1 [*@&$% as day] 24 25
+filter [fuck off] 1 [*@?% off] 25 26
+# rot-13 is applied after lowercasing: Chat:Obscene = [?BNQ]
+words 1 [oad]
+count 26
+filter [this is oad or OAD] 1 [this is $&% or #@&] 26 28
+# a long word, to walk the mask offset round the end: Chat:Obscene = [abcdefghijklmnopqrst]
+words 1 [abcdefghijklmnopqrst]
+count 28
+filter [xxabcdefghijklmnopqrstxx] 1 [xx#&*$#?@!*%@&!%#&%!?$xx] 28 29
+filter [xxabcdefghijklmnopqrstxx] 1 [xx?@!*%@&!%#&%!?$*#!*$xx] 29 30
+filter [xxabcdefghijklmnopqrstxx] 1 [xx@&!%#&%!?$*#!*$&@#&%xx] 30 31
+filter [xxabcdefghijklmnopqrstxx] 1 [xx&%!?$*#!*$&@#&%$!*%@xx] 31 32
+filter [xxabcdefghijklmnopqrstxx] 1 [xx*#!*$&@#&%$!*%@#&%!@xx] 32 33
+filter [xxabcdefghijklmnopqrstxx] 1 [xx&@#&%$!*%@#&%!@&#$!*xx] 33 34
+filter [xxabcdefghijklmnopqrstxx] 1 [xx$!*%@#&%!@&#$!*@&$%*xx] 34 35
+filter [xxabcdefghijklmnopqrstxx] 1 [xx#&%!@&#$!*@&$%*@?%@$xx] 35 36
+filter [xxabcdefghijklmnopqrstxx] 1 [xx&#$!*@&$%*@?%@$&%*!#xx] 36 37
+filter [xxabcdefghijklmnopqrstxx] 1 [xx@&$%*@?%@$&%*!#@&%!#xx] 37 38
+filter [xxabcdefghijklmnopqrstxx] 1 [xx@?%@$&%*!#@&%!#&*$#?xx] 38 39
+filter [xxabcdefghijklmnopqrstxx] 1 [xx&%*!#@&%!#&*$#?@!*%@xx] 39 40
+filter [xxabcdefghijklmnopqrstxx] 1 [xx@&%!#&*$#?@!*%@&!%#&xx] 40 41
+filter [xxabcdefghijklmnopqrstxx] 1 [xx&*$#?@!*%@&!%#&%!?$*xx] 41 42
+filter [xxabcdefghijklmnopqrstxx] 1 [xx@!*%@&!%#&%!?$*#!*$&xx] 42 43
+filter [xxabcdefghijklmnopqrstxx] 1 [xx&!%#&%!?$*#!*$&@#&%$xx] 43 44
+# the counter keeps running across a list reload: Chat:Obscene = [bad]
+words 1 [bad]
+count 44
+filter [bad] 1 [%!?] 44 45
+# reloading the list does NOT reset replace_count: Chat:Obscene = [bad worse]
+words 2 [bad] [worse]
+count 45
+filter [bad] 1 [#!*] 45 46
+filter [worse] 1 [@#&%$] 46 47
+# a long word at the right offset writes the mask's NUL into the line: Chat:Obscene = [qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq]
+words 1 [qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq]
+count 47
+count 26
+offsets wlen=127 pos=2 leftover=65 masklen=64
+filter [qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq AFTER] 1 [$&%*!#@&%!#&*$#?@!*%@&!%#&%!?$*#!*$&@#&%$!*%@#&%!@&#$!*@&$%*@?%@$&%*!#@&%!#&*$#?@!*%@&!%#&%!?$*#!*$&@#&%$!*%@#&%!@&#$!*@&$%*@?] 26 27
+# an empty setting loads no words at all: Chat:Obscene = []
+words 0
+count 27
+filter [bad things] 0 [bad things] 27 27
+# leading and trailing separators: Chat:Obscene = [   bad   worse   ]
+words 2 [bad] [worse]
+count 27
+filter [bad and worse] 1 [#@& and #&*$#] 27 29

@@ -735,6 +735,116 @@ fn c_flagreset(zone: &mut Zone, inv: &Invocation<'_>) {
     }
 }
 
+fn c_flaginfo(zone: &mut Zone, inv: &Invocation<'_>) {
+    let Some(a) = inv.arena else { return };
+    // ASSS prints at most 20
+    let n = super::flagcore::flag_count(zone, a).min(20);
+    for i in 0..n {
+        let Some(f) = super::flagcore::get_flag(zone, a, i) else {
+            continue;
+        };
+        let text = match f.state {
+            super::flagcore::FlagState::None => format!("flag {i}: doesn't exist"),
+            super::flagcore::FlagState::OnMap => {
+                // ASSS's map letter and number: 20 columns across 1024 tiles
+                let (cx, cy) = (f.x as i32 * 20 / 1024, f.y as i32 * 20 / 1024);
+                let col = char::from(b'A' + (cx.clamp(0, 25) as u8));
+                format!(
+                    "flag {i}: on the map at {col}{} ({},{}), owned by freq {}",
+                    cy + 1,
+                    f.x,
+                    f.y,
+                    f.freq
+                )
+            }
+            super::flagcore::FlagState::Carried => {
+                let who = f
+                    .carrier
+                    .and_then(|c| zone.players.get(c))
+                    .map(|p| p.name.clone());
+                match who {
+                    Some(name) => format!("flag {i}: carried by {name}"),
+                    None => continue,
+                }
+            }
+        };
+        message(zone, inv.sender, &text);
+    }
+}
+
+/// A flag id the arena actually has, and whatever follows it.
+fn flag_arg(zone: &Zone, inv: &Invocation<'_>) -> Option<(usize, String)> {
+    let a = inv.arena?;
+    let params = inv.params.trim();
+    let (first, rest) = params.split_once(' ').unwrap_or((params, ""));
+    let id: usize = first.parse().ok()?;
+    (id < super::flagcore::flag_count(zone, a)).then(|| (id, rest.trim().to_owned()))
+}
+
+fn c_neutflag(zone: &mut Zone, inv: &Invocation<'_>) {
+    let Some(a) = inv.arena else { return };
+    let Some((id, rest)) = flag_arg(zone, inv) else {
+        message(zone, inv.sender, "neutflag: bad flag id");
+        return;
+    };
+    let Some(f) = super::flagcore::get_flag(zone, a, id) else {
+        message(zone, inv.sender, "neutflag: bad flag id");
+        return;
+    };
+    // ASSS's undocumented "force" takes a flag off a carrier too
+    if f.state == super::flagcore::FlagState::OnMap || rest == "force" {
+        super::flagcore::set_flag(zone, a, id, super::flagcore::FlagInfo::default());
+    } else {
+        message(
+            zone,
+            inv.sender,
+            "neutflag: that flag isn't currently on the map",
+        );
+    }
+}
+
+fn c_moveflag(zone: &mut Zone, inv: &Invocation<'_>) {
+    let Some(a) = inv.arena else { return };
+    let Some((id, rest)) = flag_arg(zone, inv) else {
+        message(zone, inv.sender, "moveflag: bad flag id");
+        return;
+    };
+    let Some(mut f) = super::flagcore::get_flag(zone, a, id) else {
+        message(zone, inv.sender, "moveflag: bad flag id");
+        return;
+    };
+    if f.state != super::flagcore::FlagState::OnMap {
+        message(
+            zone,
+            inv.sender,
+            &format!("moveflag: flag {id} isn't on the map"),
+        );
+        return;
+    }
+    let mut words = rest.split([' ', ',']).filter(|w| !w.is_empty());
+    let freq: i16 = match words.next().and_then(|w| w.parse().ok()) {
+        Some(f) if (0..=9999).contains(&f) => f,
+        _ => {
+            message(zone, inv.sender, "moveflag: bad freq");
+            return;
+        }
+    };
+    f.freq = freq;
+    let (x, y) = (
+        words.next().and_then(|w| w.parse::<i32>().ok()),
+        words.next().and_then(|w| w.parse::<i32>().ok()),
+    );
+    if let (Some(x), Some(y)) = (x, y)
+        && (1..1024).contains(&x)
+        && (1..1024).contains(&y)
+    {
+        let spot = super::mapdata::arena_map(zone, a).map(|m| m.find_empty_tile_near(x, y));
+        let (x, y) = spot.unwrap_or((x, y));
+        (f.x, f.y) = (x as i16, y as i16);
+    }
+    super::flagcore::set_flag(zone, a, id, f);
+}
+
 fn c_ballcount(zone: &mut Zone, inv: &Invocation<'_>) {
     let Some(a) = inv.arena else { return };
     match inv.params.trim() {
@@ -1156,6 +1266,21 @@ const COMMANDS: &[(&str, Handler, &str)] = &[
         "geta",
         c_geta,
         "Targets: none\nArgs: section:key\nShows the value of a setting in this arena's config.",
+    ),
+    (
+        "flaginfo",
+        c_flaginfo,
+        "Targets: none\nArgs: none\nShows the state, place and owner of each flag in the arena.",
+    ),
+    (
+        "neutflag",
+        c_neutflag,
+        "Targets: none\nArgs: <flag id>\nNeuts a flag that is on the map, so the flag timer puts it back in the middle.",
+    ),
+    (
+        "moveflag",
+        c_moveflag,
+        "Targets: none\nArgs: <flag id> <owning freq> [<x> <y>]\nMoves a flag on the map and gives it to a freq. Without coordinates it stays where it is.",
     ),
     (
         "flagreset",

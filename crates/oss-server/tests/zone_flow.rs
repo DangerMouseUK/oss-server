@@ -43,9 +43,10 @@ impl H {
                 "conf/groupdef.conf",
                 "[default]\ncmd_version = 1\ncmd_go = 1\ncmd_help = 1\n\
                  privcmd_freqkick\nprivcmd_giveowner\ncmd_takeownership\ncmd_sheep\n\
+                 cmd_botfeature\n\
                  [mod]\ncmd_version = 1\ncmd_go = 1\nseemodchat\nsendmodchat\n\
                  cmd_arena\ncmd_zone\ncmd_owner\ncmd_listarena\ncmd_modinfo\ncmd_netstats\n\
-                 cmd_lockarena\ncmd_unlockarena\n\
+                 cmd_lockarena\ncmd_unlockarena\ncmd_botfeature\n\
                  privcmd_setship\nprivcmd_lock\nprivcmd_prize\nprivcmd_info\n\
                  privcmd_warpto\ncmd_z\nhigher_than_default\n\
                  privcmd_freqkick\nprivcmd_giveowner\ncmd_takeownership\n"
@@ -975,4 +976,56 @@ fn initial_spec_setting() {
     // but nothing stops them taking one
     h.send(alice, &[c2s::kind::SET_SHIP, 0]);
     assert_eq!(h.zone.players.get(alice).map(|p| p.ship.0), Some(0));
+}
+
+#[test]
+fn bot_features() {
+    use oss_proto::position::C2SPosition;
+    let mut h = H::new();
+    let (alice, _) = h.login("alice", "x");
+    let (bob, _) = h.login("bob", "secret");
+    h.enter(alice);
+    h.enter(bob);
+    h.send(alice, &[c2s::kind::SET_SHIP, 0]);
+    h.send(bob, &[c2s::kind::SET_SHIP, 0]);
+    // far apart: a plain position packet doesn't reach the other one
+    let far = |h: &mut H, p: PlayerId, x: i16| {
+        h.tick(1);
+        let mut buf = Vec::new();
+        C2SPosition {
+            time: h.t as u32 + 1,
+            x,
+            y: 1000,
+            ..Default::default()
+        }
+        .encode(&mut buf);
+        h.send(p, &buf);
+    };
+    far(&mut h, bob, 100);
+    h.take(alice);
+    h.take(bob);
+    far(&mut h, alice, 15000);
+    assert!(
+        !h.take(bob).iter().any(|d| d[0] == s2c::kind::POSITION),
+        "too far to see"
+    );
+
+    // +seeallposn and bob gets it anyway; +seeownposn and alice sees her own
+    h.chat(bob, chat_type::PUBLIC, 0, "?botfeature +seeallposn");
+    h.chat(alice, chat_type::PUBLIC, 0, "?botfeature +seeownposn");
+    h.take(alice);
+    h.take(bob);
+    far(&mut h, alice, 15001);
+    assert!(h.take(bob).iter().any(|d| d[0] == s2c::kind::POSITION));
+    assert!(h.take(alice).iter().any(|d| d[0] == s2c::kind::POSITION));
+
+    // and off again
+    h.chat(bob, chat_type::PUBLIC, 0, "?botfeature -seeallposn");
+    h.take(bob);
+    far(&mut h, alice, 15002);
+    assert!(!h.take(bob).iter().any(|d| d[0] == s2c::kind::POSITION));
+    h.take(bob);
+    h.chat(bob, chat_type::PUBLIC, 0, "?botfeature +nosuchfeature");
+    let out = texts(&h.take(bob));
+    assert!(out.iter().any(|t| t == "Unknown bot feature"), "{out:?}");
 }

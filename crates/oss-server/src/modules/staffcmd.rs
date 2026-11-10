@@ -668,6 +668,22 @@ fn c_unlock(zone: &mut Zone, inv: &Invocation<'_>) {
     message(zone, inv.sender, "Unlocked.");
 }
 
+fn c_botfeature(zone: &mut Zone, inv: &Invocation<'_>) {
+    for word in inv.params.split([' ', ',']).filter(|w| !w.is_empty()) {
+        let (on, name) = match word.split_at_checked(1) {
+            Some(("+", rest)) => (true, rest),
+            Some(("-", rest)) => (false, rest),
+            _ => {
+                message(zone, inv.sender, "Bad syntax");
+                continue;
+            }
+        };
+        if !super::game::set_bot_feature(zone, inv.sender, name, on) {
+            message(zone, inv.sender, "Unknown bot feature");
+        }
+    }
+}
+
 fn c_lockarena(zone: &mut Zone, inv: &Invocation<'_>) {
     let Some(a) = inv.arena else { return };
     let p = inv.params;
@@ -1290,6 +1306,11 @@ const COMMANDS: &[(&str, Handler, &str)] = &[
         "lock",
         c_lock,
         "Targets: player, freq, or arena\nArgs: [-s]\nLocks players in their ship (-s: in spec).",
+    ),
+    (
+        "botfeature",
+        c_botfeature,
+        "Targets: none\nArgs: [+/-]seeallposn [+/-]seeownposn\nTurns on or off the extra position packets a bot can ask for: every position packet in the arena, and your own echoed back.",
     ),
     (
         "lockarena",

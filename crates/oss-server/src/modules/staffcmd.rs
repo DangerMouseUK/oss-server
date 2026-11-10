@@ -1204,6 +1204,311 @@ pub struct StaffCmdModule;
 
 type Handler = fn(&mut Zone, &Invocation<'_>);
 
+// ---- file transfer (ASSS admincmd.c) --------------------------------------
+
+/// Splits `a:b` into its two halves; the second is `None` without a colon.
+fn split_colon(params: &str) -> (&str, Option<&str>) {
+    match params.split_once(':') {
+        Some((a, b)) => (a.trim(), Some(b.trim())),
+        None => (params.trim(), None),
+    }
+}
+
+/// The zone directory, or a message saying there isn't one. File transfer
+/// needs somewhere on disk to work in; a zone built from an in-memory config
+/// has nowhere.
+fn need_zone_dir(zone: &mut Zone, who: PlayerId) -> bool {
+    if super::filetrans::zone_root(zone).is_some() {
+        return true;
+    }
+    message(zone, who, "This zone has no directory on disk.");
+    false
+}
+
+fn c_pwd(zone: &mut Zone, inv: &Invocation<'_>) {
+    if !need_zone_dir(zone, inv.sender) {
+        return;
+    }
+    let wd = super::filetrans::working_dir(zone, inv.sender);
+    let shown = wd.to_string_lossy().into_owned();
+    let shown = if shown.is_empty() {
+        ".".to_owned()
+    } else {
+        shown
+    };
+    message(
+        zone,
+        inv.sender,
+        &format!("Current working directory: {shown}"),
+    );
+}
+
+fn c_cd(zone: &mut Zone, inv: &Invocation<'_>) {
+    if !need_zone_dir(zone, inv.sender) {
+        return;
+    }
+    let path = match inv.params.trim() {
+        "" => ".",
+        p => p,
+    };
+    // ASSS takes the path from the zone root, not from the previous
+    // directory, and says so in its help; so does this.
+    super::filetrans::set_working_dir(zone, inv.sender, "");
+    if super::filetrans::set_working_dir(zone, inv.sender, path) {
+        message(zone, inv.sender, "Changed working directory.");
+    } else {
+        message(
+            zone,
+            inv.sender,
+            "Invalid path, or it isn't a directory in the zone.",
+        );
+    }
+}
+
+fn c_delfile(zone: &mut Zone, inv: &Invocation<'_>) {
+    if !need_zone_dir(zone, inv.sender) {
+        return;
+    }
+    let Some(path) = super::filetrans::resolve(zone, inv.sender, inv.params.trim()) else {
+        message(zone, inv.sender, "Invalid path or filename.");
+        return;
+    };
+    match std::fs::remove_file(&path) {
+        Ok(()) => message(zone, inv.sender, "Deleted."),
+        Err(e) => {
+            let text = format!("Error deleting '{}': {e}", path.display());
+            message(zone, inv.sender, &text);
+        }
+    }
+}
+
+fn c_renfile(zone: &mut Zone, inv: &Invocation<'_>) {
+    if !need_zone_dir(zone, inv.sender) {
+        return;
+    }
+    let (from, to) = split_colon(inv.params);
+    let Some(to) = to else {
+        message(zone, inv.sender, "Bad syntax.");
+        return;
+    };
+    let Some(from) = super::filetrans::resolve(zone, inv.sender, from) else {
+        message(zone, inv.sender, "Invalid old path.");
+        return;
+    };
+    let Some(to) = super::filetrans::resolve(zone, inv.sender, to) else {
+        message(zone, inv.sender, "Invalid new path.");
+        return;
+    };
+    match std::fs::rename(&from, &to) {
+        Ok(()) => message(zone, inv.sender, "Renamed."),
+        Err(e) => {
+            let text = format!(
+                "Error renaming '{}' to '{}': {e}",
+                from.display(),
+                to.display()
+            );
+            message(zone, inv.sender, &text);
+        }
+    }
+}
+
+fn c_getfile(zone: &mut Zone, inv: &Invocation<'_>) {
+    if !need_zone_dir(zone, inv.sender) {
+        return;
+    }
+    let Some(path) = super::filetrans::resolve(zone, inv.sender, inv.params.trim()) else {
+        message(zone, inv.sender, "Invalid path.");
+        return;
+    };
+    let name = super::filetrans::client_basename(&path.to_string_lossy());
+    if !super::filetrans::send_file(zone, inv.sender, &path, &name, false) {
+        let text = format!("Error sending '{}'.", path.display());
+        message(zone, inv.sender, &text);
+    }
+}
+
+fn c_putfile(zone: &mut Zone, inv: &Invocation<'_>) {
+    if !need_zone_dir(zone, inv.sender) {
+        return;
+    }
+    let (client_file, server_file) = split_colon(inv.params);
+    if client_file.is_empty() {
+        message(zone, inv.sender, "Bad syntax.");
+        return;
+    }
+    let wanted = match server_file {
+        Some(s) if !s.is_empty() => s.to_owned(),
+        _ => super::filetrans::client_basename(client_file),
+    };
+    let Some(dest) = super::filetrans::resolve(zone, inv.sender, &wanted) else {
+        message(zone, inv.sender, "Invalid server path.");
+        return;
+    };
+    let asked = super::filetrans::request_file(
+        zone,
+        inv.sender,
+        client_file,
+        Box::new(
+            move |z: &mut Zone, who: PlayerId, file: Option<std::path::PathBuf>| {
+                let Some(file) = file else { return };
+                match std::fs::rename(&file, &dest) {
+                    Ok(()) => {
+                        let text = format!("File received: {}", dest.display());
+                        message(z, who, &text);
+                    }
+                    Err(e) => {
+                        tracing::warn!(target: "admincmd", "can't move an upload into place: {e}");
+                        let _ = std::fs::remove_file(&file);
+                        let text = format!("Couldn't upload file to '{}'", dest.display());
+                        message(z, who, &text);
+                    }
+                }
+            },
+        ),
+    );
+    if !asked {
+        message(zone, inv.sender, "Error sending file.");
+    }
+}
+
+fn c_putzip(zone: &mut Zone, inv: &Invocation<'_>) {
+    if !need_zone_dir(zone, inv.sender) {
+        return;
+    }
+    let (client_file, server_dir) = split_colon(inv.params);
+    if client_file.is_empty() {
+        message(zone, inv.sender, "Bad syntax.");
+        return;
+    }
+    let Some(dest) = super::filetrans::resolve(zone, inv.sender, server_dir.unwrap_or("")) else {
+        message(zone, inv.sender, "Invalid server path.");
+        return;
+    };
+    let asked = super::filetrans::request_file(
+        zone,
+        inv.sender,
+        client_file,
+        Box::new(
+            move |z: &mut Zone, who: PlayerId, file: Option<std::path::PathBuf>| {
+                let Some(file) = file else { return };
+                let data = std::fs::read(&file).unwrap_or_default();
+                let _ = std::fs::remove_file(&file);
+                match super::filetrans::unzip_into(&data, &dest) {
+                    Ok(n) => {
+                        let text = format!("Zip inflated to {}: {n} file(s).", dest.display());
+                        message(z, who, &text);
+                    }
+                    Err(e) => {
+                        let text = format!("Couldn't inflate the zip: {e}.");
+                        message(z, who, &text);
+                    }
+                }
+            },
+        ),
+    );
+    if !asked {
+        message(zone, inv.sender, "Error sending file.");
+    }
+}
+
+fn c_putmap(zone: &mut Zone, inv: &Invocation<'_>) {
+    if !need_zone_dir(zone, inv.sender) {
+        return;
+    }
+    let client_file = inv.params.trim().to_owned();
+    if client_file.is_empty() {
+        message(zone, inv.sender, "Bad syntax.");
+        return;
+    }
+    let Some(arena) = inv.arena else { return };
+    let base = zone
+        .arenas
+        .get(arena)
+        .map(|a| a.basename.clone())
+        .unwrap_or_default();
+    let rel = format!("maps/uploads/{base}.lvl");
+    let Some(dest) = super::filetrans::resolve(zone, inv.sender, &rel) else {
+        message(zone, inv.sender, "Invalid server path.");
+        return;
+    };
+    let who_name = sender_name(zone, inv);
+    let asked = super::filetrans::request_file(
+        zone,
+        inv.sender,
+        &client_file,
+        Box::new(
+            move |z: &mut Zone, who: PlayerId, file: Option<std::path::PathBuf>| {
+                let Some(file) = file else { return };
+                if let Some(dir) = dest.parent() {
+                    let _ = std::fs::create_dir_all(dir);
+                }
+                if let Err(e) = std::fs::rename(&file, &dest) {
+                    tracing::warn!(target: "admincmd", "can't move an uploaded map into place: {e}");
+                    let _ = std::fs::remove_file(&file);
+                    let text = format!("Couldn't upload file to '{}'", dest.display());
+                    message(z, who, &text);
+                    return;
+                }
+                let text = format!("File received: {}", dest.display());
+                message(z, who, &text);
+                // ASSS also points the arena at the map it just took
+                let Some(a) = z.players.get(who).and_then(|p| p.arena) else {
+                    return;
+                };
+                let Some(old) = z.arenas.get(a).map(|x| x.cfg.clone()) else {
+                    return;
+                };
+                let unix = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |d| d.as_secs());
+                let info = format!("set by {who_name} with ?putmap at {unix}");
+                let new = z.cfg.set(&old, "General", "Map", &rel, Some(&info), true);
+                super::arenaman::config_updated(z, &old, &new);
+                let text = format!("Set General:Map={rel}");
+                message(z, who, &text);
+            },
+        ),
+    );
+    if !asked {
+        message(zone, inv.sender, "Error sending file.");
+    }
+}
+
+fn c_makearena(zone: &mut Zone, inv: &Invocation<'_>) {
+    if !need_zone_dir(zone, inv.sender) {
+        return;
+    }
+    let name = inv.params.trim().to_owned();
+    // the same rule arenaman uses, checked rather than cleaned: a name the
+    // server would have to change isn't the name they asked for
+    let legal = !name.is_empty()
+        && name.len() <= 15
+        && name.chars().enumerate().all(|(i, c)| {
+            (c == '#' && i == 0) || (c.is_ascii_alphanumeric() && !c.is_ascii_uppercase())
+        });
+    if !legal {
+        message(zone, inv.sender, "Illegal arena name.");
+        return;
+    }
+    let Some(dir) = super::filetrans::resolve(zone, inv.sender, &format!("arenas/{name}")) else {
+        message(zone, inv.sender, "Invalid path.");
+        return;
+    };
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        let text = format!("Error creating directory '{}': {e}", dir.display());
+        message(zone, inv.sender, &text);
+        return;
+    }
+    let conf = dir.join("arena.conf");
+    if let Err(e) = std::fs::write(&conf, "\n#include arenas/(default)/arena.conf\n") {
+        let text = format!("Error creating file '{}': {e}", conf.display());
+        message(zone, inv.sender, &text);
+        return;
+    }
+    let text = format!("Successfully created {name}.");
+    message(zone, inv.sender, &text);
+}
+
 const COMMANDS: &[(&str, Handler, &str)] = &[
     (
         "a",
@@ -1346,6 +1651,51 @@ const COMMANDS: &[(&str, Handler, &str)] = &[
         "reloadconf",
         c_reloadconf,
         "Args: none\nRe-reads changed config files.",
+    ),
+    (
+        "cd",
+        c_cd,
+        "Targets: none\nArgs: [<server directory>]\nChanges your working directory for file transfers. The path is taken from the zone directory, not from where you are now; with no argument it goes back there.",
+    ),
+    (
+        "pwd",
+        c_pwd,
+        "Targets: none\nArgs: none\nShows your working directory for file transfers; \".\" is the zone directory.",
+    ),
+    (
+        "delfile",
+        c_delfile,
+        "Targets: none\nArgs: <server path>\nDeletes a file on the server, relative to your working directory.",
+    ),
+    (
+        "renfile",
+        c_renfile,
+        "Targets: none\nArgs: <old name>:<new name>\nRenames a file on the server, both paths relative to your working directory.",
+    ),
+    (
+        "getfile",
+        c_getfile,
+        "Targets: none\nArgs: <server path>\nSends a file from the server to your client, relative to your working directory.",
+    ),
+    (
+        "putfile",
+        c_putfile,
+        "Targets: none\nArgs: <your path>[:<server path>]\nUploads a file from your client to the server. Without a server path it keeps its own name and lands in your working directory. The colon separates the two names, so your own path can't contain one.",
+    ),
+    (
+        "putzip",
+        c_putzip,
+        "Targets: none\nArgs: <your path>[:<server directory>]\nUploads a zip from your client and unpacks it into a directory on the server (your working directory by default). The paths inside the zip are ignored: every file lands in that one directory. The colon separates the two names, so your own path can't contain one.",
+    ),
+    (
+        "putmap",
+        c_putmap,
+        "Targets: none\nArgs: <your path>\nUploads a map from your client to maps/uploads/<arena>.lvl and points this arena's General:Map at it.",
+    ),
+    (
+        "makearena",
+        c_makearena,
+        "Targets: none\nArgs: <arena name>\nCreates arenas/<name>/arena.conf, including the default arena's config.",
     ),
     ("zone", c_zone, "Args: none\nShows the name of this zone."),
     (

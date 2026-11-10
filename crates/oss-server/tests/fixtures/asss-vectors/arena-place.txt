@@ -1,0 +1,97 @@
+# Public arena placement from ASSS 1.4.4 src/core/ap_multipub.c (compiled
+# unmodified). This is what decides which arena a player who asked for no
+# particular arena ends up in.
+#   # <label>: General:PublicArenas = [<raw setting>]  starts a scenario
+#   pubnames <n> [<name>]...   the list load_pubnames() parsed, in order
+#   arena <name> <total> <playing> <DesiredPlaying>   an arena that EXISTS, with its
+#          population; a DesiredPlaying of -1 means the key is unset in that arena
+#   place <connectas|-> <return> [<name>] <spawnx> <spawny>   the result of Place()
+# Rules these records pin:
+#   The list is split on spaces, commas, colons and semicolons, into a 20-byte
+#     buffer, so a name longer than 19 characters is TRUNCATED at load time.
+#   Place walks passes 1..9, and within each pass walks the names in list order,
+#     building '<name><pass>' into another 20-byte buffer -- so the pass digit is
+#     what gets lost when a name is near the limit, and two long names can collide.
+#   An arena that EXISTS and whose playing count is below ITS OWN
+#     General:DesiredPlaying (default 15) wins immediately. An arena that does not
+#     exist yet is only remembered as a backup, and only the FIRST such name is
+#     kept. So an existing half-full arena always beats creating a new one, even
+#     when the new one comes earlier in the list.
+#   DesiredPlaying is read from the arena being considered, not from global, so two
+#     arenas in the same list can have different thresholds.
+#   The 'playing' count is what is compared, not the total, so spectators never keep
+#     a player out of an arena.
+#   A player who connected through a Listen:ConnectAs port is tried against that one
+#     name only, and never against the public list.
+#   Place returns TRUE (1) on the immediate win. Otherwise it returns '*retname',
+#     the FIRST CHARACTER of the backup name as an int -- not 1, and not a count. It
+#     is 0 only when no backup was found at all, which is the real failure case.
+#     Callers that test it as a boolean happen to work; one that compares it to 1
+#     does not.
+#   Place never writes the spawn coordinates, so they keep whatever the caller had
+#     in them (-1 here).
+# no arenas exist: the first name of pass 1 is the backup: General:PublicArenas = [turf dueling]
+pubnames 2 [turf] [dueling]
+place - 116 [turf1] -1 -1
+# an existing arena with room beats creating a new one: General:PublicArenas = [turf dueling]
+pubnames 2 [turf] [dueling]
+arena turf1 20 10 15
+place - 1 [turf1] -1 -1
+# ...even when the arena with room is later in the list: General:PublicArenas = [turf dueling]
+pubnames 2 [turf] [dueling]
+arena dueling1 20 3 15
+place - 1 [dueling1] -1 -1
+# a full arena spills into the next pass: General:PublicArenas = [turf]
+pubnames 1 [turf]
+arena turf1 40 20 15
+place - 116 [turf2] -1 -1
+# two full passes, third has room: General:PublicArenas = [turf]
+pubnames 1 [turf]
+arena turf1 40 20 15
+arena turf2 40 16 15
+arena turf3 40 14 15
+place - 1 [turf3] -1 -1
+# every existing pass full: the first NON-EXISTENT name is the backup: General:PublicArenas = [turf]
+pubnames 1 [turf]
+arena turf1 40 20 15
+arena turf2 40 20 15
+place - 116 [turf3] -1 -1
+# DesiredPlaying is read from each arena, not from global: General:PublicArenas = [turf]
+pubnames 1 [turf]
+arena turf1 40 20 15
+arena turf2 40 20 40
+place - 1 [turf2] -1 -1
+# an unset DesiredPlaying defaults to 15: General:PublicArenas = [turf]
+pubnames 1 [turf]
+arena turf1 40 20 -1
+arena turf2 40 14 -1
+place - 1 [turf2] -1 -1
+# exactly at DesiredPlaying does NOT count as room: General:PublicArenas = [turf]
+pubnames 1 [turf]
+arena turf1 40 15 15
+arena turf2 40 14 15
+place - 1 [turf2] -1 -1
+# a packed arena of spectators still has room: General:PublicArenas = [turf]
+pubnames 1 [turf]
+arena turf1 200 2 15
+place - 1 [turf1] -1 -1
+# a name longer than the 20-byte buffer is truncated at load: General:PublicArenas = [averyveryverylongarenaname short]
+pubnames 2 [averyveryverylongar] [short]
+arena short1 40 2 15
+place - 1 [short1] -1 -1
+# truncation can make two different names collide: General:PublicArenas = [aaaaaaaaaaaaaaaaaaaaX aaaaaaaaaaaaaaaaaaaaY]
+pubnames 2 [aaaaaaaaaaaaaaaaaaa] [aaaaaaaaaaaaaaaaaaa]
+place - 97 [aaaaaaaaaaaaaaaaaaa] -1 -1
+# a ConnectAs player is tried against that one name only: General:PublicArenas = [turf dueling]
+pubnames 2 [turf] [dueling]
+arena turf1 40 2 15
+arena vs1 40 2 15
+place vs 1 [vs1] -1 -1
+# a ConnectAs name that does not exist yet: General:PublicArenas = [turf]
+pubnames 1 [turf]
+arena turf1 40 2 15
+place private 112 [private1] -1 -1
+# an empty PublicArenas list places nobody: General:PublicArenas = []
+pubnames 0
+arena turf1 40 2 15
+place - 0 [] -1 -1

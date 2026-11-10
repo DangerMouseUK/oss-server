@@ -233,6 +233,17 @@ pub fn spawn_ball(zone: &mut Zone, a: ArenaId, bid: usize) {
 }
 
 /// ASSS `SetBallCount`.
+/// Sets which freq a ball is credited to. The goal scorer's own freq is
+/// usually what matters, but `points_goal` reads the ball's freq to spot a
+/// goal scored into one's own net, so a replay has to be able to set it.
+pub fn set_ball_freq(zone: &mut Zone, a: ArenaId, ball: usize, freq: i16) {
+    if let Some(d) = data(zone, a)
+        && let Some(b) = d.balls.get_mut(ball)
+    {
+        b.freq = freq;
+    }
+}
+
 pub fn set_ball_count(zone: &mut Zone, a: ArenaId, count: usize) {
     if count > MAX_BALLS {
         return;

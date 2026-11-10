@@ -61,6 +61,10 @@ pub mod stat {
     pub const BALL_CARRIES: u16 = 300;
     /// Goals scored.
     pub const BALL_GOALS: u16 = 302;
+    /// Ball games won.
+    pub const BALL_GAMES_WON: u16 = 303;
+    /// Ball games lost.
+    pub const BALL_GAMES_LOST: u16 = 304;
 }
 
 /// Statistics access (ASSS `Istats`).

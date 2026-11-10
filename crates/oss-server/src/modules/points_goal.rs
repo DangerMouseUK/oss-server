@@ -28,9 +28,6 @@ pub const MAX_FREQ: usize = 8;
 const SOUND_DING: u8 = 103;
 /// ASSS `SOUND_GOAL`.
 const SOUND_GOAL: u8 = 104;
-/// Ball games won / lost (ASSS stat codes).
-const BALL_GAMES_WON: u16 = 303;
-const BALL_GAMES_LOST: u16 = 304;
 
 /// Goal configuration (`Soccer:Mode`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
@@ -78,6 +75,8 @@ struct Scores {
     capture: i32,
     reward: i32,
     win_by: i32,
+    /// How many times this arena's game has been ended here.
+    end_games: u32,
     score: [i32; MAX_FREQ],
 }
 
@@ -137,7 +136,9 @@ fn score_msg(zone: &mut Zone, a: ArenaId, to: Option<PlayerId>) {
 }
 
 /// ASSS `RewardPoints`: gives the winners their reward; returns it.
-fn reward_points(zone: &mut Zone, a: ArenaId, win_freq: i16) -> i32 {
+/// ASSS `RewardPoints`: pays the winning freq and returns what each of its
+/// players got.
+pub fn reward_points(zone: &mut Zone, a: ArenaId, win_freq: i16) -> i32 {
     let reward = scores(zone, a).map_or(0, |s| s.reward);
     let (mut players, mut freqs) = (0i64, [0u32; 4]);
     let mut winners = Vec::new();
@@ -161,9 +162,9 @@ fn reward_points(zone: &mut Zone, a: ArenaId, win_freq: i16) -> i32 {
                 zone,
                 *pid,
                 if *won {
-                    BALL_GAMES_WON
+                    stat::BALL_GAMES_WON
                 } else {
-                    BALL_GAMES_LOST
+                    stat::BALL_GAMES_LOST
                 },
                 1,
             );
@@ -197,7 +198,18 @@ fn game_over(zone: &mut Zone, a: ArenaId, freq: usize, reset_to: i32) {
     super::balls::end_game(zone, a);
     if let Some(s) = scores(zone, a) {
         s.score = [reset_to; MAX_FREQ];
+        s.end_games += 1;
     }
+}
+
+/// The arena's eight per-freq scores.
+pub fn score(zone: &mut Zone, a: ArenaId) -> Option<[i32; MAX_FREQ]> {
+    scores(zone, a).map(|s| s.score)
+}
+
+/// How many soccer games this arena has ended.
+pub fn end_games(zone: &mut Zone, a: ArenaId) -> u32 {
+    scores(zone, a).map_or(0, |s| s.end_games)
 }
 
 /// ASSS `CheckGameOver`.
@@ -423,6 +435,7 @@ impl Module for PointsGoalModule {
             reward: cfg.get_int("Soccer", "Reward", 0),
             win_by: cfg.get_int("Soccer", "WinBy", 0),
             score: [steal; MAX_FREQ],
+            end_games: 0,
         };
         if let Some(a) = zone.arenas.get_mut(arena) {
             a.ext.insert(s);

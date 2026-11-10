@@ -79,13 +79,19 @@ fn print_costs(zone: &mut Zone, p: PlayerId, arena: ArenaId) {
 fn c_buy(zone: &mut Zone, inv: &Invocation<'_>) {
     let Some(arena) = inv.arena else { return };
     let me = inv.sender;
-    let params = inv.params.trim();
+    // Not trimmed: ASSS tests `!*params`, so an argument of nothing but
+    // whitespace is not "no argument" -- it goes to the item lookup and is
+    // refused there as an unknown item.
+    let params = inv.params;
     if params.is_empty() {
         print_costs(zone, me, arena);
         return;
     }
-    // ASSS matches any item word that appears in the arguments, last one
-    // wins, so "?buy super shield" buys the shield
+    // ASSS runs strstr over the table in table order with no break, so the
+    // LAST entry whose string occurs anywhere in the arguments wins -- not
+    // the first, and not the best. "thorax" buys Thor, "exit" buys XRadar,
+    // "report" buys Portal, and the test is case-sensitive, so "Bomb" buys
+    // nothing at all.
     let item = ITEMS.iter().rfind(|(word, ..)| params.contains(word));
     let Some(&(_, setting, prize)) = item else {
         message(zone, me, "Invalid item specified for purchase.");

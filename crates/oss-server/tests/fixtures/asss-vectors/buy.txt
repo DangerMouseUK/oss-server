@@ -1,0 +1,249 @@
+# ?buy from ASSS 1.4.4 src/core/buy.c (compiled unmodified).
+# '# <label>:' sets the arena's [Cost] section; every Cost key not listed is 0.
+#   try [<params>] <ship|spec> <in safe zone 0/1> <STAT_KILL_POINTS> <STAT_FLAG_POINTS>
+#   prize <type> <count>   what Igame::GivePrize was called with, or '- -' for no call
+#   stat <kill points> <flag points>   the player's stats afterwards
+#   chat <text>            each chat line, in order
+# Rules these records pin:
+#   Item lookup is strstr over the table IN TABLE ORDER with no break, so the LAST
+#     entry whose string occurs anywhere in the parameters wins, not the best or the
+#     first match. 'thorax' buys Thor (thor is later in the table than x), 'exit'
+#     buys XRadar, 'report' buys Portal, 'superbrick' buys Brick, 'antithrust' buys
+#     AntiWarp. The test is case-SENSITIVE, so 'Bomb' matches nothing at all.
+#   The checks run in this order, and each one returns: unknown item, then cost == 0,
+#     then spectator, then safe zone, then affordability. A spectator naming an item
+#     that is not for sale is told the item is not for sale, not that they are in spec.
+#   A cost of 0 means 'not for sale' -- there is no free item.
+#   Affordability is STAT_KILL_POINTS + STAT_FLAG_POINTS at INTERVAL_RESET, and the
+#     test is 'pts < cost', so paying exactly all your points succeeds.
+#   The price is deducted from FLAG points alone, to leave the kill average intact.
+#     Flag points therefore go negative whenever the kill points carried the purchase.
+#   The prize type is the VIE prize number from the table, not the item's index, and
+#     the count is always 1.
+#   ?buy with no parameters lists only items whose cost is non-zero, in table order,
+#     formatted 'buy: %-9s %6d'; with none on sale it says so instead.
+# The item table, in the order buy.c declares it (index, parameter string, setting,
+# prize type):
+item 0 x XRadar 6
+item 1 recharge Recharge 1
+item 2 energy Energy 2
+item 3 rot Rotation 3
+item 4 stealth Stealth 4
+item 5 cloak Cloak 5
+item 6 gun Gun 8
+item 7 bomb Bomb 9
+item 8 bounce Bounce 10
+item 9 thrust Thrust 11
+item 10 speed Speed 12
+item 11 multi MultiFire 15
+item 12 prox Prox 16
+item 13 super Super 17
+item 14 shield Shield 18
+item 15 shrap Shrap 19
+item 16 anti AntiWarp 20
+item 17 rep Repel 21
+item 18 burst Burst 22
+item 19 decoy Decoy 23
+item 20 thor Thor 24
+item 21 brick Brick 26
+item 22 rocket Rocket 27
+item 23 port Portal 28
+# nothing on sale: PurchaseAnytime 0
+try [] ship 1 1000 1000
+prize - -
+stat 1000 1000
+chat There are no items available to purchase in this arena.
+try [thor] ship 1 1000 1000
+prize - -
+stat 1000 1000
+chat That item isn't available for purchase.
+# a few items on sale: PurchaseAnytime 0 XRadar=100 Rotation=250 Thor=5000 Portal=75
+try [] ship 1 1000 1000
+prize - -
+stat 1000 1000
+chat buy: XRadar       100
+chat buy: Rotation     250
+chat buy: Thor        5000
+chat buy: Portal        75
+try [] spec 0 0 0
+prize - -
+stat 0 0
+chat buy: XRadar       100
+chat buy: Rotation     250
+chat buy: Thor        5000
+chat buy: Portal        75
+# a long price list: PurchaseAnytime 0 XRadar=100 Recharge=1 Rotation=250 Prox=999999 Super=12 Repel=40 Burst=60 Thor=5000 Brick=30 Rocket=45 Portal=75 AntiWarp=800 Thrust=20 Speed=25 MultiFire=35 Shrap=15
+try [] ship 1 1000 1000
+prize - -
+stat 1000 1000
+chat buy: XRadar       100
+chat buy: Recharge       1
+chat buy: Rotation     250
+chat buy: Thrust        20
+chat buy: Speed         25
+chat buy: MultiFire     35
+chat buy: Prox      999999
+chat buy: Super         12
+chat buy: Shrap         15
+chat buy: AntiWarp     800
+chat buy: Repel         40
+chat buy: Burst         60
+chat buy: Thor        5000
+chat buy: Brick         30
+chat buy: Rocket        45
+chat buy: Portal        75
+# name matching, everything affordable: PurchaseAnytime 1 XRadar=100 Recharge=1 Rotation=250 Prox=999999 Super=12 Repel=40 Burst=60 Thor=5000 Brick=30 Rocket=45 Portal=75 AntiWarp=800 Thrust=20 Speed=25 MultiFire=35 Shrap=15
+try [x] ship 1 1000000 0
+prize 6 1
+stat 1000000 -100
+chat Bought XRadar.
+try [exit] ship 1 1000000 0
+prize 6 1
+stat 1000000 -100
+chat Bought XRadar.
+try [prox] ship 1 1000000 0
+prize 16 1
+stat 1000000 -999999
+chat Bought Prox.
+try [thorax] ship 1 1000000 0
+prize 24 1
+stat 1000000 -5000
+chat Bought Thor.
+try [superbrick] ship 1 1000000 0
+prize 26 1
+stat 1000000 -30
+chat Bought Brick.
+try [rocket] ship 1 1000000 0
+prize 27 1
+stat 1000000 -45
+chat Bought Rocket.
+try [port] ship 1 1000000 0
+prize 28 1
+stat 1000000 -75
+chat Bought Portal.
+try [report] ship 1 1000000 0
+prize 28 1
+stat 1000000 -75
+chat Bought Portal.
+try [rep] ship 1 1000000 0
+prize 21 1
+stat 1000000 -40
+chat Bought Repel.
+try [burst] ship 1 1000000 0
+prize 22 1
+stat 1000000 -60
+chat Bought Burst.
+try [antithrust] ship 1 1000000 0
+prize 20 1
+stat 1000000 -800
+chat Bought AntiWarp.
+try [shrap] ship 1 1000000 0
+prize 19 1
+stat 1000000 -15
+chat Bought Shrap.
+try [speed] ship 1 1000000 0
+prize 12 1
+stat 1000000 -25
+chat Bought Speed.
+try [xspeed] ship 1 1000000 0
+prize 12 1
+stat 1000000 -25
+chat Bought Speed.
+try [multi] ship 1 1000000 0
+prize 15 1
+stat 1000000 -35
+chat Bought MultiFire.
+try [recharge] ship 1 1000000 0
+prize 1 1
+stat 1000000 -1
+chat Bought Recharge.
+try [super] ship 1 1000000 0
+prize 17 1
+stat 1000000 -12
+chat Bought Super.
+try [brick] ship 1 1000000 0
+prize 26 1
+stat 1000000 -30
+chat Bought Brick.
+try [thor] ship 1 1000000 0
+prize 24 1
+stat 1000000 -5000
+chat Bought Thor.
+try [Bomb] ship 1 1000000 0
+prize - -
+stat 1000000 0
+chat Invalid item specified for purchase.
+try [THOR] ship 1 1000000 0
+prize - -
+stat 1000000 0
+chat Invalid item specified for purchase.
+try [zzz] ship 1 1000000 0
+prize - -
+stat 1000000 0
+chat Invalid item specified for purchase.
+try [  ] ship 1 1000000 0
+prize - -
+stat 1000000 0
+chat Invalid item specified for purchase.
+try [x rocket] ship 1 1000000 0
+prize 27 1
+stat 1000000 -45
+chat Bought Rocket.
+try [rocket x] ship 1 1000000 0
+prize 27 1
+stat 1000000 -45
+chat Bought Rocket.
+# gates: unknown, unavailable, spec, safe zone, affordability: PurchaseAnytime 0 XRadar=100 Rotation=250 Thor=5000 Portal=75
+try [zzz] spec 0 0 0
+prize - -
+stat 0 0
+chat Invalid item specified for purchase.
+try [bomb] spec 0 10000 0
+prize - -
+stat 10000 0
+chat That item isn't available for purchase.
+try [thor] spec 1 10000 0
+prize - -
+stat 10000 0
+chat Spectators cannot purchase items.
+try [thor] ship 0 10000 0
+prize - -
+stat 10000 0
+chat You must be in a safe zone to purchase items.
+try [thor] ship 1 4999 0
+prize - -
+stat 4999 0
+chat You don't have enough points to purchase that item.
+try [thor] ship 1 5000 0
+prize 24 1
+stat 5000 -5000
+chat Bought Thor.
+try [thor] ship 1 2500 2500
+prize 24 1
+stat 2500 -2500
+chat Bought Thor.
+try [thor] ship 1 6000 -1000
+prize 24 1
+stat 6000 -6000
+chat Bought Thor.
+try [thor] ship 1 0 5000
+prize 24 1
+stat 0 0
+chat Bought Thor.
+try [x] ship 1 0 0
+prize - -
+stat 0 0
+chat You don't have enough points to purchase that item.
+try [x] ship 1 100 0
+prize 6 1
+stat 100 -100
+chat Bought XRadar.
+# PurchaseAnytime lifts the safe-zone requirement: PurchaseAnytime 1 XRadar=100 Rotation=250 Thor=5000 Portal=75
+try [thor] ship 0 10000 0
+prize 24 1
+stat 10000 -5000
+chat Bought Thor.
+try [thor] spec 0 10000 0
+prize - -
+stat 10000 0
+chat Spectators cannot purchase items.

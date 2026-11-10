@@ -52,6 +52,16 @@ const NOOP_AFTER: u64 = 18000;
 
 /// Queues a text line for a chat-protocol player, in order with the
 /// translated game packets. Does nothing useful for other players.
+/// Sends one ready-made line to every chat client in `arena` (ASSS
+/// `chatnet->SendToArena`). Game clients see nothing; this is the text
+/// protocol only.
+pub fn send_arena_line(zone: &mut Zone, arena: crate::arena::ArenaId, line: &str) {
+    let to: Vec<PlayerId> = zone.players.in_arena(arena).map(|p| p.id).collect();
+    for p in to {
+        send_line(zone, p, line);
+    }
+}
+
 pub fn send_line(zone: &mut Zone, p: PlayerId, line: &str) {
     let mut b = Vec::with_capacity(line.len() + 1);
     // no game packet starts with 0: it marks a ready-made line

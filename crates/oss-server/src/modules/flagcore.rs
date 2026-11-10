@@ -24,6 +24,7 @@ use crate::module::{Module, ModuleError};
 use crate::net::SendFlags;
 use crate::player::{ClientKind, PlayerId, PlayerStatus};
 use crate::registry::{Event, Owner, Scope};
+use crate::time::Ticks;
 use crate::zone::Zone;
 
 use super::clientset::ClientSettings;
@@ -38,6 +39,11 @@ pub const CARRY_NONE: i32 = 0;
 pub const CARRY_ALL: i32 = 1;
 /// Ticks between turf ownership broadcasts.
 const TURF_UPDATE_DELAY: u64 = 3000;
+/// Ticks after an ownership change before the packet goes out, so a burst
+/// of changes becomes one packet (ASSS re-arms its timer with this delay).
+const TURF_CHANGE_DELAY: u64 = 100;
+/// How often the turf sender looks at whether a packet is due.
+const TURF_TICK: u64 = 10;
 
 /// Where a flag is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -79,6 +85,19 @@ impl Default for FlagInfo {
 }
 
 impl FlagInfo {
+    /// A slot that has been reserved but never set. ASSS's `ensure_space`
+    /// zero-fills, so an untouched flag reads back as freq 0 at (0, 0)
+    /// rather than as the neutral -1 that [`FlagInfo::default`] gives.
+    pub fn blank() -> Self {
+        Self {
+            state: FlagState::None,
+            carrier: None,
+            x: 0,
+            y: 0,
+            freq: 0,
+        }
+    }
+
     /// A flag on the map at `(x, y)` owned by `freq`.
     pub fn on_map(x: i16, y: i16, freq: i16) -> Self {
         Self {
@@ -239,6 +258,8 @@ struct ArenaFlags {
     flags: Vec<FlagInfo>,
     toucher: Option<PlayerId>,
     during_init: bool,
+    /// Tick the next turf ownership packet is due (turf arenas only).
+    next_turf: Ticks,
 }
 
 fn data(zone: &mut Zone, a: ArenaId) -> Option<&mut ArenaFlags> {
@@ -316,7 +337,7 @@ pub fn reserve_flags(zone: &mut Zone, a: ArenaId, count: usize) {
     if let Some(d) = data(zone, a)
         && d.flags.len() < count
     {
-        d.flags.resize(count, FlagInfo::default());
+        d.flags.resize(count, FlagInfo::blank());
     }
 }
 
@@ -340,13 +361,26 @@ pub fn count_freq_flags(zone: &Zone, a: ArenaId, freq: i16) -> usize {
 }
 
 /// ASSS `SetFlags` for one flag: moves flag `fid` to `nfi`, telling clients.
+/// How many flags `player` is carrying (ASSS `CountPlayerFlags`).
+pub fn count_player_flags(zone: &Zone, a: ArenaId, player: PlayerId) -> usize {
+    if !active(zone, a) {
+        return 0;
+    }
+    data_ref(zone, a).map_or(0, |d| {
+        d.flags
+            .iter()
+            .filter(|f| f.state == FlagState::Carried && f.carrier == Some(player))
+            .count()
+    })
+}
+
 pub fn set_flag(zone: &mut Zone, a: ArenaId, fid: usize, mut nfi: FlagInfo) {
     if fid >= MAX_FLAGS || !active(zone, a) {
         return;
     }
     let Some(d) = data(zone, a) else { return };
     if d.flags.len() <= fid {
-        d.flags.resize(fid + 1, FlagInfo::default());
+        d.flags.resize(fid + 1, FlagInfo::blank());
     }
     let ofi = d.flags[fid];
     let (mode, toucher, during_init) = (d.carry_mode.unwrap_or(-1), d.toucher, d.during_init);
@@ -370,7 +404,15 @@ pub fn set_flag(zone: &mut Zone, a: ArenaId, fid: usize, mut nfi: FlagInfo) {
                 },
             );
         } else if !during_init {
-            send_turf(zone, a);
+            // Not sent here. ASSS clears its turf timer and sets it again
+            // for one second out, so a burst of ownership changes coalesces
+            // into a single ownership packet rather than one per flag -- on
+            // a busy turf zone that is the difference between one packet
+            // and one per tagged flag.
+            let due = Ticks(zone.now().0 + TURF_CHANGE_DELAY);
+            if let Some(d) = data(zone, a) {
+                d.next_turf = due;
+            }
         }
         zone.fire(&FlagOnMap {
             arena: a,
@@ -413,7 +455,10 @@ pub fn set_flag(zone: &mut Zone, a: ArenaId, fid: usize, mut nfi: FlagInfo) {
             p.flags_carried = 0;
         }
         let Some(d) = data(zone, a) else { return };
-        d.flags[fid] = FlagInfo::default();
+        // state, carrier and freq only: ASSS leaves x and y where they were
+        d.flags[fid].state = FlagState::None;
+        d.flags[fid].carrier = None;
+        d.flags[fid].freq = -1;
         let mine: Vec<usize> = d
             .flags
             .iter()
@@ -555,12 +600,23 @@ pub fn flag_reset(zone: &mut Zone, a: ArenaId, freq: i16, points: i32) {
             d.flags.iter_mut().for_each(|f| f.freq = -1);
         }
         send_turf(zone, a);
+        // Game clients learn this from the ownership packet above; chat
+        // clients have no packet to read, so they are told in words. The
+        // carry branch below needs no equivalent because chatnet builds
+        // its line from the victory packet it already sees.
+        super::chatnet::send_arena_line(zone, a, "MSG:ARENA:Turf game reset.");
         tracing::info!(target: "flagcore", arena = a.0, "turf game reset");
     } else {
         let carriers: Vec<PlayerId> = data(zone, a)
             .map(|d| {
                 let c = d.flags.iter().filter_map(|f| f.carrier).collect();
-                d.flags.iter_mut().for_each(|f| *f = FlagInfo::default());
+                // state, carrier and freq only: ASSS leaves x and y alone,
+                // so a flag that was on the map still remembers where
+                for f in &mut d.flags {
+                    f.state = FlagState::None;
+                    f.carrier = None;
+                    f.freq = -1;
+                }
                 c
             })
             .unwrap_or_default();
@@ -817,11 +873,26 @@ impl Module for FlagCoreModule {
                             }
                             if m == CARRY_NONE {
                                 let a = ev.arena;
-                                z.set_timer(me, TURF_UPDATE_DELAY, TURF_UPDATE_DELAY, move |z| {
+                                let first = Ticks(z.now().0 + TURF_UPDATE_DELAY);
+                                if let Some(d) = data(z, a) {
+                                    d.next_turf = first;
+                                }
+                                // a due time rather than a periodic send, so
+                                // an ownership change can pull the next
+                                // packet forward without re-registering
+                                z.set_timer(me, TURF_TICK, TURF_TICK, move |z| {
                                     if z.arenas.get(a).is_none() {
                                         return false;
                                     }
-                                    send_turf(z, a);
+                                    let now = z.now();
+                                    let due = data_ref(z, a).map(|d| d.next_turf);
+                                    if due.is_some_and(|t| now.0 >= t.0) {
+                                        send_turf(z, a);
+                                        let next = Ticks(now.0 + TURF_UPDATE_DELAY);
+                                        if let Some(d) = data(z, a) {
+                                            d.next_turf = next;
+                                        }
+                                    }
                                     true
                                 });
                             }

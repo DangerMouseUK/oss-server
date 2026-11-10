@@ -4,6 +4,15 @@
 //!
 //! Commands aimed at a target act on that player, everyone on that team, or
 //! (typed in public) everyone in the arena, as in ASSS.
+//!
+//! **Three of ASSS's commands are deliberately absent.** `?laghist` is a
+//! stub in ASSS 1.4.4 (`Claghist` is an empty function with a FIXME), so
+//! there is nothing to port and a command that did nothing would only
+//! mislead. `?enablecmdgroup` and `?disablecmdgroup` load and unload the
+//! command tables inside ASSS's own `playercmd.c`, which exist because every
+//! one of those commands lives in one module there; here each group of
+//! commands belongs to the module that implements it, so `?insmod` and
+//! `?rmmod` already do that job.
 
 use oss_proto::Packet;
 use oss_proto::s2c::{ArenaEntry, ArenaList, PrizeReceive, ShipReset, WarpTo};

@@ -1168,3 +1168,103 @@ fn screen_resolution_limit() {
     );
     assert_eq!(h.zone.players.get(alice).map(|p| p.ship.0), Some(8));
 }
+
+#[test]
+fn fm_lockspec_holds_everyone_in_spec() {
+    let conf = ARENA_CONF.replace("AttachModules = ", "AttachModules = fm_lockspec");
+    let mut h = H::with_conf(&conf, "[Chat]\nMessageReliable = 1\n");
+    let (alice, _) = h.login("alice", "x");
+    h.enter(alice);
+    assert_eq!(h.zone.players.get(alice).map(|p| p.ship.0), Some(8));
+    // no ship, and no freq either
+    h.send(alice, &[c2s::kind::SET_SHIP, 0]);
+    assert_eq!(
+        h.zone.players.get(alice).map(|p| (p.ship.0, p.freq)),
+        Some((8, 8025))
+    );
+    let mut buf = Vec::new();
+    c2s::SetFreq { freq: 3 }.encode(&mut buf);
+    h.send(alice, &buf);
+    assert_eq!(
+        h.zone.players.get(alice).map(|p| (p.ship.0, p.freq)),
+        Some((8, 8025))
+    );
+}
+
+#[test]
+fn arenaperm_keeps_players_out_of_restricted_arenas() {
+    // "duel" needs a capability only bob's group has; the public arena is
+    // open to everyone
+    let passwd = format!(
+        "[General]\nAllowUnknown = yes\n[Users]\nbob = {}\n",
+        hash_password("Bob", "secret")
+    );
+    let src = MemSource::new([
+        (
+            "conf/global.conf",
+            "[Chat]\nMessageReliable = 1\n".to_owned(),
+        ),
+        ("conf/passwd.conf", passwd),
+        (
+            "conf/groupdef.conf",
+            "[default]\ncmd_go = 1\n[mod]\ncmd_go = 1\nduelist\n".to_owned(),
+        ),
+        ("conf/staff.conf", "[(global)]\nbob = mod\n".to_owned()),
+        ("arenas/(default)/arena.conf", ARENA_CONF.to_owned()),
+        (
+            "arenas/duel/arena.conf",
+            format!("{ARENA_CONF}[General]\nNeedCap = duelist\n"),
+        ),
+    ]);
+    let mut zone = ServerBuilder::with_source(src).build_zone().expect("zone");
+    zone.res.insert(oss_server::prng::Prng::new(1));
+    // not in the default set: a zone asks for it in modules.conf
+    oss_server::module::insert(&mut zone, "arenaperm").expect("load arenaperm");
+    let mut h = H {
+        zone,
+        lo: Loopback::default(),
+        t: 0,
+    };
+    assert!(h.zone.modules.is_loaded("arenaperm"));
+    let (alice, _) = h.login("alice", "x");
+    let (bob, _) = h.login("bob", "secret");
+    h.enter(alice);
+    h.enter(bob);
+    h.take(alice);
+
+    let go = |h: &mut H, p: PlayerId, arena: &str| {
+        let mut buf = Vec::new();
+        GoArena {
+            ship: 8,
+            x_res: 1024,
+            y_res: 768,
+            arena_type: -3,
+            arena: FixedStr::new(arena.as_bytes()),
+            ..Default::default()
+        }
+        .encode(&mut buf);
+        h.send(p, &buf);
+        h.tick(20);
+    };
+    // bob has the capability
+    go(&mut h, bob, "duel");
+    let name = |h: &H, p: PlayerId| {
+        h.zone
+            .players
+            .get(p)
+            .and_then(|x| x.arena)
+            .and_then(|a| h.zone.arenas.get(a))
+            .map(|a| a.name.clone())
+    };
+    assert_eq!(name(&h, bob).as_deref(), Some("duel"));
+
+    // alice does not: she is told and ends up somewhere else
+    go(&mut h, alice, "duel");
+    let out = texts(&h.take(alice));
+    assert!(
+        out.iter()
+            .any(|t| t == "You don't have permission to enter arena duel!"),
+        "{out:?}"
+    );
+    assert_ne!(name(&h, alice).as_deref(), Some("duel"));
+}

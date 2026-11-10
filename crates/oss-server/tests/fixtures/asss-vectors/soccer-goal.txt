@@ -1,0 +1,532 @@
+# Soccer scoring from ASSS 1.4.4 src/scoring/points_goal.c (compiled unmodified).
+#   # <label>   starts a scenario; the 'settings' line after it is what MyAA loaded
+#     from [Soccer] at AA_CREATE (mode 0 ALL, 1 LEFTRIGHT, 2 TOPBOTTOM,
+#     3 CORNERS_3_1, 4 CORNERS_1_3, 5 SIDES_3_1, 6 SIDES_1_3)
+#   seat <triples>   freq digit, 'w' in a ship or 's' spec, then '.' normal,
+#     'z' in a safe zone, 'e' not yet S_PLAYING
+#   goal <player> <ball> <ball's owning freq> <x> <y>   ran the CB_GOAL handler
+#   reward <winfreq> <points>   ran RewardPoints() on its own and what it returned
+#   award <player>:<points>...  the change in each player's STAT_FLAG_POINTS
+#   ballstats <player>:<won>/<lost>...  STAT_BALL_GAMES_WON / _LOST so far
+#   score <tag> <freq 0..7> endgames=<n>   the eight per-freq scores, and how many
+#     times Iballs::EndGame has been called in this scenario
+#   chat <player|arena> <sound|-> <text>   every message emitted during the step
+#
+# Rules these records pin:
+#
+# 1. THE FOUR-BUCKET TEAM COUNT. RewardPoints counts teams with freq[p_freq % 4] --
+#    four buckets, not a set of distinct freqs. Freqs 0 and 4 land in the same
+#    bucket, so a game between freq 0 and freq 4 counts as ONE team and fails a
+#    Soccer:MinTeams of 2, while a game between freq 0 and freq 1 passes. Freqs 0,
+#    4, 8 and 12 all count as one team between them. Driven below both ways.
+# 2. THE REWARD IS NOT THE WINNERS' COUNT. points = players * players * Reward / 1000
+#    in int arithmetic, where 'players' is EVERY non-spec player in the arena who is
+#    S_PLAYING -- losers included, and safe-zone winners included. A one-player freq
+#    in a busy arena is paid exactly what a full one is. The division truncates, so
+#    small arenas score 0 for a long time: with Reward 1000 the formula is just
+#    players squared, but with Reward 1 it takes 32 players to score a single point.
+# 3. A NEGATIVE OR ZERO Soccer:Reward IS A FLAT RATE. 'if (reward < 1) points =
+#    reward * -1', so Reward 0 pays 0 and Reward -50 pays a flat 50 to every winner
+#    regardless of how many people are playing.
+# 4. THE MINIMUMS ZERO THE PAYOUT BUT NOT THE SIDE EFFECTS. When MinPlayers or
+#    MinTeams fails, points is set to 0 and nobody is awarded -- but every player's
+#    STAT_BALL_GAMES_WON / _LOST has ALREADY been incremented by then, and the score
+#    change has already happened in MyGoal. Only the points are withheld.
+# 5. A SAFE-ZONE WINNER IS SKIPPED FOR POINTS BUT STILL COUNTS. They are left out of
+#    the award set, yet they are counted in 'players' (so they inflate everyone
+#    else's reward) and they still get STAT_BALL_GAMES_WON.
+# 6. 'Reward:%d' IS ONLY SHOWN WHEN Soccer:Reward IS NON-ZERO. With Reward 0 the
+#    goal message has no reward clause at all -- and the 'Enemy goal had no points
+#    to give' notice for a null goal is inside that same else branch, so a zone with
+#    a reward set NEVER shows it.
+# 7. LEFTRIGHT CREDITS THE OTHER HALF. 'freq = x < 512 ? 1 : 0', so a ball entering
+#    the LEFT half scores for freq 1 (odds). The opposite freq is found with
+#    '(~freq)+2', which is 1 for 0 and 0 for 1.
+# 8. CORNERS_3_1 WITH CAPTURE POINTS CAN BE A NULL GOAL. If the defending quadrant's
+#    score is already 0 there is nothing to take, so no score moves at all.
+# 9. Soccer:WinBy 0 MEANS THE ABSOLUTE-SCORING GAME NEVER ENDS. CheckGameOver's
+#    absolute branch counts freqs whose score+WinBy <= the leader's score and needs
+#    exactly MAXFREQ-1 (7) of them. With WinBy 0 the leader satisfies its own test,
+#    making 8, so the game-over branch is unreachable. It takes WinBy >= 1, and the
+#    other seven freqs all at least WinBy behind. Driven below both ways.
+#10. THE SCORE ARRAY IS 8 LONG BUT ONLY 4 FREQS ARE EVER PLAYED. Capture points are
+#    handed to all 8 at AA_CREATE, so freqs 4..7 hold points nobody can take, and
+#    the 'all other freqs are empty' win condition for modes 3..6 only looks at the
+#    first four.
+# MinTeams 2: freqs 0 and 1 are two teams
+settings mode=0 cpts=1 stealpts=1 reward=1000 winby=0 minplayers=0 minteams=2 freqtypes=0
+score initial 1 1 1 1 1 1 1 1 endgames=0
+seat 0w.0w.1w.1w.
+reward 0 16
+award 0:16 1:16 2:0 3:0
+# MinTeams 2: freqs 0 and 4 are ONE team, because 4 %% 4 == 0
+settings mode=0 cpts=1 stealpts=1 reward=1000 winby=0 minplayers=0 minteams=2 freqtypes=0
+score initial 1 1 1 1 1 1 1 1 endgames=0
+seat 0w.0w.4w.4w.
+reward 0 0
+award 0:0 1:0 2:0 3:0
+# MinTeams 2: freqs 1 and 5 are also one team
+settings mode=0 cpts=1 stealpts=1 reward=1000 winby=0 minplayers=0 minteams=2 freqtypes=0
+score initial 1 1 1 1 1 1 1 1 endgames=0
+seat 1w.1w.5w.5w.
+reward 1 0
+award 0:0 1:0 2:0 3:0
+# MinTeams 3: freqs 0, 4 and 2 count as two teams
+settings mode=0 cpts=1 stealpts=1 reward=1000 winby=0 minplayers=0 minteams=2 freqtypes=0
+score initial 1 1 1 1 1 1 1 1 endgames=0
+seat 0w.4w.2w.2w.
+reward 0 16
+award 0:16 1:0 2:0 3:0
+# Reward 1000: the payout is the arena's player count squared
+settings mode=0 cpts=1 stealpts=1 reward=1000 winby=0 minplayers=0 minteams=0 freqtypes=0
+score initial 1 1 1 1 1 1 1 1 endgames=0
+seat 0w.1w.
+reward 0 4
+award 0:4 1:0
+seat 0w.0w.0w.1w.
+reward 0 16
+award 0:16 1:16 2:16 3:0
+seat 0w.0w.0w.0w.0w.1w.1w.1w.
+reward 0 64
+award 0:64 1:64 2:64 3:64 4:64 5:0 6:0 7:0
+# Reward 1: it takes 32 players to score a single point
+settings mode=0 cpts=1 stealpts=1 reward=1 winby=0 minplayers=0 minteams=0 freqtypes=0
+score initial 1 1 1 1 1 1 1 1 endgames=0
+seat 0w.1w.
+reward 0 0
+award 0:0 1:0
+seat 0w.0w.0w.0w.0w.1w.1w.1w.
+reward 0 0
+award 0:0 1:0 2:0 3:0 4:0 5:0 6:0 7:0
+# spectators and non-playing entrants are not counted
+settings mode=0 cpts=1 stealpts=1 reward=1000 winby=0 minplayers=0 minteams=0 freqtypes=0
+score initial 1 1 1 1 1 1 1 1 endgames=0
+seat 0w.0s.0we1w.1s.
+reward 0 4
+award 0:4 1:0 2:0 3:0 4:0
+# a one-player freq in a busy arena is paid like a full one
+settings mode=0 cpts=1 stealpts=1 reward=1000 winby=0 minplayers=0 minteams=0 freqtypes=0
+score initial 1 1 1 1 1 1 1 1 endgames=0
+seat 0w.1w.1w.1w.1w.1w.1w.1w.
+reward 0 64
+award 0:64 1:0 2:0 3:0 4:0 5:0 6:0 7:0
+# Soccer:Reward -50 is a flat 50 to every winner
+settings mode=0 cpts=1 stealpts=1 reward=-50 winby=0 minplayers=0 minteams=0 freqtypes=0
+score initial 1 1 1 1 1 1 1 1 endgames=0
+seat 0w.0w.1w.
+reward 0 50
+award 0:50 1:50 2:0
+seat 0w.0w.0w.0w.0w.0w.1w.
+reward 0 50
+award 0:50 1:50 2:50 3:50 4:50 5:50 6:0
+# Soccer:Reward 0 pays nothing and prints no reward clause
+settings mode=0 cpts=1 stealpts=1 reward=0 winby=0 minplayers=0 minteams=0 freqtypes=0
+score initial 1 1 1 1 1 1 1 1 endgames=0
+seat 0w.0w.1w.
+reward 0 0
+award 0:0 1:0 2:0
+goal 0 0 0 100 100
+award 0:0 1:0 2:0
+ballstats 0:1/0 1:1/0 2:0/1
+score after 1 1 1 1 1 1 1 1 endgames=0
+chat 0 104 Team Goal! by p0
+chat 1 104 Team Goal! by p0
+chat 2 104 Enemy Goal! by p0
+# MinPlayers 6 with 4 players: the ball stats still move
+settings mode=0 cpts=1 stealpts=1 reward=1000 winby=0 minplayers=6 minteams=0 freqtypes=0
+score initial 1 1 1 1 1 1 1 1 endgames=0
+seat 0w.0w.1w.1w.
+reward 0 0
+award 0:0 1:0 2:0 3:0
+goal 0 0 0 100 100
+award 0:0 1:0 2:0 3:0
+ballstats 0:2/0 1:2/0 2:0/2 3:0/2
+score after 1 1 1 1 1 1 1 1 endgames=0
+chat 0 104 Team Goal! by p0  Reward:0
+chat 1 104 Team Goal! by p0  Reward:0
+chat 2 104 Enemy Goal! by p0  Reward:0
+chat 3 104 Enemy Goal! by p0  Reward:0
+# the same arena with the minimums off
+settings mode=0 cpts=1 stealpts=1 reward=1000 winby=0 minplayers=0 minteams=0 freqtypes=0
+score initial 1 1 1 1 1 1 1 1 endgames=0
+seat 0w.0w.1w.1w.
+reward 0 16
+award 0:16 1:16 2:0 3:0
+# a safe-zone winner is skipped for points but still inflates them
+settings mode=0 cpts=1 stealpts=1 reward=1000 winby=0 minplayers=0 minteams=0 freqtypes=0
+score initial 1 1 1 1 1 1 1 1 endgames=0
+seat 0w.0wz1w.1w.
+reward 0 16
+award 0:16 1:0 2:0 3:0
+# GOAL_LEFTRIGHT with capture points: the left half scores for freq 1
+settings mode=1 cpts=5 stealpts=5 reward=0 winby=0 minplayers=0 minteams=0 freqtypes=0
+score initial 5 5 5 5 5 5 5 5 endgames=0
+seat 0w.0w.1w.1w.
+goal 0 0 0 100 500
+award 0:0 1:0 2:0 3:0
+ballstats 0:0/0 1:0/0 2:0/0 3:0/0
+score after 4 6 5 5 5 5 5 5 endgames=0
+chat 2 104 Team Goal! by p0
+chat 3 104 Team Goal! by p0
+chat 0 104 Enemy Goal! by p0
+chat 1 104 Enemy Goal! by p0
+chat arena - SCORE: Evens:4 Odds:6
+goal 2 0 1 900 500
+award 0:0 1:0 2:0 3:0
+ballstats 0:0/0 1:0/0 2:0/0 3:0/0
+score after 5 5 5 5 5 5 5 5 endgames=0
+chat 0 104 Team Goal! by p2
+chat 1 104 Team Goal! by p2
+chat 2 104 Enemy Goal! by p2
+chat 3 104 Enemy Goal! by p2
+chat arena - SCORE: Evens:5 Odds:5
+goal 0 0 0 511 500
+award 0:0 1:0 2:0 3:0
+ballstats 0:0/0 1:0/0 2:0/0 3:0/0
+score after 4 6 5 5 5 5 5 5 endgames=0
+chat 2 104 Team Goal! by p0
+chat 3 104 Team Goal! by p0
+chat 0 104 Enemy Goal! by p0
+chat 1 104 Enemy Goal! by p0
+chat arena - SCORE: Evens:4 Odds:6
+goal 0 0 0 512 500
+award 0:0 1:0 2:0 3:0
+ballstats 0:0/0 1:0/0 2:0/0 3:0/0
+score after 5 5 5 5 5 5 5 5 endgames=0
+chat 0 104 Team Goal! by p0
+chat 1 104 Team Goal! by p0
+chat 2 104 Enemy Goal! by p0
+chat 3 104 Enemy Goal! by p0
+chat arena - SCORE: Evens:5 Odds:5
+# GOAL_LEFTRIGHT runs to a win and ends the game
+settings mode=1 cpts=5 stealpts=5 reward=0 winby=0 minplayers=0 minteams=0 freqtypes=0
+score initial 5 5 5 5 5 5 5 5 endgames=0
+seat 0w.0w.1w.1w.
+goal 0 0 0 100 500
+award 0:0 1:0 2:0 3:0
+ballstats 0:0/0 1:0/0 2:0/0 3:0/0
+score after 4 6 5 5 5 5 5 5 endgames=0
+chat 2 104 Team Goal! by p0
+chat 3 104 Team Goal! by p0
+chat 0 104 Enemy Goal! by p0
+chat 1 104 Enemy Goal! by p0
+chat arena - SCORE: Evens:4 Odds:6
+goal 0 0 0 100 500
+award 0:0 1:0 2:0 3:0
+ballstats 0:0/0 1:0/0 2:0/0 3:0/0
+score after 3 7 5 5 5 5 5 5 endgames=0
+chat 2 104 Team Goal! by p0
+chat 3 104 Team Goal! by p0
+chat 0 104 Enemy Goal! by p0
+chat 1 104 Enemy Goal! by p0
+chat arena - SCORE: Evens:3 Odds:7
+goal 0 0 0 100 500
+award 0:0 1:0 2:0 3:0
+ballstats 0:0/0 1:0/0 2:0/0 3:0/0
+score after 2 8 5 5 5 5 5 5 endgames=0
+chat 2 104 Team Goal! by p0
+chat 3 104 Team Goal! by p0
+chat 0 104 Enemy Goal! by p0
+chat 1 104 Enemy Goal! by p0
+chat arena - SCORE: Evens:2 Odds:8
+goal 0 0 0 100 500
+award 0:0 1:0 2:0 3:0
+ballstats 0:0/0 1:0/0 2:0/0 3:0/0
+score after 1 9 5 5 5 5 5 5 endgames=0
+chat 2 104 Team Goal! by p0
+chat 3 104 Team Goal! by p0
+chat 0 104 Enemy Goal! by p0
+chat 1 104 Enemy Goal! by p0
+chat arena - SCORE: Evens:1 Odds:9
+goal 0 0 0 100 500
+award 0:0 1:0 2:0 3:0
+ballstats 0:0/1 1:0/1 2:1/0 3:1/0
+score after 5 5 5 5 5 5 5 5 endgames=1
+chat 2 104 Team Goal! by p0
+chat 3 104 Team Goal! by p0
+chat 0 104 Enemy Goal! by p0
+chat 1 104 Enemy Goal! by p0
+chat arena - SCORE: Evens:0 Odds:10
+chat arena 103 Soccer game over.
+goal 0 0 0 100 500
+award 0:0 1:0 2:0 3:0
+ballstats 0:0/1 1:0/1 2:1/0 3:1/0
+score after 4 6 5 5 5 5 5 5 endgames=1
+chat 2 104 Team Goal! by p0
+chat 3 104 Team Goal! by p0
+chat 0 104 Enemy Goal! by p0
+chat 1 104 Enemy Goal! by p0
+chat arena - SCORE: Evens:4 Odds:6
+# GOAL_TOPBOTTOM: the top half scores for freq 1
+settings mode=2 cpts=5 stealpts=5 reward=0 winby=0 minplayers=0 minteams=0 freqtypes=0
+score initial 5 5 5 5 5 5 5 5 endgames=0
+seat 0w.0w.1w.1w.
+goal 0 0 0 500 100
+award 0:0 1:0 2:0 3:0
+ballstats 0:0/0 1:0/0 2:0/0 3:0/0
+score after 4 6 5 5 5 5 5 5 endgames=0
+chat 2 104 Team Goal! by p0
+chat 3 104 Team Goal! by p0
+chat 0 104 Enemy Goal! by p0
+chat 1 104 Enemy Goal! by p0
+chat arena - SCORE: Evens:4 Odds:6
+goal 2 0 1 500 900
+award 0:0 1:0 2:0 3:0
+ballstats 0:0/0 1:0/0 2:0/0 3:0/0
+score after 5 5 5 5 5 5 5 5 endgames=0
+chat 0 104 Team Goal! by p2
+chat 1 104 Team Goal! by p2
+chat 2 104 Enemy Goal! by p2
+chat 3 104 Enemy Goal! by p2
+chat arena - SCORE: Evens:5 Odds:5
+# GOAL_CORNERS_3_1: a quadrant with no points left is a null goal
+settings mode=3 cpts=2 stealpts=2 reward=0 winby=0 minplayers=0 minteams=0 freqtypes=0
+score initial 2 2 2 2 2 2 2 2 endgames=0
+seat 0w.1w.2w.3w.
+goal 0 0 0 100 100
+award 0:0 1:0 2:0 3:0
+ballstats 0:0/0 1:0/0 2:0/0 3:0/0
+score after 2 2 2 2 2 2 2 2 endgames=0
+chat 0 104 Team Goal! by p0
+chat 1 104 Enemy Goal! by p0
+chat 2 104 Enemy Goal! by p0
+chat 3 104 Enemy Goal! by p0
+chat arena - SCORE: Team0:2 Team1:2 Team2:2 Team3:2
+goal 0 0 0 100 100
+award 0:0 1:0 2:0 3:0
+ballstats 0:0/0 1:0/0 2:0/0 3:0/0
+score after 2 2 2 2 2 2 2 2 endgames=0
+chat 0 104 Team Goal! by p0
+chat 1 104 Enemy Goal! by p0
+chat 2 104 Enemy Goal! by p0
+chat 3 104 Enemy Goal! by p0
+chat arena - SCORE: Team0:2 Team1:2 Team2:2 Team3:2
+goal 0 0 0 100 100
+award 0:0 1:0 2:0 3:0
+ballstats 0:0/0 1:0/0 2:0/0 3:0/0
+score after 2 2 2 2 2 2 2 2 endgames=0
+chat 0 104 Team Goal! by p0
+chat 1 104 Enemy Goal! by p0
+chat 2 104 Enemy Goal! by p0
+chat 3 104 Enemy Goal! by p0
+chat arena - SCORE: Team0:2 Team1:2 Team2:2 Team3:2
+# GOAL_CORNERS_1_3 always uses absolute scoring
+settings mode=4 cpts=1 stealpts=1 reward=0 winby=0 minplayers=0 minteams=0 freqtypes=0
+score initial 1 1 1 1 1 1 1 1 endgames=0
+seat 0w.1w.2w.3w.
+goal 0 0 0 100 100
+award 0:0 1:0 2:0 3:0
+ballstats 0:0/0 1:0/0 2:0/0 3:0/0
+score after 2 1 1 1 1 1 1 1 endgames=0
+chat 0 104 Team Goal! by p0
+chat 1 104 Enemy Goal! by p0
+chat 2 104 Enemy Goal! by p0
+chat 3 104 Enemy Goal! by p0
+chat arena - SCORE: Team0:2 Team1:1 Team2:1 Team3:1
+goal 1 0 1 900 900
+award 0:0 1:0 2:0 3:0
+ballstats 0:0/0 1:0/0 2:0/0 3:0/0
+score after 2 2 1 1 1 1 1 1 endgames=0
+chat 1 104 Team Goal! by p1
+chat 0 104 Enemy Goal! by p1
+chat 2 104 Enemy Goal! by p1
+chat 3 104 Enemy Goal! by p1
+chat arena - SCORE: Team0:2 Team1:2 Team2:1 Team3:1
+# GOAL_SIDES_3_1 picks the defender from x vs y, not from quadrants
+settings mode=5 cpts=2 stealpts=2 reward=0 winby=0 minplayers=0 minteams=0 freqtypes=0
+score initial 2 2 2 2 2 2 2 2 endgames=0
+seat 0w.1w.2w.3w.
+goal 0 0 0 100 500
+award 0:0 1:0 2:0 3:0
+ballstats 0:0/0 1:0/0 2:0/0 3:0/0
+score after 2 2 2 2 2 2 2 2 endgames=0
+chat 0 104 Team Goal! by p0
+chat 1 104 Enemy Goal! by p0
+chat 2 104 Enemy Goal! by p0
+chat 3 104 Enemy Goal! by p0
+chat arena - SCORE: Team0:2 Team1:2 Team2:2 Team3:2
+goal 0 0 0 500 100
+award 0:0 1:0 2:0 3:0
+ballstats 0:0/0 1:0/0 2:0/0 3:0/0
+score after 3 2 1 2 2 2 2 2 endgames=0
+chat 0 104 Team Goal! by p0
+chat 1 104 Enemy Goal! by p0
+chat 2 104 Enemy Goal! by p0
+chat 3 104 Enemy Goal! by p0
+chat arena - SCORE: Team0:3 Team1:2 Team2:1 Team3:2
+goal 0 0 0 900 500
+award 0:0 1:0 2:0 3:0
+ballstats 0:0/0 1:0/0 2:0/0 3:0/0
+score after 4 2 1 1 2 2 2 2 endgames=0
+chat 0 104 Team Goal! by p0
+chat 1 104 Enemy Goal! by p0
+chat 2 104 Enemy Goal! by p0
+chat 3 104 Enemy Goal! by p0
+chat arena - SCORE: Team0:4 Team1:2 Team2:1 Team3:1
+goal 0 0 0 500 900
+award 0:0 1:0 2:0 3:0
+ballstats 0:0/0 1:0/0 2:0/0 3:0/0
+score after 5 1 1 1 2 2 2 2 endgames=0
+chat 0 104 Team Goal! by p0
+chat 1 104 Enemy Goal! by p0
+chat 2 104 Enemy Goal! by p0
+chat 3 104 Enemy Goal! by p0
+chat arena - SCORE: Team0:5 Team1:1 Team2:1 Team3:1
+# absolute scoring with WinBy 0: the game can never end
+settings mode=4 cpts=-5 stealpts=0 reward=0 winby=0 minplayers=0 minteams=0 freqtypes=0
+score initial 0 0 0 0 0 0 0 0 endgames=0
+seat 0w.1w.2w.3w.
+goal 0 0 0 100 100
+award 0:0 1:0 2:0 3:0
+ballstats 0:0/0 1:0/0 2:0/0 3:0/0
+score after 1 0 0 0 0 0 0 0 endgames=0
+chat 0 104 Team Goal! by p0
+chat 1 104 Enemy Goal! by p0
+chat 2 104 Enemy Goal! by p0
+chat 3 104 Enemy Goal! by p0
+chat arena - SCORE: Team0:1 Team1:0 Team2:0 Team3:0
+goal 0 0 0 100 100
+award 0:0 1:0 2:0 3:0
+ballstats 0:0/0 1:0/0 2:0/0 3:0/0
+score after 2 0 0 0 0 0 0 0 endgames=0
+chat 0 104 Team Goal! by p0
+chat 1 104 Enemy Goal! by p0
+chat 2 104 Enemy Goal! by p0
+chat 3 104 Enemy Goal! by p0
+chat arena - SCORE: Team0:2 Team1:0 Team2:0 Team3:0
+goal 0 0 0 100 100
+award 0:0 1:0 2:0 3:0
+ballstats 0:0/0 1:0/0 2:0/0 3:0/0
+score after 3 0 0 0 0 0 0 0 endgames=0
+chat 0 104 Team Goal! by p0
+chat 1 104 Enemy Goal! by p0
+chat 2 104 Enemy Goal! by p0
+chat 3 104 Enemy Goal! by p0
+chat arena - SCORE: Team0:3 Team1:0 Team2:0 Team3:0
+goal 0 0 0 100 100
+award 0:0 1:0 2:0 3:0
+ballstats 0:0/0 1:0/0 2:0/0 3:0/0
+score after 4 0 0 0 0 0 0 0 endgames=0
+chat 0 104 Team Goal! by p0
+chat 1 104 Enemy Goal! by p0
+chat 2 104 Enemy Goal! by p0
+chat 3 104 Enemy Goal! by p0
+chat arena - SCORE: Team0:4 Team1:0 Team2:0 Team3:0
+goal 0 0 0 100 100
+award 0:0 1:0 2:0 3:0
+ballstats 0:0/0 1:0/0 2:0/0 3:0/0
+score after 5 0 0 0 0 0 0 0 endgames=0
+chat 0 104 Team Goal! by p0
+chat 1 104 Enemy Goal! by p0
+chat 2 104 Enemy Goal! by p0
+chat 3 104 Enemy Goal! by p0
+chat arena - SCORE: Team0:5 Team1:0 Team2:0 Team3:0
+goal 0 0 0 100 100
+award 0:0 1:0 2:0 3:0
+ballstats 0:0/0 1:0/0 2:0/0 3:0/0
+score after 6 0 0 0 0 0 0 0 endgames=0
+chat 0 104 Team Goal! by p0
+chat 1 104 Enemy Goal! by p0
+chat 2 104 Enemy Goal! by p0
+chat 3 104 Enemy Goal! by p0
+chat arena - SCORE: Team0:6 Team1:0 Team2:0 Team3:0
+goal 0 0 0 100 100
+award 0:0 1:0 2:0 3:0
+ballstats 0:0/0 1:0/0 2:0/0 3:0/0
+score after 7 0 0 0 0 0 0 0 endgames=0
+chat 0 104 Team Goal! by p0
+chat 1 104 Enemy Goal! by p0
+chat 2 104 Enemy Goal! by p0
+chat 3 104 Enemy Goal! by p0
+chat arena - SCORE: Team0:7 Team1:0 Team2:0 Team3:0
+goal 0 0 0 100 100
+award 0:0 1:0 2:0 3:0
+ballstats 0:0/0 1:0/0 2:0/0 3:0/0
+score after 8 0 0 0 0 0 0 0 endgames=0
+chat 0 104 Team Goal! by p0
+chat 1 104 Enemy Goal! by p0
+chat 2 104 Enemy Goal! by p0
+chat 3 104 Enemy Goal! by p0
+chat arena - SCORE: Team0:8 Team1:0 Team2:0 Team3:0
+# the same game with WinBy 1 does end
+settings mode=4 cpts=-5 stealpts=0 reward=0 winby=1 minplayers=0 minteams=0 freqtypes=0
+score initial 0 0 0 0 0 0 0 0 endgames=0
+seat 0w.1w.2w.3w.
+goal 0 0 0 100 100
+award 0:0 1:0 2:0 3:0
+ballstats 0:0/0 1:0/0 2:0/0 3:0/0
+score after 1 0 0 0 0 0 0 0 endgames=0
+chat 0 104 Team Goal! by p0
+chat 1 104 Enemy Goal! by p0
+chat 2 104 Enemy Goal! by p0
+chat 3 104 Enemy Goal! by p0
+chat arena - SCORE: Team0:1 Team1:0 Team2:0 Team3:0
+goal 0 0 0 100 100
+award 0:0 1:0 2:0 3:0
+ballstats 0:0/0 1:0/0 2:0/0 3:0/0
+score after 2 0 0 0 0 0 0 0 endgames=0
+chat 0 104 Team Goal! by p0
+chat 1 104 Enemy Goal! by p0
+chat 2 104 Enemy Goal! by p0
+chat 3 104 Enemy Goal! by p0
+chat arena - SCORE: Team0:2 Team1:0 Team2:0 Team3:0
+goal 0 0 0 100 100
+award 0:0 1:0 2:0 3:0
+ballstats 0:0/0 1:0/0 2:0/0 3:0/0
+score after 3 0 0 0 0 0 0 0 endgames=0
+chat 0 104 Team Goal! by p0
+chat 1 104 Enemy Goal! by p0
+chat 2 104 Enemy Goal! by p0
+chat 3 104 Enemy Goal! by p0
+chat arena - SCORE: Team0:3 Team1:0 Team2:0 Team3:0
+goal 0 0 0 100 100
+award 0:0 1:0 2:0 3:0
+ballstats 0:0/0 1:0/0 2:0/0 3:0/0
+score after 4 0 0 0 0 0 0 0 endgames=0
+chat 0 104 Team Goal! by p0
+chat 1 104 Enemy Goal! by p0
+chat 2 104 Enemy Goal! by p0
+chat 3 104 Enemy Goal! by p0
+chat arena - SCORE: Team0:4 Team1:0 Team2:0 Team3:0
+goal 0 0 0 100 100
+award 0:0 1:0 2:0 3:0
+ballstats 0:1/0 1:0/1 2:0/1 3:0/1
+score after 0 0 0 0 0 0 0 0 endgames=1
+chat 0 104 Team Goal! by p0
+chat 1 104 Enemy Goal! by p0
+chat 2 104 Enemy Goal! by p0
+chat 3 104 Enemy Goal! by p0
+chat arena - SCORE: Team0:5 Team1:0 Team2:0 Team3:0
+chat arena 103 Soccer game over.
+goal 0 0 0 100 100
+award 0:0 1:0 2:0 3:0
+ballstats 0:1/0 1:0/1 2:0/1 3:0/1
+score after 1 0 0 0 0 0 0 0 endgames=1
+chat 0 104 Team Goal! by p0
+chat 1 104 Enemy Goal! by p0
+chat 2 104 Enemy Goal! by p0
+chat 3 104 Enemy Goal! by p0
+chat arena - SCORE: Team0:1 Team1:0 Team2:0 Team3:0
+# Misc:FrequencyShipTypes renames the teams in the score line
+settings mode=4 cpts=3 stealpts=3 reward=0 winby=0 minplayers=0 minteams=0 freqtypes=1
+score initial 3 3 3 3 3 3 3 3 endgames=0
+seat 0w.1w.2w.3w.
+goal 0 0 0 100 100
+award 0:0 1:0 2:0 3:0
+ballstats 0:0/0 1:0/0 2:0/0 3:0/0
+score after 4 3 3 3 3 3 3 3 endgames=0
+chat 0 104 Team Goal! by p0
+chat 1 104 Enemy Goal! by p0
+chat 2 104 Enemy Goal! by p0
+chat 3 104 Enemy Goal! by p0
+chat arena - SCORE: Warbirds:4 Javelins:3 Spiders:3 Leviathans:3
+# GOAL_ALL prints no score line at all
+settings mode=0 cpts=3 stealpts=3 reward=0 winby=0 minplayers=0 minteams=0 freqtypes=0
+score initial 3 3 3 3 3 3 3 3 endgames=0
+seat 0w.1w.
+goal 0 0 0 100 100
+award 0:0 1:0
+ballstats 0:0/0 1:0/0
+score after 3 3 3 3 3 3 3 3 endgames=0
+chat 0 104 Team Goal! by p0
+chat 1 104 Enemy Goal! by p0

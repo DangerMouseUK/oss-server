@@ -45,8 +45,10 @@ use crate::zone::{Zone, ZoneStarted};
 
 /// Longest line ASSS will handle (`MAXMSGSIZE`).
 pub const MAX_LINE: usize = 2035;
-/// Bytes the inbound buffer holds.
-const MAX_BUFFERED: usize = MAX_LINE;
+/// Bytes the inbound buffer holds. ASSS keeps one back for the NUL its
+/// string handling needs -- `LEFT(buf)` is `MAXMSGSIZE - used - 1` -- so a
+/// line is refused one byte sooner than `MAXMSGSIZE` suggests.
+const MAX_BUFFERED: usize = MAX_LINE - 1;
 /// Characters of an outbound line, before its terminator.
 const MAX_OUT_TEXT: usize = MAX_LINE - 2;
 /// Unsent output a client may have before it is dropped.

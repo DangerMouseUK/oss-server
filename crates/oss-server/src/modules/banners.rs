@@ -81,6 +81,24 @@ impl Default for BannerData {
     }
 }
 
+/// A player's banner and how far it has got: 0 none, 1 held but not shown,
+/// 2 shown. ASSS keeps these three apart rather than using a flag, because
+/// a banner set before the player is playing waits at 1 until they enter an
+/// arena; a port with a boolean either sends it too early or loses it.
+pub fn banner_state(zone: &Zone, p: PlayerId) -> (u8, Banner) {
+    zone.players
+        .get(p)
+        .and_then(|x| x.ext.get::<BannerData>())
+        .map_or((0, [0; BANNER_LEN]), |d| {
+            let n = match d.status {
+                Status::None => 0,
+                Status::Pending => 1,
+                Status::Allowed => 2,
+            };
+            (n, d.banner)
+        })
+}
+
 /// A player's banner, if it has been allowed and shown.
 pub fn banner(zone: &Zone, p: PlayerId) -> Option<Banner> {
     zone.players

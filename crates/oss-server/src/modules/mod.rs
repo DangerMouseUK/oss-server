@@ -21,6 +21,7 @@ pub mod core;
 pub mod directory;
 pub mod fg_turf;
 pub mod fg_wz;
+pub mod filetrans;
 pub mod flagcore;
 pub mod fm_lockspec;
 pub mod freqowners;
@@ -79,6 +80,8 @@ pub const DEFAULT_MODULES: &[&str] = &[
     "fg_wz",
     "fg_turf",
     "fm_lockspec",
+    "filetrans",
+    "sendfile",
     "jackpot",
     "points_flag",
     "playercmd",
@@ -138,6 +141,8 @@ pub fn builtin_catalog() -> ModuleCatalog {
     });
     c.register("fg_wz", &["<py> fg_wz"], || fg_wz::FgWzModule);
     c.register("fm_lockspec", &[], || fm_lockspec::FmLockSpecModule);
+    c.register("filetrans", &[], || filetrans::FileTransModule);
+    c.register("sendfile", &[], || filetrans::SendFileModule);
     c.register("arenaperm", &[], || arenaperm::ArenaPermModule);
     c.register("fg_turf", &["<py> fg_turf"], || fg_turf::FgTurfModule);
     c.register("jackpot", &["scoring:jackpot"], || jackpot::JackpotModule);

@@ -221,11 +221,17 @@ fn check_game_over(zone: &mut Zone, a: ArenaId) {
     } else {
         let mut j = 0;
         if sc[freq] >= -cap {
-            // ASSS also counts the leader itself here, so with WinBy = 0 a game
-            // could never end; leaving it out changes nothing for WinBy >= 1
-            j = (0..MAX_FREQ)
-                .filter(|&i| i != freq && sc[i] + by <= sc[freq])
-                .count();
+            // The leader is counted here too, as in ASSS, and that is the
+            // whole behaviour of `Soccer:WinBy 0` -- the default. The
+            // leader's own `score + 0 <= score` holds, so j reaches 8 and
+            // can never equal 7: an absolute-scoring game with WinBy 0
+            // never ends, however far ahead someone gets. It takes WinBy 1
+            // or more, which excludes the leader by arithmetic rather than
+            // by a special case, and leaves the other seven freqs each at
+            // least WinBy behind. Skipping the leader here would look
+            // tidier and would end games a zone's own settings say should
+            // run forever.
+            j = (0..MAX_FREQ).filter(|&i| sc[i] + by <= sc[freq]).count();
         }
         if j == MAX_FREQ - 1 {
             game_over(zone, a, freq, 0);

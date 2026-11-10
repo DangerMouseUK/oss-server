@@ -70,12 +70,37 @@ struct KothSettings {
     min_playing: usize,
 }
 
-#[derive(Clone, Copy, Default)]
-struct Crown {
-    crown: bool,
-    had_crown: bool,
-    deaths: i32,
-    crown_kills: i32,
+/// One player's king-of-the-hill state (ASSS's per-player `pdata`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Crown {
+    /// Holding a crown now.
+    pub crown: bool,
+    /// Held one as of the last check, which is what decides who wins.
+    pub had_crown: bool,
+    /// Deaths suffered while crowned.
+    pub deaths: i32,
+    /// Crowned players killed while uncrowned.
+    pub crown_kills: i32,
+}
+
+/// A player's crown state, all zero for anyone the game has not touched.
+pub fn crown_state(zone: &Zone, p: PlayerId) -> Crown {
+    zone.players
+        .get(p)
+        .and_then(|x| x.ext.get::<Crown>())
+        .copied()
+        .unwrap_or_default()
+}
+
+/// Starts a game now (ASSS `start_koth`), as the arena timer would.
+pub fn start_game(zone: &mut Zone, arena: ArenaId) {
+    start_koth(zone, arena);
+}
+
+/// Runs the periodic check (ASSS `check_koth`): awards when the last crown
+/// is gone, then records who is still crowned.
+pub fn check_game(zone: &mut Zone, arena: ArenaId) {
+    check_koth(zone, arena);
 }
 
 fn settings(zone: &Zone, a: ArenaId) -> Option<KothSettings> {
@@ -224,8 +249,7 @@ fn on_kill(zone: &mut Zone, k: &Kill) {
     let Some(s) = settings(zone, k.arena) else {
         return;
     };
-    let killed_crown = crown(zone, k.killed).is_some_and(|c| c.crown);
-    if killed_crown {
+    if crown(zone, k.killed).is_some_and(|c| c.crown) {
         let too_many = crown(zone, k.killed).is_some_and(|c| {
             c.deaths += 1;
             c.deaths > s.death_count
@@ -242,7 +266,12 @@ fn on_kill(zone: &mut Zone, k: &Kill) {
     }
     if crown(zone, k.killer).is_some_and(|c| c.crown) {
         set_crown_time(zone, k.killer, s.expire_time);
-    } else if killed_crown && s.recover_kills > 0 {
+    } else if crown(zone, k.killed).is_some_and(|c| c.crown) && s.recover_kills > 0 {
+        // The victim's crown is re-read here, not remembered from before the
+        // death above, because ASSS re-tests it: a kill that takes the
+        // victim's LAST crown earns the killer no crown kill. With
+        // DeathCount 0 every crowned victim loses their crown on the first
+        // death, which makes CrownRecoverKills unreachable in such an arena.
         let left = crown(zone, k.killer).map_or(0, |c| {
             c.crown_kills += 1;
             s.recover_kills - c.crown_kills

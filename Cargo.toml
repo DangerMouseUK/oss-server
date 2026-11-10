@@ -7,7 +7,7 @@ default-members = ["crates/oss-server"]
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.88"
+rust-version = "1.89"
 license = "GPL-2.0-or-later"
 repository = "https://github.com/DangerMouseUK/oss-server"
 

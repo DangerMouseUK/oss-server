@@ -104,6 +104,12 @@ pub enum RewardStyle {
     Weights,
     /// A fixed amount by placement.
     FixedPts,
+    /// A style the module does not recognise. ASSS reaches its
+    /// `CALC_REWARD_FAILED` macro here, which -- despite the name -- reports
+    /// success with nothing awarded, so the ding timer keeps running. That
+    /// is a different state from [`RewardStyle::Disabled`], which leaves the
+    /// failure `preCalc` wrote and halts further rewards.
+    Other,
 }
 
 impl RewardStyle {
@@ -116,6 +122,8 @@ impl RewardStyle {
             "TR_STYLE_WEIGHTS" | "WEIGHTS" => Self::Weights,
             "TR_STYLE_FIXED_PTS" | "FIXED_PTS" => Self::FixedPts,
             _ => return None,
+            // a name nobody recognises is `Other`, not `Disabled`; see the
+            // variant's own note. `load` maps a missing key to the default.
         })
     }
 }
@@ -345,7 +353,9 @@ pub struct TurfTeam {
     pub num_weights: i64,
     /// Share of the arena's weights, in percent.
     pub percent_weights: f64,
-    /// Weights per player.
+    /// Flags per player, truncated (see [`TurfData::sum_per_capita_flags`]).
+    pub per_capita_flags: f64,
+    /// Weights per player, truncated.
     pub per_capita_weights: f64,
     /// Players who may be paid.
     pub num_players: u32,
@@ -372,6 +382,9 @@ pub struct TurfData {
     pub ding_time: Ticks,
     /// When the next one is due.
     pub next_ding: Ticks,
+    /// Set once scoring reported [`CalcStatus::Fail`]: the arena stops
+    /// dinging until the timer is reset.
+    pub ding_stopped: bool,
     /// Players in the arena.
     pub num_players: i32,
     /// Players on teams that met every minimum.
@@ -382,6 +395,10 @@ pub struct TurfData {
     pub num_valid_teams: i32,
     /// Weights owned in the arena.
     pub num_weights: i64,
+    /// Sum of every valid team's flags per player. ASSS keeps this beside
+    /// the weights figure and reports it, but no scoring style it ships
+    /// reads it; it is here because the module's state is observable.
+    pub sum_per_capita_flags: f64,
     /// Sum of every valid team's weights per player.
     pub sum_per_capita_weights: f64,
     /// The jackpot this ding.
@@ -417,9 +434,20 @@ pub enum Award {
     None,
 }
 
+/// Whether the ding happened at all (ASSS `TurfState.status`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CalcStatus {
+    /// The scoring module ran. Points may still be zero.
+    Success,
+    /// The ding did not happen; `doReward` stops rewarding this arena.
+    Fail,
+}
+
 /// What a scoring algorithm decided (ASSS `TurfState`).
 #[derive(Debug, Clone, Copy)]
 pub struct CalcState {
+    /// Whether the ding counted.
+    pub status: CalcStatus,
     /// Who to pay.
     pub award: Award,
     /// Whether flags age by a ding afterwards.
@@ -427,12 +455,33 @@ pub struct CalcState {
 }
 
 impl CalcState {
-    /// Nothing is paid and the flags don't age: the ding did not happen as
-    /// far as the flags are concerned.
+    /// The ding did not happen: nothing is paid, the flags don't age, no
+    /// post-reward callback runs, and the arena stops dinging. Only
+    /// [`RewardStyle::Disabled`] reaches this among the styles ASSS ships.
     pub fn failed() -> Self {
         Self {
+            status: CalcStatus::Fail,
             award: Award::None,
             update: false,
+        }
+    }
+
+    /// The ding happened but pays nothing and ages no flags (ASSS's
+    /// confusingly named `CALC_REWARD_FAILED`).
+    pub fn no_award() -> Self {
+        Self {
+            status: CalcStatus::Success,
+            award: Award::None,
+            update: false,
+        }
+    }
+
+    /// The ding happened: pay the teams and age the flags.
+    pub fn team_award() -> Self {
+        Self {
+            status: CalcStatus::Success,
+            award: Award::Team,
+            update: true,
         }
     }
 }
@@ -450,6 +499,9 @@ pub trait TurfRewardPoints: Send + Sync {
 pub struct TurfPostReward {
     /// The arena.
     pub arena: ArenaId,
+    /// What the scoring module decided. ASSS hands the whole `TurfArena`
+    /// to this callback, `calcState` included.
+    pub state: CalcState,
     /// Everything the ding was based on.
     pub data: TurfData,
 }
@@ -527,6 +579,7 @@ fn setup(zone: &mut Zone, arena: ArenaId, keep_flags: bool) {
     if !keep_flags {
         d.ding_time = now;
         d.next_ding = Ticks(now.0 + initial);
+        d.ding_stopped = false;
     }
 }
 
@@ -640,11 +693,38 @@ fn on_tag(zone: &mut Zone, ev: &TurfTag) {
 }
 
 /// Counts teams, players, flags and weights for this ding (ASSS `preCalc`).
+/// Finds a team, making it if it is new. ASSS's `getTeamPtr` pushes a new
+/// team on the FRONT of `ta->teams`, so the list ends up in reverse order of
+/// first reference, and `validTeams` -- built by walking it -- inherits
+/// that. `TR_STYLE_FIXED_PTS` pays by position after a stable sort, so this
+/// ordering decides who gets the 1000 when two teams tie: it is not
+/// cosmetic. Teams per arena are few, so a scan is cheaper than a map.
+fn team_at(teams: &mut Vec<TurfTeam>, freq: i16) -> usize {
+    match teams.iter().position(|t| t.freq == freq) {
+        Some(i) => i,
+        None => {
+            teams.insert(
+                0,
+                TurfTeam {
+                    freq,
+                    ..Default::default()
+                },
+            );
+            0
+        }
+    }
+}
+
 fn pre_calc(zone: &mut Zone, arena: ArenaId) {
     let now = zone.now();
+    // ASSS walks every player whose arena is this one, whatever their
+    // status, and counts the ones still entering into numPlayers while
+    // leaving them out of numValidPlayers. `in_arena` would drop them, and
+    // with them their weight against MinPlayersArena.
     let here: Vec<(PlayerId, String, u16, bool, bool, bool)> = zone
         .players
-        .in_arena(arena)
+        .iter()
+        .filter(|p| p.arena == Some(arena))
         .map(|p| {
             (
                 p.id,
@@ -662,7 +742,7 @@ fn pre_calc(zone: &mut Zone, arena: ArenaId) {
 
     // weights, and each team's share of them
     d.num_weights = 0;
-    let mut teams: HashMap<i16, TurfTeam> = HashMap::new();
+    let mut teams: Vec<TurfTeam> = Vec::new();
     for i in 0..d.flags.len() {
         if d.flags[i].freq < 0 {
             continue;
@@ -670,15 +750,13 @@ fn pre_calc(zone: &mut Zone, arena: ArenaId) {
         let w = weight_of(&settings, &d.flags[i], now);
         d.flags[i].weight = w;
         let freq = d.flags[i].freq;
-        let t = teams.entry(freq).or_insert_with(|| TurfTeam {
-            freq,
-            ..Default::default()
-        });
+        let at = team_at(&mut teams, freq);
+        let t = &mut teams[at];
         t.num_flags += 1;
         t.num_weights += i64::from(w);
         d.num_weights += i64::from(w);
     }
-    for t in teams.values_mut() {
+    for t in &mut teams {
         t.percent_flags = if num_flags > 0.0 {
             f64::from(t.num_flags) / num_flags * 100.0
         } else {
@@ -696,10 +774,8 @@ fn pre_calc(zone: &mut Zone, arena: ArenaId) {
     d.num_valid_players = 0;
     for (id, name, freq, playing, spec, safe) in here {
         let freq = freq as i16;
-        let t = teams.entry(freq).or_insert_with(|| TurfTeam {
-            freq,
-            ..Default::default()
-        });
+        let at = team_at(&mut teams, freq);
+        let t = &mut teams[at];
         d.num_players += 1;
         d.players.entry(name).or_default();
         if !playing
@@ -715,12 +791,12 @@ fn pre_calc(zone: &mut Zone, arena: ArenaId) {
     }
 
     // which teams qualify
+    d.sum_per_capita_flags = 0.0;
     d.sum_per_capita_weights = 0.0;
     d.num_teams = 0;
     d.num_valid_teams = 0;
-    let mut list: Vec<TurfTeam> = teams.into_values().collect();
+    let mut list = teams;
     list.retain(|t| t.num_players > 0 || t.num_flags > 0 || !t.players_no_pts.is_empty());
-    list.sort_by_key(|t| t.freq);
     for t in &mut list {
         d.num_teams += 1;
         t.valid = i32::try_from(t.num_players).unwrap_or(i32::MAX) >= settings.min_players_on_team
@@ -731,7 +807,22 @@ fn pre_calc(zone: &mut Zone, arena: ArenaId) {
         if t.valid {
             d.num_valid_teams += 1;
             if t.num_players > 0 {
-                t.per_capita_weights = t.num_weights as f64 / f64::from(t.num_players);
+                // ASSS divides int/int and long/int here and only widens the
+                // result, so seven weights over three players is 2, not
+                // 2.333: `turf_reward.c:1281`. Every percentage downstream
+                // inherits the truncation, while `percent_weights` just
+                // above is a true ratio -- the module really does mix the
+                // two in one calculation, and a port that tidies that up
+                // pays the wrong teams.
+                // checked_div rather than div_euclid: C truncates towards
+                // zero, so a configured negative weight must not round the
+                // other way. num_players is non-zero here.
+                t.per_capita_flags = f64::from(t.num_flags.checked_div(t.num_players).unwrap_or(0));
+                t.per_capita_weights = t
+                    .num_weights
+                    .checked_div(i64::from(t.num_players))
+                    .unwrap_or(0) as f64;
+                d.sum_per_capita_flags += t.per_capita_flags;
                 d.sum_per_capita_weights += t.per_capita_weights;
             }
         }
@@ -864,11 +955,24 @@ pub fn do_reward(zone: &mut Zone, arena: ArenaId) {
         );
     } else if let Some(points) = zone.iface_in::<dyn TurfRewardPoints>(arena) {
         let state = points.calc_reward(zone, arena, &mut d);
+        if state.status == CalcStatus::Fail {
+            // ASSS returns out of doReward here, before the post-reward
+            // callback and before anything is paid or aged, and tells its
+            // timer to stop: `TR_STYLE_DISABLED` halts an arena's dings
+            // rather than running them for nothing.
+            tracing::debug!(target: "turf_reward", arena = arena.0, "scoring failed, halting further rewards");
+            d.ding_stopped = true;
+            if let Some(a) = zone.arenas.get_mut(arena) {
+                a.ext.insert(d);
+            }
+            return;
+        }
         if state.award != Award::None {
             award(zone, &mut d, state);
         }
         zone.fire(&TurfPostReward {
             arena,
+            state,
             data: d.clone(),
         });
         if state.update {
@@ -901,6 +1005,7 @@ fn tick(zone: &mut Zone) -> bool {
             .arenas
             .get(arena)
             .and_then(|a| a.ext.get::<TurfData>())
+            .filter(|d| !d.ding_stopped)
             .map(|d| d.next_ding);
         if due.is_some_and(|t| now.0 >= t.0) {
             do_reward(zone, arena);
@@ -1007,6 +1112,7 @@ fn c_turfresettimer(zone: &mut Zone, inv: &Invocation<'_>) {
     if let Some(d) = data(zone, arena) {
         d.ding_time = now;
         d.next_ding = Ticks(now.0 + d.settings.timer_interval);
+        d.ding_stopped = false;
     }
     message(zone, inv.sender, "Turf timer reset.");
 }
@@ -1121,14 +1227,23 @@ impl BuiltinPoints {
         d.num_points = if d.settings.reward_style == RewardStyle::StdBty {
             d.bounty_exchanged.max(0)
         } else {
-            i64::from(d.settings.reward_modifier) * i64::from(d.num_players)
+            // ASSS multiplies two ints and stores the result in an
+            // `unsigned long`, so a negative RewardModifier does not make a
+            // negative pot -- it wraps. -200 across four players is
+            // 4294966496, and every team is then paid a share of that.
+            i64::from(
+                d.settings
+                    .reward_modifier
+                    .wrapping_mul(d.num_players)
+                    .cast_unsigned(),
+            )
         };
-        if d.num_points == 0 {
-            return Some(CalcState {
-                award: Award::Team,
-                update: true,
-            });
-        }
+        // ASSS's "no points to award" branch uses CALC_REWARD_SUCCESS,
+        // which -- unlike CALC_REWARD_FAILED -- does not end in a `return`.
+        // So a zero pot is not an early exit: it falls straight through and
+        // still fills in every team's percent before multiplying nothing by
+        // it. Teams come out of a bountyless STD_BTY ding with percent 50
+        // and numPoints 0.
         let (jackpot, sum) = (d.num_points as f64, d.sum_per_capita_weights);
         for t in d.teams.iter_mut().filter(|t| t.valid) {
             t.percent = t.per_capita_weights / sum * 100.0;
@@ -1137,10 +1252,7 @@ impl BuiltinPoints {
                 t.num_points = share as i32;
             }
         }
-        Some(CalcState {
-            award: Award::Team,
-            update: true,
-        })
+        Some(CalcState::team_award())
     }
 }
 
@@ -1148,13 +1260,15 @@ impl TurfRewardPoints for BuiltinPoints {
     fn calc_reward(&self, zone: &mut Zone, arena: ArenaId, d: &mut TurfData) -> CalcState {
         match d.settings.reward_style {
             RewardStyle::Disabled => CalcState::failed(),
+            RewardStyle::Other => CalcState::no_award(),
             RewardStyle::Standard | RewardStyle::StdBty => self
                 .standard(zone, arena, d)
                 .unwrap_or_else(CalcState::failed),
             RewardStyle::Periodic => {
-                let Some(state) = self.standard(zone, arena, d) else {
-                    return CalcState::failed();
-                };
+                // crStandard's failure paths return out of crStandard, not
+                // out of crPeriodic, so whatever it decided is discarded
+                // here and the periodic formula runs regardless.
+                let _ = self.standard(zone, arena, d);
                 let modifier = d.settings.reward_modifier;
                 let players = d.num_players;
                 for t in d.teams.iter_mut().filter(|t| t.valid) {
@@ -1167,34 +1281,35 @@ impl TurfRewardPoints for BuiltinPoints {
                             .saturating_mul(t.num_flags as i32),
                     };
                 }
-                // a modifier of zero means dings happen but pay nothing
-                CalcState {
-                    award: if modifier == 0 {
-                        Award::None
-                    } else {
-                        state.award
-                    },
-                    update: true,
-                }
+                // A modifier of zero means "dings disabled", and ASSS does
+                // set award NONE for it -- then falls into the `modifier > 0`
+                // else-branch anyway (zero is not greater than zero),
+                // recomputes the same zero, and ends on CALC_REWARD_SUCCESS,
+                // which puts award back to TEAM. So a disabled periodic ding
+                // still pays, through the award path, nothing at all.
+                CalcState::team_award()
             }
             RewardStyle::Weights => {
                 for t in d.teams.iter_mut().filter(|t| t.valid) {
                     t.percent = 0.0;
                     t.num_points = i32::try_from(t.num_weights.max(0)).unwrap_or(i32::MAX);
                 }
-                CalcState {
-                    award: Award::Team,
-                    update: true,
-                }
+                CalcState::team_award()
             }
             RewardStyle::FixedPts => {
                 if self.standard(zone, arena, d).is_none() {
                     return CalcState::failed();
                 }
-                // best first, by what the weighted algorithm just worked out
+                // ASSS sorts validTeams with a comparator that is a strict
+                // less-than on numPoints and LLSort is a stable merge sort,
+                // so the list comes out ASCENDING: the 1000 goes to the team
+                // the weighted algorithm rated LOWEST. The source carries a
+                // "CHECK: I am unsure if LLSort sorts asc or desc" comment at
+                // that line; the vectors settle it. Ties keep validTeams
+                // order, which `team_at` reproduces.
                 let mut order: Vec<usize> =
                     (0..d.teams.len()).filter(|&i| d.teams[i].valid).collect();
-                order.sort_by_key(|&i| std::cmp::Reverse(d.teams[i].num_points));
+                order.sort_by_key(|&i| d.teams[i].num_points);
                 let mut pts = 1000;
                 for i in order {
                     d.teams[i].percent = 0.0;
@@ -1203,10 +1318,7 @@ impl TurfRewardPoints for BuiltinPoints {
                         pts -= 500;
                     }
                 }
-                CalcState {
-                    award: Award::Team,
-                    update: true,
-                }
+                CalcState::team_award()
             }
         }
     }

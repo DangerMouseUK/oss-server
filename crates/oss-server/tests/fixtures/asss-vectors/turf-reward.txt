@@ -1,0 +1,1122 @@
+# Turf reward from ASSS 1.4.4 src/turf/turf_reward.c plus the scoring module
+# src/turf/points_turf_reward.c, both compiled unmodified.
+#
+# A replayable transcript. '# <label>' starts a scenario; the 'settings' line that
+# follows is what loadSettings() resolved from the arena config (its clamps and its
+# weight defaulting already applied), so a reimplementation can start from there and
+# does not have to model the config parser.
+#
+#   settings style=<RewardStyle 0..5> modifier maxpoints minplayersteam
+#            minplayersarena minteams minflags minpctflags minweights minpctweights
+#            minpct spec safe weightcalc recovery recoverdings recovertime
+#            recovermax timerinitial timerinterval flags=<turf flags on the map>
+#            weights=<comma-separated weight table>
+#     RewardStyle: 0 DISABLED 1 PERIODIC 2 STANDARD 3 STD_BTY 4 WEIGHTS 5 FIXED_PTS
+#     weightcalc:  0 DINGS 1 TIME.  recovery: 0 DINGS 1 TIME 2 DINGS_AND_TIME
+#   seat <triples>         one triple per player, in player order: freq digit, then
+#                          'w' in a ship or 's' in spec, then '.' normal, 'z' in a
+#                          safe zone, or 'e' not yet S_PLAYING (still entering).
+#   tag <flag> <player>    ran the CB_TURFTAG handler for that player's current freq
+#   kill <killer> <killed> <bounty>   ran the CB_KILL handler
+#   advance <ticks>        moved the clock on (1 tick = 10 ms; 6000 = one minute)
+#   ding                   ran the reward sequence the module's timer runs
+#   arena <blocked> <numPlayers> <numValidPlayers> <numTeams> <numValidTeams>
+#         <numInvalidTeams> <numWeights> <sumPerCapitaFlags> <sumPerCapitaWeights>
+#         <numPoints> <tags> <steals> <recoveries> <lost> <kills> <bountyExchanged>
+#         blocked=1 means checkArenaRequirements failed, so no scoring ran at all.
+#   calc <status> <award> <update>   the TurfState the scoring module left behind.
+#         status: 0 SUCCESS 1 FAIL.  award: 0 PLAYER 1 TEAM 2 BOTH 3 NONE.
+#   team <freq> <valid> <numFlags> <numPlayers> <numWeights> <percentFlags>
+#        <percentWeights> <perCapitaFlags> <perCapitaWeights> <percent> <numPoints>
+#        in ta->teams order (newest first, since teams are pushed on the front).
+#   validorder <freq>...   the validTeams list in order AFTER scoring, which matters
+#        because TR_STYLE_FIXED_PTS sorts it and then pays out by position.
+#   ppoints <name>:<freq>:<points>...   per-player points the scoring module set.
+#   award <player>:<points>...  what each player's STAT_FLAG_POINTS actually moved by.
+#   chat <player|arena> <sound|-> <text>  every message emitted during the step.
+#   flags <id>:<freq|->/<tagger>/<dings>/<weight>/<recovered>[/old:<freq>,<lastOwned>,
+#         <dings>,<weight>,<recovered>]...   flag state after the ding, including each
+#         previous owner still holding a chance to recover.
+# Doubles are printed with %.17g, so they round-trip exactly through IEEE-754.
+#
+# The things these records are here to pin, in the order they bite:
+#
+# 1. perCapitaFlags and perCapitaWeights are INTEGER divisions. preCalc computes
+#    'pTeam->numFlags / pTeam->numPlayers' and 'pTeam->numWeights / pTeam->numPlayers'
+#    in int/long arithmetic and only then assigns the result to a double. Seven
+#    weights across three players is 2, not 2.333..., and sumPerCapitaWeights is a sum
+#    of those truncated values. Every percentage downstream inherits the truncation.
+#    A port that divides in floating point produces plausible, wrong numbers here;
+#    the scenario labelled 'integer per-capita' exists only to catch that.
+# 2. percentWeights IS a true double ratio (numWeights/arena numWeights*100), so the
+#    module mixes truncated and untruncated ratios in the same calculation.
+# 3. percentFlags is NOT recomputed by preCalc. It is only ever written by flagTag,
+#    for the two teams involved in that tag, so it can be stale by the time MinFlags
+#    Percent is tested against it.
+# 4. A team's share is 'numPoints * (percent/100) / numPlayers' truncated to int, with
+#    numPoints an unsigned long and percent a double, and that per-team figure is what
+#    each of its players receives -- it is not divided again.
+# 5. crPeriodic calls crStandard first and then overrides it. crStandard's failure
+#    paths 'return' out of crStandard, NOT out of crPeriodic, so crPeriodic carries on
+#    regardless and always finishes at CALC_REWARD_SUCCESS. With RewardModifier 0 it
+#    even sets award=NONE and then immediately overwrites that with award=TEAM on the
+#    way out, so 'dings disabled' still awards -- zero points, but through the award
+#    path, and it still updates flags.
+# 6. TR_STYLE_FIXED_PTS sorts validTeams with a comparator that is a strict less-than
+#    on numPoints, and ASSS's LLSort is a stable merge sort, so the list comes out
+#    ASCENDING -- the 1000 goes to the team the standard formula rated LOWEST. The
+#    source carries a 'CHECK: I am unsure if LLSort sorts asc or desc' comment at that
+#    exact line. Payouts are 1000, 500, then 0 for everyone after.
+# 7. TR_STYLE_DISABLED makes calcReward return without touching calcState, so the
+#    TR_CALC_FAIL that preCalc left there stands and doReward stops the ding timer.
+#    An unrecognised style reaches CALC_REWARD_FAILED, which reports SUCCESS with
+#    award NONE instead -- failure and 'disabled' are different states.
+# 8. Recovery restores the flag's previous dings, weight and tagTC, and sets
+#    recovered = previous + 1; it does not restore the previous tagger. The entry is
+#    only consulted for the freq that lost it, entries expire by lastOwned >
+#    RecoverDings and/or by (now - lostTC)/100 > RecoverTime depending on
+#    RecoveryCutoff, and RecoverMax caps how many times one flag may be recovered --
+#    by refusing to record a NEW previous-owner entry once pTF->recovered reaches it.
+# 9. calcWeight clamps the index into the weight table: a negative index gives 0 (not
+#    weights[0]), and anything past the end gives the last weight. A freshly tagged
+#    flag has dings 0, so it is already worth weights[0] before its first ding.
+#10. Teams are kept in a list that is pushed on the front, and preCalc drops any team
+#    with no players and no flags before counting. Players keep a node per team they
+#    played on, and postRewardCleanup drops the inactive ones that hold no flags.
+#11. points_turf_reward's two state macros are not symmetric: CALC_REWARD_FAILED ends
+#    in a 'return;' and CALC_REWARD_SUCCESS does not. So crStandard's 'no points to
+#    award' branch, which uses the SUCCESS macro, is not an early exit at all -- it
+#    sets the state and falls straight through into the payout loop, which fills in
+#    every team's percent and then multiplies a pot of zero by it. The second ding of
+#    the TR_STYLE_STD_BTY scenario is that case: numPoints 0, yet percent 50.
+#12. Under TR_STYLE_WEIGHTS the arena's own numPoints is never set, because crWeights
+#    does not call crStandard. Players are told 'Reward: <n>/0' -- the denominator in
+#    that message is the pot, and for this style there isn't one.
+#13. The reward message is chosen by comparing the awarded points against MaxPoints
+#    for EQUALITY, so a player who happens to earn exactly MaxPoints without being
+#    clamped still gets the ' [MAX] ' message (note its trailing space).
+# integer per-capita: 7 weights over 3 players is 2, not 2.333
+settings style=2 modifier=200 maxpoints=10000 minplayersteam=1 minplayersarena=1 minteams=1 minflags=1 minpctflags=0 minweights=1 minpctweights=0 minpct=0 spec=0 safe=0 weightcalc=0 recovery=0 recoverdings=1 recovertime=300 recovermax=-1 timerinitial=6000 timerinterval=6000 flags=12 weights=1
+seat 0w.0w.0w.1w.1w.2w.
+tag 0 0
+tag 1 0
+tag 2 0
+tag 3 1
+tag 4 1
+tag 5 2
+tag 6 2
+tag 7 3
+tag 8 3
+tag 9 4
+tag 10 4
+tag 11 5
+ding
+arena 0 6 6 3 3 0 12 5 5 1200 12 0 0 0 0 0
+calc 0 1 1
+team 2 1 1 1 1 8.3333333333333321 8.3333333333333321 1 1 20 240
+team 1 1 4 2 4 33.333333333333329 33.333333333333329 2 2 40 240
+team 0 1 7 3 7 58.333333333333336 58.333333333333336 2 2 40 160
+validorder 2 1 0
+ppoints p5:2:0 p4:1:0 p3:1:0 p2:0:0 p1:0:0 p0:0:0
+award 0:160 1:160 2:160 3:240 4:240 5:240
+chat 5 103 Reward: 240/1200
+chat 4 103 Reward: 240/1200
+chat 3 103 Reward: 240/1200
+chat 2 103 Reward: 160/1200
+chat 1 103 Reward: 160/1200
+chat 0 103 Reward: 160/1200
+flags 0:0/p0/1/1/0 1:0/p0/1/1/0 2:0/p0/1/1/0 3:0/p1/1/1/0 4:0/p1/1/1/0 5:0/p2/1/1/0 6:0/p2/1/1/0 7:1/p3/1/1/0 8:1/p3/1/1/0 9:1/p4/1/1/0 10:1/p4/1/1/0 11:2/p5/1/1/0
+ding
+arena 0 6 6 3 3 0 12 5 5 1200 0 0 0 0 0 0
+calc 0 1 1
+team 2 1 1 1 1 8.3333333333333321 8.3333333333333321 1 1 20 240
+team 1 1 4 2 4 33.333333333333329 33.333333333333329 2 2 40 240
+team 0 1 7 3 7 58.333333333333336 58.333333333333336 2 2 40 160
+validorder 2 1 0
+ppoints p5:2:0 p4:1:0 p3:1:0 p2:0:0 p1:0:0 p0:0:0
+award 0:160 1:160 2:160 3:240 4:240 5:240
+chat 5 103 Reward: 240/1200
+chat 4 103 Reward: 240/1200
+chat 3 103 Reward: 240/1200
+chat 2 103 Reward: 160/1200
+chat 1 103 Reward: 160/1200
+chat 0 103 Reward: 160/1200
+flags 0:0/p0/2/1/0 1:0/p0/2/1/0 2:0/p0/2/1/0 3:0/p1/2/1/0 4:0/p1/2/1/0 5:0/p2/2/1/0 6:0/p2/2/1/0 7:1/p3/2/1/0 8:1/p3/2/1/0 9:1/p4/2/1/0 10:1/p4/2/1/0 11:2/p5/2/1/0
+# standard, weights ramp 1,2,4,8,16 by dings
+settings style=2 modifier=200 maxpoints=10000 minplayersteam=2 minplayersarena=4 minteams=2 minflags=1 minpctflags=0 minweights=1 minpctweights=0 minpct=0 spec=0 safe=0 weightcalc=0 recovery=0 recoverdings=1 recovertime=300 recovermax=-1 timerinitial=6000 timerinterval=6000 flags=8 weights=1,2,4,8,16
+seat 0w.0w.0w.1w.1w.2w.2w.2w.
+tag 0 0
+tag 1 0
+tag 2 1
+tag 3 3
+tag 4 3
+tag 5 5
+tag 6 5
+tag 7 6
+ding
+arena 0 8 8 3 3 0 8 3 3 1600 8 0 0 0 0 0
+calc 0 1 1
+team 2 1 3 3 3 37.5 37.5 1 1 33.333333333333329 177
+team 1 1 2 2 2 25 25 1 1 33.333333333333329 266
+team 0 1 3 3 3 37.5 37.5 1 1 33.333333333333329 177
+validorder 2 1 0
+ppoints p7:2:0 p4:1:0 p2:0:0 p6:2:0 p5:2:0 p3:1:0 p1:0:0 p0:0:0
+award 0:177 1:177 2:177 3:266 4:266 5:177 6:177 7:177
+chat 7 103 Reward: 177/1600
+chat 6 103 Reward: 177/1600
+chat 5 103 Reward: 177/1600
+chat 4 103 Reward: 266/1600
+chat 3 103 Reward: 266/1600
+chat 2 103 Reward: 177/1600
+chat 1 103 Reward: 177/1600
+chat 0 103 Reward: 177/1600
+flags 0:0/p0/1/2/0 1:0/p0/1/2/0 2:0/p1/1/2/0 3:1/p3/1/2/0 4:1/p3/1/2/0 5:2/p5/1/2/0 6:2/p5/1/2/0 7:2/p6/1/2/0
+ding
+arena 0 8 8 3 3 0 16 3 6 1600 0 0 0 0 0 0
+calc 0 1 1
+team 2 1 3 3 6 37.5 37.5 1 2 33.333333333333329 177
+team 1 1 2 2 4 25 25 1 2 33.333333333333329 266
+team 0 1 3 3 6 37.5 37.5 1 2 33.333333333333329 177
+validorder 2 1 0
+ppoints p7:2:0 p4:1:0 p2:0:0 p6:2:0 p5:2:0 p3:1:0 p1:0:0 p0:0:0
+award 0:177 1:177 2:177 3:266 4:266 5:177 6:177 7:177
+chat 7 103 Reward: 177/1600
+chat 6 103 Reward: 177/1600
+chat 5 103 Reward: 177/1600
+chat 4 103 Reward: 266/1600
+chat 3 103 Reward: 266/1600
+chat 2 103 Reward: 177/1600
+chat 1 103 Reward: 177/1600
+chat 0 103 Reward: 177/1600
+flags 0:0/p0/2/4/0 1:0/p0/2/4/0 2:0/p1/2/4/0 3:1/p3/2/4/0 4:1/p3/2/4/0 5:2/p5/2/4/0 6:2/p5/2/4/0 7:2/p6/2/4/0
+ding
+arena 0 8 8 3 3 0 32 3 12 1600 0 0 0 0 0 0
+calc 0 1 1
+team 2 1 3 3 12 37.5 37.5 1 4 33.333333333333329 177
+team 1 1 2 2 8 25 25 1 4 33.333333333333329 266
+team 0 1 3 3 12 37.5 37.5 1 4 33.333333333333329 177
+validorder 2 1 0
+ppoints p7:2:0 p4:1:0 p2:0:0 p6:2:0 p5:2:0 p3:1:0 p1:0:0 p0:0:0
+award 0:177 1:177 2:177 3:266 4:266 5:177 6:177 7:177
+chat 7 103 Reward: 177/1600
+chat 6 103 Reward: 177/1600
+chat 5 103 Reward: 177/1600
+chat 4 103 Reward: 266/1600
+chat 3 103 Reward: 266/1600
+chat 2 103 Reward: 177/1600
+chat 1 103 Reward: 177/1600
+chat 0 103 Reward: 177/1600
+flags 0:0/p0/3/8/0 1:0/p0/3/8/0 2:0/p1/3/8/0 3:1/p3/3/8/0 4:1/p3/3/8/0 5:2/p5/3/8/0 6:2/p5/3/8/0 7:2/p6/3/8/0
+ding
+arena 0 8 8 3 3 0 64 3 24 1600 0 0 0 0 0 0
+calc 0 1 1
+team 2 1 3 3 24 37.5 37.5 1 8 33.333333333333329 177
+team 1 1 2 2 16 25 25 1 8 33.333333333333329 266
+team 0 1 3 3 24 37.5 37.5 1 8 33.333333333333329 177
+validorder 2 1 0
+ppoints p7:2:0 p4:1:0 p2:0:0 p6:2:0 p5:2:0 p3:1:0 p1:0:0 p0:0:0
+award 0:177 1:177 2:177 3:266 4:266 5:177 6:177 7:177
+chat 7 103 Reward: 177/1600
+chat 6 103 Reward: 177/1600
+chat 5 103 Reward: 177/1600
+chat 4 103 Reward: 266/1600
+chat 3 103 Reward: 266/1600
+chat 2 103 Reward: 177/1600
+chat 1 103 Reward: 177/1600
+chat 0 103 Reward: 177/1600
+flags 0:0/p0/4/16/0 1:0/p0/4/16/0 2:0/p1/4/16/0 3:1/p3/4/16/0 4:1/p3/4/16/0 5:2/p5/4/16/0 6:2/p5/4/16/0 7:2/p6/4/16/0
+ding
+arena 0 8 8 3 3 0 128 3 48 1600 0 0 0 0 0 0
+calc 0 1 1
+team 2 1 3 3 48 37.5 37.5 1 16 33.333333333333329 177
+team 1 1 2 2 32 25 25 1 16 33.333333333333329 266
+team 0 1 3 3 48 37.5 37.5 1 16 33.333333333333329 177
+validorder 2 1 0
+ppoints p7:2:0 p4:1:0 p2:0:0 p6:2:0 p5:2:0 p3:1:0 p1:0:0 p0:0:0
+award 0:177 1:177 2:177 3:266 4:266 5:177 6:177 7:177
+chat 7 103 Reward: 177/1600
+chat 6 103 Reward: 177/1600
+chat 5 103 Reward: 177/1600
+chat 4 103 Reward: 266/1600
+chat 3 103 Reward: 266/1600
+chat 2 103 Reward: 177/1600
+chat 1 103 Reward: 177/1600
+chat 0 103 Reward: 177/1600
+flags 0:0/p0/5/16/0 1:0/p0/5/16/0 2:0/p1/5/16/0 3:1/p3/5/16/0 4:1/p3/5/16/0 5:2/p5/5/16/0 6:2/p5/5/16/0 7:2/p6/5/16/0
+ding
+arena 0 8 8 3 3 0 128 3 48 1600 0 0 0 0 0 0
+calc 0 1 1
+team 2 1 3 3 48 37.5 37.5 1 16 33.333333333333329 177
+team 1 1 2 2 32 25 25 1 16 33.333333333333329 266
+team 0 1 3 3 48 37.5 37.5 1 16 33.333333333333329 177
+validorder 2 1 0
+ppoints p7:2:0 p4:1:0 p2:0:0 p6:2:0 p5:2:0 p3:1:0 p1:0:0 p0:0:0
+award 0:177 1:177 2:177 3:266 4:266 5:177 6:177 7:177
+chat 7 103 Reward: 177/1600
+chat 6 103 Reward: 177/1600
+chat 5 103 Reward: 177/1600
+chat 4 103 Reward: 266/1600
+chat 3 103 Reward: 266/1600
+chat 2 103 Reward: 177/1600
+chat 1 103 Reward: 177/1600
+chat 0 103 Reward: 177/1600
+flags 0:0/p0/6/16/0 1:0/p0/6/16/0 2:0/p1/6/16/0 3:1/p3/6/16/0 4:1/p3/6/16/0 5:2/p5/6/16/0 6:2/p5/6/16/0 7:2/p6/6/16/0
+# per-team requirements: MinPlayersTeam 3, MinFlags 2, MinWeights 2
+settings style=2 modifier=200 maxpoints=10000 minplayersteam=3 minplayersarena=4 minteams=1 minflags=2 minpctflags=0 minweights=2 minpctweights=0 minpct=0 spec=0 safe=0 weightcalc=0 recovery=0 recoverdings=1 recovertime=300 recovermax=-1 timerinitial=6000 timerinterval=6000 flags=8 weights=1
+seat 0w.0w.0w.1w.1w.2w.
+tag 0 0
+tag 1 0
+tag 2 0
+tag 3 3
+tag 4 3
+tag 5 5
+ding
+arena 0 6 6 3 1 2 6 1 1 1200 6 0 0 0 0 0
+calc 0 1 1
+team 2 0 1 1 1 12.5 16.666666666666664 0 0 0 0
+team 1 0 2 2 2 25 33.333333333333329 0 0 0 0
+team 0 1 3 3 3 37.5 50 1 1 100 400
+validorder 0
+ppoints p4:1:0 p2:0:0 p1:0:0 p5:2:0 p3:1:0 p0:0:0
+award 0:400 1:400 2:400 3:0 4:0 5:0
+chat 2 103 Reward: 400/1200
+chat 1 103 Reward: 400/1200
+chat 0 103 Reward: 400/1200
+chat 5 103 Reward: 0/0 (minimum team requirements not met)
+chat 4 103 Reward: 0/0 (minimum team requirements not met)
+chat 3 103 Reward: 0/0 (minimum team requirements not met)
+flags 0:0/p0/1/1/0 1:0/p0/1/1/0 2:0/p0/1/1/0 3:1/p3/1/1/0 4:1/p3/1/1/0 5:2/p5/1/1/0 6:-/-/-1/0/0 7:-/-/-1/0/0
+# per-team requirements: MinFlagsPercent and MinWeightsPercent, both 30.000%
+settings style=2 modifier=200 maxpoints=10000 minplayersteam=1 minplayersarena=4 minteams=1 minflags=1 minpctflags=30 minweights=1 minpctweights=30 minpct=0 spec=0 safe=0 weightcalc=0 recovery=0 recoverdings=1 recovertime=300 recovermax=-1 timerinitial=6000 timerinterval=6000 flags=10 weights=1
+seat 0w.0w.1w.1w.2w.
+tag 0 0
+tag 1 0
+tag 2 0
+tag 3 0
+tag 4 2
+tag 5 2
+tag 6 2
+tag 7 4
+ding
+arena 0 5 5 3 2 1 8 3 3 1000 8 0 0 0 0 0
+calc 0 1 1
+team 2 0 1 1 1 10 12.5 0 0 0 0
+team 1 1 3 2 3 30 37.5 1 1 33.333333333333329 166
+team 0 1 4 2 4 40 50 2 2 66.666666666666657 333
+validorder 1 0
+ppoints p3:1:0 p1:0:0 p4:2:0 p2:1:0 p0:0:0
+award 0:333 1:333 2:166 3:166 4:0
+chat 3 103 Reward: 166/1000
+chat 2 103 Reward: 166/1000
+chat 1 103 Reward: 333/1000
+chat 0 103 Reward: 333/1000
+chat 4 103 Reward: 0/0 (minimum team requirements not met)
+flags 0:0/p0/1/1/0 1:0/p0/1/1/0 2:0/p0/1/1/0 3:0/p0/1/1/0 4:1/p2/1/1/0 5:1/p2/1/1/0 6:1/p2/1/1/0 7:2/p4/1/1/0 8:-/-/-1/0/0 9:-/-/-1/0/0
+# arena requirements: MinPlayersArena 6 with 4 players
+settings style=2 modifier=200 maxpoints=10000 minplayersteam=1 minplayersarena=6 minteams=2 minflags=1 minpctflags=0 minweights=1 minpctweights=0 minpct=0 spec=0 safe=0 weightcalc=0 recovery=0 recoverdings=1 recovertime=300 recovermax=-1 timerinitial=6000 timerinterval=6000 flags=6 weights=1
+seat 0w.0w.1w.1w.
+tag 0 0
+tag 1 2
+ding
+arena 1 4 4 2 2 0 2 0 0 0 2 0 0 0 0 0
+calc 1 3 0
+team 1 1 1 2 1 16.666666666666664 50 0 0 0 0
+team 0 1 1 2 1 16.666666666666664 50 0 0 0 0
+validorder 1 0
+ppoints p3:1:0 p1:0:0 p2:1:0 p0:0:0
+award 0:0 1:0 2:0 3:0
+chat arena 103 Reward: 0 (arena minimum requirements not met)
+flags 0:0/p0/0/1/0 1:1/p2/0/1/0 2:-/-/-1/0/0 3:-/-/-1/0/0 4:-/-/-1/0/0 5:-/-/-1/0/0
+# arena requirements: MinTeams 2 with one valid team
+settings style=2 modifier=200 maxpoints=10000 minplayersteam=1 minplayersarena=6 minteams=2 minflags=1 minpctflags=0 minweights=1 minpctweights=0 minpct=0 spec=0 safe=0 weightcalc=0 recovery=0 recoverdings=1 recovertime=300 recovermax=-1 timerinitial=6000 timerinterval=6000 flags=6 weights=1
+seat 0w.0w.0w.0w.0w.0w.
+tag 0 0
+tag 1 1
+ding
+arena 1 6 6 1 1 0 2 0 0 0 2 0 0 0 0 0
+calc 1 3 0
+team 0 1 2 6 2 33.333333333333329 100 0 0 0 0
+validorder 0
+ppoints p5:0:0 p4:0:0 p3:0:0 p2:0:0 p1:0:0 p0:0:0
+award 0:0 1:0 2:0 3:0 4:0 5:0
+chat arena 103 Reward: 0 (arena minimum requirements not met)
+flags 0:0/p0/0/1/0 1:0/p1/0/1/0 2:-/-/-1/0/0 3:-/-/-1/0/0 4:-/-/-1/0/0 5:-/-/-1/0/0
+# arena requirements: every flag unowned
+settings style=2 modifier=200 maxpoints=10000 minplayersteam=1 minplayersarena=1 minteams=1 minflags=1 minpctflags=0 minweights=1 minpctweights=0 minpct=0 spec=0 safe=0 weightcalc=0 recovery=0 recoverdings=1 recovertime=300 recovermax=-1 timerinitial=6000 timerinterval=6000 flags=6 weights=1
+seat 0w.1w.
+ding
+arena 1 2 2 2 0 2 0 0 0 0 0 0 0 0 0 0
+calc 1 3 0
+team 1 0 0 1 0 0 0 0 0 0 0
+team 0 0 0 1 0 0 0 0 0 0 0
+validorder
+ppoints p1:1:0 p0:0:0
+award 0:0 1:0
+chat arena 103 Reward: 0 (arena minimum requirements not met)
+flags 0:-/-/-1/0/0 1:-/-/-1/0/0 2:-/-/-1/0/0 3:-/-/-1/0/0 4:-/-/-1/0/0 5:-/-/-1/0/0
+# MaxPoints 500 clamps, and the clamped case gets the [MAX] message
+settings style=2 modifier=100000 maxpoints=500 minplayersteam=1 minplayersarena=1 minteams=1 minflags=1 minpctflags=0 minweights=1 minpctweights=0 minpct=0 spec=0 safe=0 weightcalc=0 recovery=0 recoverdings=1 recovertime=300 recovermax=-1 timerinitial=6000 timerinterval=6000 flags=4 weights=1
+seat 0w.0w.1w.
+tag 0 0
+tag 1 0
+tag 2 0
+tag 3 2
+ding
+arena 0 3 3 2 2 0 4 2 2 300000 4 0 0 0 0 0
+calc 0 1 1
+team 1 1 1 1 1 25 25 1 1 50 150000
+team 0 1 3 2 3 75 75 1 1 50 75000
+validorder 1 0
+ppoints p1:0:0 p2:1:0 p0:0:0
+award 0:500 1:500 2:500
+chat 2 103 Reward: 500/300000 [MAX] 
+chat 1 103 Reward: 500/300000 [MAX] 
+chat 0 103 Reward: 500/300000 [MAX] 
+flags 0:0/p0/1/1/0 1:0/p0/1/1/0 2:0/p0/1/1/0 3:1/p2/1/1/0
+# a negative RewardModifier under STANDARD: the pot is an unsigned long, so modifier * numPlayers wraps instead of going negative
+settings style=2 modifier=-200 maxpoints=2000000000 minplayersteam=1 minplayersarena=1 minteams=1 minflags=1 minpctflags=0 minweights=1 minpctweights=0 minpct=0 spec=0 safe=0 weightcalc=0 recovery=0 recoverdings=1 recovertime=300 recovermax=-1 timerinitial=6000 timerinterval=6000 flags=4 weights=1
+seat 0w.0w.1w.1w.
+tag 0 0
+tag 1 0
+tag 2 2
+tag 3 2
+ding
+arena 0 4 4 2 2 0 4 2 2 4294966496 4 0 0 0 0 0
+calc 0 1 1
+team 1 1 2 2 2 50 50 1 1 50 1073741624
+team 0 1 2 2 2 50 50 1 1 50 1073741624
+validorder 1 0
+ppoints p3:1:0 p1:0:0 p2:1:0 p0:0:0
+award 0:1073741624 1:1073741624 2:1073741624 3:1073741624
+chat 3 103 Reward: 1073741624/4294966496
+chat 2 103 Reward: 1073741624/4294966496
+chat 1 103 Reward: 1073741624/4294966496
+chat 0 103 Reward: 1073741624/4294966496
+flags 0:0/p0/1/1/0 1:0/p0/1/1/0 2:1/p2/1/1/0 3:1/p2/1/1/0
+# TR_STYLE_STD_BTY: the pot is the bounty exchanged, not the player count
+settings style=3 modifier=200 maxpoints=10000 minplayersteam=1 minplayersarena=1 minteams=1 minflags=1 minpctflags=0 minweights=1 minpctweights=0 minpct=0 spec=0 safe=0 weightcalc=0 recovery=0 recoverdings=1 recovertime=300 recovermax=-1 timerinitial=6000 timerinterval=6000 flags=6 weights=1
+seat 0w.0w.1w.1w.
+tag 0 0
+tag 1 0
+tag 2 2
+tag 3 2
+kill 0 2 150
+kill 1 3 37
+kill 2 0 400
+ding
+arena 0 4 4 2 2 0 4 2 2 587 4 0 0 0 3 587
+calc 0 1 1
+team 1 1 2 2 2 33.333333333333329 50 1 1 50 146
+team 0 1 2 2 2 33.333333333333329 50 1 1 50 146
+validorder 1 0
+ppoints p3:1:0 p1:0:0 p2:1:0 p0:0:0
+award 0:146 1:146 2:146 3:146
+chat 3 103 Reward: 146/587
+chat 2 103 Reward: 146/587
+chat 1 103 Reward: 146/587
+chat 0 103 Reward: 146/587
+flags 0:0/p0/1/1/0 1:0/p0/1/1/0 2:1/p2/1/1/0 3:1/p2/1/1/0 4:-/-/-1/0/0 5:-/-/-1/0/0
+ding
+arena 0 4 4 2 2 0 4 2 2 0 0 0 0 0 0 0
+calc 0 1 1
+team 1 1 2 2 2 33.333333333333329 50 1 1 50 0
+team 0 1 2 2 2 33.333333333333329 50 1 1 50 0
+validorder 1 0
+ppoints p3:1:0 p1:0:0 p2:1:0 p0:0:0
+award 0:0 1:0 2:0 3:0
+chat 3 103 Reward: 0/0
+chat 2 103 Reward: 0/0
+chat 1 103 Reward: 0/0
+chat 0 103 Reward: 0/0
+flags 0:0/p0/2/1/0 1:0/p0/2/1/0 2:1/p2/2/1/0 3:1/p2/2/1/0 4:-/-/-1/0/0 5:-/-/-1/0/0
+# TR_STYLE_WEIGHTS: points are the team's weight total, requirements ignored
+settings style=4 modifier=200 maxpoints=10000 minplayersteam=1 minplayersarena=1 minteams=1 minflags=1 minpctflags=0 minweights=1 minpctweights=0 minpct=0 spec=0 safe=0 weightcalc=0 recovery=0 recoverdings=1 recovertime=300 recovermax=-1 timerinitial=6000 timerinterval=6000 flags=6 weights=3,9,27,81
+seat 0w.0w.1w.2w.
+tag 0 0
+tag 1 0
+tag 2 2
+tag 3 3
+ding
+arena 0 4 4 3 3 0 12 3 9 0 4 0 0 0 0 0
+calc 0 1 1
+team 2 1 1 1 3 16.666666666666664 25 1 3 0 3
+team 1 1 1 1 3 16.666666666666664 25 1 3 0 3
+team 0 1 2 2 6 33.333333333333329 50 1 3 0 6
+validorder 2 1 0
+ppoints p1:0:0 p3:2:0 p2:1:0 p0:0:0
+award 0:6 1:6 2:3 3:3
+chat 3 103 Reward: 3/0
+chat 2 103 Reward: 3/0
+chat 1 103 Reward: 6/0
+chat 0 103 Reward: 6/0
+flags 0:0/p0/1/9/0 1:0/p0/1/9/0 2:1/p2/1/9/0 3:2/p3/1/9/0 4:-/-/-1/0/0 5:-/-/-1/0/0
+ding
+arena 0 4 4 3 3 0 36 3 27 0 0 0 0 0 0 0
+calc 0 1 1
+team 2 1 1 1 9 16.666666666666664 25 1 9 0 9
+team 1 1 1 1 9 16.666666666666664 25 1 9 0 9
+team 0 1 2 2 18 33.333333333333329 50 1 9 0 18
+validorder 2 1 0
+ppoints p1:0:0 p3:2:0 p2:1:0 p0:0:0
+award 0:18 1:18 2:9 3:9
+chat 3 103 Reward: 9/0
+chat 2 103 Reward: 9/0
+chat 1 103 Reward: 18/0
+chat 0 103 Reward: 18/0
+flags 0:0/p0/2/27/0 1:0/p0/2/27/0 2:1/p2/2/27/0 3:2/p3/2/27/0 4:-/-/-1/0/0 5:-/-/-1/0/0
+ding
+arena 0 4 4 3 3 0 108 3 81 0 0 0 0 0 0 0
+calc 0 1 1
+team 2 1 1 1 27 16.666666666666664 25 1 27 0 27
+team 1 1 1 1 27 16.666666666666664 25 1 27 0 27
+team 0 1 2 2 54 33.333333333333329 50 1 27 0 54
+validorder 2 1 0
+ppoints p1:0:0 p3:2:0 p2:1:0 p0:0:0
+award 0:54 1:54 2:27 3:27
+chat 3 103 Reward: 27/0
+chat 2 103 Reward: 27/0
+chat 1 103 Reward: 54/0
+chat 0 103 Reward: 54/0
+flags 0:0/p0/3/81/0 1:0/p0/3/81/0 2:1/p2/3/81/0 3:2/p3/3/81/0 4:-/-/-1/0/0 5:-/-/-1/0/0
+# TR_STYLE_PERIODIC, RewardModifier 50: points are modifier * flags owned
+settings style=1 modifier=50 maxpoints=10000 minplayersteam=1 minplayersarena=1 minteams=1 minflags=1 minpctflags=0 minweights=1 minpctweights=0 minpct=0 spec=0 safe=0 weightcalc=0 recovery=0 recoverdings=1 recovertime=300 recovermax=-1 timerinitial=6000 timerinterval=6000 flags=6 weights=1
+seat 0w.0w.1w.1w.
+tag 0 0
+tag 1 0
+tag 2 0
+tag 3 2
+ding
+arena 0 4 4 2 2 0 4 1 1 200 4 0 0 0 0 0
+calc 0 1 1
+team 1 1 1 2 1 16.666666666666664 25 0 0 0 50
+team 0 1 3 2 3 50 75 1 1 0 150
+validorder 1 0
+ppoints p3:1:0 p1:0:0 p2:1:0 p0:0:0
+award 0:150 1:150 2:50 3:50
+chat 3 103 Reward: 50/200
+chat 2 103 Reward: 50/200
+chat 1 103 Reward: 150/200
+chat 0 103 Reward: 150/200
+flags 0:0/p0/1/1/0 1:0/p0/1/1/0 2:0/p0/1/1/0 3:1/p2/1/1/0 4:-/-/-1/0/0 5:-/-/-1/0/0
+# TR_STYLE_PERIODIC, RewardModifier 0: award NONE is overwritten with TEAM
+settings style=1 modifier=0 maxpoints=10000 minplayersteam=1 minplayersarena=1 minteams=1 minflags=1 minpctflags=0 minweights=1 minpctweights=0 minpct=0 spec=0 safe=0 weightcalc=0 recovery=0 recoverdings=1 recovertime=300 recovermax=-1 timerinitial=6000 timerinterval=6000 flags=6 weights=1
+seat 0w.0w.1w.1w.
+tag 0 0
+tag 1 0
+tag 2 2
+ding
+arena 0 4 4 2 2 0 3 1 1 0 3 0 0 0 0 0
+calc 0 1 1
+team 1 1 1 2 1 16.666666666666664 33.333333333333329 0 0 0 0
+team 0 1 2 2 2 33.333333333333329 66.666666666666657 1 1 0 0
+validorder 1 0
+ppoints p3:1:0 p1:0:0 p2:1:0 p0:0:0
+award 0:0 1:0 2:0 3:0
+chat 3 103 Reward: 0/0
+chat 2 103 Reward: 0/0
+chat 1 103 Reward: 0/0
+chat 0 103 Reward: 0/0
+flags 0:0/p0/1/1/0 1:0/p0/1/1/0 2:1/p2/1/1/0 3:-/-/-1/0/0 4:-/-/-1/0/0 5:-/-/-1/0/0
+# TR_STYLE_PERIODIC, RewardModifier -3: scaled by the arena's player count
+settings style=1 modifier=-3 maxpoints=10000 minplayersteam=1 minplayersarena=1 minteams=1 minflags=1 minpctflags=0 minweights=1 minpctweights=0 minpct=0 spec=0 safe=0 weightcalc=0 recovery=0 recoverdings=1 recovertime=300 recovermax=-1 timerinitial=6000 timerinterval=6000 flags=6 weights=1
+seat 0w.0w.1w.1w.1w.
+tag 0 0
+tag 1 0
+tag 2 2
+ding
+arena 0 5 5 2 2 0 3 1 1 4294967281 3 0 0 0 0 0
+calc 0 1 1
+team 1 1 1 3 1 16.666666666666664 33.333333333333329 0 0 0 15
+team 0 1 2 2 2 33.333333333333329 66.666666666666657 1 1 0 30
+validorder 1 0
+ppoints p4:1:0 p3:1:0 p1:0:0 p2:1:0 p0:0:0
+award 0:30 1:30 2:15 3:15 4:15
+chat 4 103 Reward: 15/4294967281
+chat 3 103 Reward: 15/4294967281
+chat 2 103 Reward: 15/4294967281
+chat 1 103 Reward: 30/4294967281
+chat 0 103 Reward: 30/4294967281
+flags 0:0/p0/1/1/0 1:0/p0/1/1/0 2:1/p2/1/1/0 3:-/-/-1/0/0 4:-/-/-1/0/0 5:-/-/-1/0/0
+# TR_STYLE_PERIODIC still pays when crStandard's checks fail inside it
+settings style=1 modifier=50 maxpoints=10000 minplayersteam=1 minplayersarena=50 minteams=1 minflags=1 minpctflags=0 minweights=1 minpctweights=0 minpct=0 spec=0 safe=0 weightcalc=0 recovery=0 recoverdings=1 recovertime=300 recovermax=-1 timerinitial=6000 timerinterval=6000 flags=6 weights=1
+seat 0w.0w.1w.
+tag 0 0
+tag 1 2
+ding
+arena 1 3 3 2 2 0 2 1 1 0 2 0 0 0 0 0
+calc 1 3 0
+team 1 1 1 1 1 16.666666666666664 50 1 1 0 0
+team 0 1 1 2 1 16.666666666666664 50 0 0 0 0
+validorder 1 0
+ppoints p1:0:0 p2:1:0 p0:0:0
+award 0:0 1:0 2:0
+chat arena 103 Reward: 0 (arena minimum requirements not met)
+flags 0:0/p0/0/1/0 1:1/p2/0/1/0 2:-/-/-1/0/0 3:-/-/-1/0/0 4:-/-/-1/0/0 5:-/-/-1/0/0
+# TR_STYLE_FIXED_PTS: LLSort leaves validTeams ascending, so 1000 goes to the team the standard formula rated lowest
+settings style=5 modifier=200 maxpoints=10000 minplayersteam=1 minplayersarena=1 minteams=1 minflags=1 minpctflags=0 minweights=1 minpctweights=0 minpct=0 spec=0 safe=0 weightcalc=0 recovery=0 recoverdings=1 recovertime=300 recovermax=-1 timerinitial=6000 timerinterval=6000 flags=12 weights=1
+seat 0w.0w.0w.0w.1w.1w.2w.3w.
+tag 0 0
+tag 1 0
+tag 2 4
+tag 3 4
+tag 4 4
+tag 5 6
+tag 6 6
+tag 7 6
+tag 8 6
+tag 9 7
+tag 10 7
+tag 11 7
+ding
+arena 0 8 8 4 4 0 12 8 8 1600 12 0 0 0 0 0
+calc 0 1 1
+team 3 1 3 1 3 25 25 3 3 0 0
+team 2 1 4 1 4 33.333333333333329 33.333333333333329 4 4 0 0
+team 1 1 3 2 3 25 25 1 1 0 500
+team 0 1 2 4 2 16.666666666666664 16.666666666666664 0 0 0 1000
+validorder 0 1 3 2
+ppoints p5:1:0 p3:0:0 p2:0:0 p1:0:0 p7:3:0 p6:2:0 p4:1:0 p0:0:0
+award 0:1000 1:1000 2:1000 3:1000 4:500 5:500 6:0 7:0
+chat 3 103 Reward: 1000/1600
+chat 2 103 Reward: 1000/1600
+chat 1 103 Reward: 1000/1600
+chat 0 103 Reward: 1000/1600
+chat 5 103 Reward: 500/1600
+chat 4 103 Reward: 500/1600
+chat 7 103 Reward: 0/1600
+chat 6 103 Reward: 0/1600
+flags 0:0/p0/1/1/0 1:0/p0/1/1/0 2:1/p4/1/1/0 3:1/p4/1/1/0 4:1/p4/1/1/0 5:2/p6/1/1/0 6:2/p6/1/1/0 7:2/p6/1/1/0 8:2/p6/1/1/0 9:3/p7/1/1/0 10:3/p7/1/1/0 11:3/p7/1/1/0
+# TR_STYLE_DISABLED: calcReward leaves preCalc's TR_CALC_FAIL in place
+settings style=0 modifier=200 maxpoints=10000 minplayersteam=1 minplayersarena=1 minteams=1 minflags=1 minpctflags=0 minweights=1 minpctweights=0 minpct=0 spec=0 safe=0 weightcalc=0 recovery=0 recoverdings=1 recovertime=300 recovermax=-1 timerinitial=6000 timerinterval=6000 flags=4 weights=1
+seat 0w.1w.
+tag 0 0
+tag 1 1
+ding
+arena 0 2 2 2 2 0 2 2 2 0 2 0 0 0 0 0
+calc 1 3 0
+team 1 1 1 1 1 25 50 1 1 0 0
+team 0 1 1 1 1 25 50 1 1 0 0
+validorder 1 0
+ppoints p1:1:0 p0:0:0
+award 0:0 1:0
+flags 0:0/p0/0/1/0 1:1/p1/0/1/0 2:-/-/-1/0/0 3:-/-/-1/0/0
+# unknown RewardStyle: CALC_REWARD_FAILED reports SUCCESS with award NONE
+settings style=99 modifier=200 maxpoints=10000 minplayersteam=1 minplayersarena=1 minteams=1 minflags=1 minpctflags=0 minweights=1 minpctweights=0 minpct=0 spec=0 safe=0 weightcalc=0 recovery=0 recoverdings=1 recovertime=300 recovermax=-1 timerinitial=6000 timerinterval=6000 flags=4 weights=1
+seat 0w.1w.
+tag 0 0
+tag 1 1
+ding
+arena 0 2 2 2 2 0 2 2 2 0 2 0 0 0 0 0
+calc 0 3 0
+team 1 1 1 1 1 25 50 1 1 0 0
+team 0 1 1 1 1 25 50 1 1 0 0
+validorder 1 0
+ppoints p1:1:0 p0:0:0
+award 0:0 1:0
+flags 0:0/p0/0/1/0 1:1/p1/0/1/0 2:-/-/-1/0/0 3:-/-/-1/0/0
+# spectators and safe zones excluded (the defaults)
+settings style=2 modifier=200 maxpoints=10000 minplayersteam=1 minplayersarena=1 minteams=1 minflags=1 minpctflags=0 minweights=1 minpctweights=0 minpct=0 spec=0 safe=0 weightcalc=0 recovery=0 recoverdings=1 recovertime=300 recovermax=-1 timerinitial=6000 timerinterval=6000 flags=6 weights=1
+seat 0w.0s.0wz1w.1we2w.
+tag 0 0
+tag 1 0
+tag 2 3
+tag 3 5
+ding
+arena 0 6 3 3 3 0 4 4 4 1200 4 0 0 0 0 0
+calc 0 1 1
+team 2 1 1 1 1 16.666666666666664 25 1 1 25 300
+team 1 1 1 1 1 16.666666666666664 25 1 1 25 300
+team 0 1 2 1 2 33.333333333333329 50 2 2 50 600
+validorder 2 1 0
+ppoints p4:1:0 p2:0:0 p1:0:0 p5:2:0 p3:1:0 p0:0:0
+award 0:600 1:0 2:0 3:300 4:0 5:300
+chat 5 103 Reward: 300/1200
+chat 3 103 Reward: 300/1200
+chat 4 103 Reward: 0/1200 (not playing)
+chat 0 103 Reward: 600/1200
+chat 2 103 Reward: 0/1200 (not playing)
+chat 1 103 Reward: 0/1200 (not playing)
+flags 0:0/p0/1/1/0 1:0/p0/1/1/0 2:1/p3/1/1/0 3:2/p5/1/1/0 4:-/-/-1/0/0 5:-/-/-1/0/0
+# SpecRecievePoints and SafeRecievePoints both on
+settings style=2 modifier=200 maxpoints=10000 minplayersteam=1 minplayersarena=1 minteams=1 minflags=1 minpctflags=0 minweights=1 minpctweights=0 minpct=0 spec=1 safe=1 weightcalc=0 recovery=0 recoverdings=1 recovertime=300 recovermax=-1 timerinitial=6000 timerinterval=6000 flags=6 weights=1
+seat 0w.0s.0wz1w.1we2w.
+tag 0 0
+tag 1 0
+tag 2 3
+tag 3 5
+ding
+arena 0 6 5 3 3 0 4 2 2 1200 4 0 0 0 0 0
+calc 0 1 1
+team 2 1 1 1 1 16.666666666666664 25 1 1 50 600
+team 1 1 1 1 1 16.666666666666664 25 1 1 50 600
+team 0 1 2 3 2 33.333333333333329 50 0 0 0 0
+validorder 2 1 0
+ppoints p4:1:0 p2:0:0 p1:0:0 p5:2:0 p3:1:0 p0:0:0
+award 0:0 1:0 2:0 3:600 4:0 5:600
+chat 5 103 Reward: 600/1200
+chat 3 103 Reward: 600/1200
+chat 4 103 Reward: 0/1200 (not playing)
+chat 2 103 Reward: 0/1200
+chat 1 103 Reward: 0/1200
+chat 0 103 Reward: 0/1200
+flags 0:0/p0/1/1/0 1:0/p0/1/1/0 2:1/p3/1/1/0 3:2/p5/1/1/0 4:-/-/-1/0/0 5:-/-/-1/0/0
+# recovery by dings, RecoverDings 1: in time, and one ding too late
+settings style=2 modifier=200 maxpoints=10000 minplayersteam=1 minplayersarena=1 minteams=1 minflags=1 minpctflags=0 minweights=1 minpctweights=0 minpct=0 spec=0 safe=0 weightcalc=0 recovery=0 recoverdings=1 recovertime=300 recovermax=-1 timerinitial=6000 timerinterval=6000 flags=4 weights=1,2,4,8,16
+seat 0w.1w.
+tag 0 0
+tag 1 0
+tag 2 0
+tag 3 0
+ding
+arena 0 2 2 2 1 1 4 4 4 400 4 0 0 0 0 0
+calc 0 1 1
+team 1 0 0 1 0 0 0 0 0 0 0
+team 0 1 4 1 4 100 100 4 4 100 400
+validorder 0
+ppoints p1:1:0 p0:0:0
+award 0:400 1:0
+chat 0 103 Reward: 400/400
+chat 1 103 Reward: 0/0 (minimum team requirements not met)
+flags 0:0/p0/1/2/0 1:0/p0/1/2/0 2:0/p0/1/2/0 3:0/p0/1/2/0
+ding
+arena 0 2 2 2 1 1 8 4 8 400 0 0 0 0 0 0
+calc 0 1 1
+team 1 0 0 1 0 0 0 0 0 0 0
+team 0 1 4 1 8 100 100 4 8 100 400
+validorder 0
+ppoints p1:1:0 p0:0:0
+award 0:400 1:0
+chat 0 103 Reward: 400/400
+chat 1 103 Reward: 0/0 (minimum team requirements not met)
+flags 0:0/p0/2/4/0 1:0/p0/2/4/0 2:0/p0/2/4/0 3:0/p0/2/4/0
+ding
+arena 0 2 2 2 1 1 16 4 16 400 0 0 0 0 0 0
+calc 0 1 1
+team 1 0 0 1 0 0 0 0 0 0 0
+team 0 1 4 1 16 100 100 4 16 100 400
+validorder 0
+ppoints p1:1:0 p0:0:0
+award 0:400 1:0
+chat 0 103 Reward: 400/400
+chat 1 103 Reward: 0/0 (minimum team requirements not met)
+flags 0:0/p0/3/8/0 1:0/p0/3/8/0 2:0/p0/3/8/0 3:0/p0/3/8/0
+tag 0 1
+tag 1 1
+ding
+arena 0 2 2 2 2 0 18 4 18 400 2 2 0 2 0 0
+calc 0 1 1
+team 1 1 2 1 2 50 11.111111111111111 2 2 11.111111111111111 44
+team 0 1 2 1 16 50 88.888888888888886 2 16 88.888888888888886 355
+validorder 1 0
+ppoints p1:1:0 p0:0:0
+award 0:355 1:44
+chat 1 103 Reward: 44/400
+chat 0 103 Reward: 355/400
+flags 0:1/p1/1/2/0/old:0,1,3,8,0 1:1/p1/1/2/0/old:0,1,3,8,0 2:0/p0/4/16/0 3:0/p0/4/16/0
+tag 0 0
+ding
+arena 0 2 2 2 2 0 42 4 42 400 1 1 1 1 0 0
+calc 0 1 1
+team 1 1 1 1 2 25 4.7619047619047619 1 2 4.7619047619047619 19
+team 0 1 3 1 40 75 95.238095238095227 3 40 95.238095238095227 380
+validorder 1 0
+ppoints p1:1:0 p0:0:0
+award 0:380 1:19
+chat 1 103 Reward: 19/400
+chat 0 103 Reward: 380/400
+flags 0:0/p0/4/16/1/old:1,1,1,2,0 1:1/p1/2/4/0 2:0/p0/5/16/0 3:0/p0/5/16/0
+tag 1 0
+ding
+arena 0 2 2 2 1 1 49 4 49 400 1 1 0 1 0 0
+calc 0 1 1
+team 1 0 0 1 0 0 0 0 0 0 0
+team 0 1 4 1 49 100 100 4 49 100 400
+validorder 0
+ppoints p1:1:0 p0:0:0
+award 0:400 1:0
+chat 0 103 Reward: 400/400
+chat 1 103 Reward: 0/0 (minimum team requirements not met)
+flags 0:0/p0/5/16/1 1:0/p0/1/2/0/old:1,1,2,4,0 2:0/p0/6/16/0 3:0/p0/6/16/0
+# recovery by dings, RecoverDings 0: no ding may pass at all
+settings style=2 modifier=200 maxpoints=10000 minplayersteam=1 minplayersarena=1 minteams=1 minflags=1 minpctflags=0 minweights=1 minpctweights=0 minpct=0 spec=0 safe=0 weightcalc=0 recovery=0 recoverdings=0 recovertime=300 recovermax=-1 timerinitial=6000 timerinterval=6000 flags=3 weights=1,2,4,8,16
+seat 0w.1w.
+tag 0 0
+tag 1 0
+tag 2 0
+ding
+arena 0 2 2 2 1 1 3 3 3 400 3 0 0 0 0 0
+calc 0 1 1
+team 1 0 0 1 0 0 0 0 0 0 0
+team 0 1 3 1 3 100 100 3 3 100 400
+validorder 0
+ppoints p1:1:0 p0:0:0
+award 0:400 1:0
+chat 0 103 Reward: 400/400
+chat 1 103 Reward: 0/0 (minimum team requirements not met)
+flags 0:0/p0/1/2/0 1:0/p0/1/2/0 2:0/p0/1/2/0
+ding
+arena 0 2 2 2 1 1 6 3 6 400 0 0 0 0 0 0
+calc 0 1 1
+team 1 0 0 1 0 0 0 0 0 0 0
+team 0 1 3 1 6 100 100 3 6 100 400
+validorder 0
+ppoints p1:1:0 p0:0:0
+award 0:400 1:0
+chat 0 103 Reward: 400/400
+chat 1 103 Reward: 0/0 (minimum team requirements not met)
+flags 0:0/p0/2/4/0 1:0/p0/2/4/0 2:0/p0/2/4/0
+tag 0 1
+tag 1 1
+tag 0 0
+ding
+arena 0 2 2 2 2 0 9 3 9 400 3 3 1 3 0 0
+calc 0 1 1
+team 1 1 1 1 1 33.333333333333329 11.111111111111111 1 1 11.111111111111111 44
+team 0 1 2 1 8 66.666666666666657 88.888888888888886 2 8 88.888888888888886 355
+validorder 1 0
+ppoints p1:1:0 p0:0:0
+award 0:355 1:44
+chat 1 103 Reward: 44/400
+chat 0 103 Reward: 355/400
+flags 0:0/p0/3/8/1 1:1/p1/1/2/0 2:0/p0/3/8/0
+tag 1 0
+ding
+arena 0 2 2 2 1 1 17 3 17 400 1 1 0 1 0 0
+calc 0 1 1
+team 1 0 0 1 0 0 0 0 0 0 0
+team 0 1 3 1 17 100 100 3 17 100 400
+validorder 0
+ppoints p1:1:0 p0:0:0
+award 0:400 1:0
+chat 0 103 Reward: 400/400
+chat 1 103 Reward: 0/0 (minimum team requirements not met)
+flags 0:0/p0/4/16/1 1:0/p0/1/2/0 2:0/p0/4/16/0
+# recovery by time, RecoverTime 60s: dings no longer expire entries
+settings style=2 modifier=200 maxpoints=10000 minplayersteam=1 minplayersarena=1 minteams=1 minflags=1 minpctflags=0 minweights=1 minpctweights=0 minpct=0 spec=0 safe=0 weightcalc=0 recovery=1 recoverdings=0 recovertime=60 recovermax=-1 timerinitial=6000 timerinterval=6000 flags=3 weights=1,2,4,8,16
+seat 0w.1w.
+tag 0 0
+tag 1 0
+tag 2 0
+ding
+arena 0 2 2 2 1 1 3 3 3 400 3 0 0 0 0 0
+calc 0 1 1
+team 1 0 0 1 0 0 0 0 0 0 0
+team 0 1 3 1 3 100 100 3 3 100 400
+validorder 0
+ppoints p1:1:0 p0:0:0
+award 0:400 1:0
+chat 0 103 Reward: 400/400
+chat 1 103 Reward: 0/0 (minimum team requirements not met)
+flags 0:0/p0/1/2/0 1:0/p0/1/2/0 2:0/p0/1/2/0
+ding
+arena 0 2 2 2 1 1 6 3 6 400 0 0 0 0 0 0
+calc 0 1 1
+team 1 0 0 1 0 0 0 0 0 0 0
+team 0 1 3 1 6 100 100 3 6 100 400
+validorder 0
+ppoints p1:1:0 p0:0:0
+award 0:400 1:0
+chat 0 103 Reward: 400/400
+chat 1 103 Reward: 0/0 (minimum team requirements not met)
+flags 0:0/p0/2/4/0 1:0/p0/2/4/0 2:0/p0/2/4/0
+tag 0 1
+tag 1 1
+tag 2 1
+ding
+arena 0 2 2 2 1 1 3 3 3 400 3 3 0 3 0 0
+calc 0 1 1
+team 1 1 3 1 3 100 100 3 3 100 400
+team 0 0 0 1 0 0 0 0 0 0 0
+validorder 1
+ppoints p1:1:0 p0:0:0
+award 0:0 1:400
+chat 1 103 Reward: 400/400
+chat 0 103 Reward: 0/0 (minimum team requirements not met)
+flags 0:1/p1/1/2/0/old:0,1,2,4,0 1:1/p1/1/2/0/old:0,1,2,4,0 2:1/p1/1/2/0/old:0,1,2,4,0
+ding
+arena 0 2 2 2 1 1 6 3 6 400 0 0 0 0 0 0
+calc 0 1 1
+team 1 1 3 1 6 100 100 3 6 100 400
+team 0 0 0 1 0 0 0 0 0 0 0
+validorder 1
+ppoints p1:1:0 p0:0:0
+award 0:0 1:400
+chat 1 103 Reward: 400/400
+chat 0 103 Reward: 0/0 (minimum team requirements not met)
+flags 0:1/p1/2/4/0/old:0,2,2,4,0 1:1/p1/2/4/0/old:0,2,2,4,0 2:1/p1/2/4/0/old:0,2,2,4,0
+ding
+arena 0 2 2 2 1 1 12 3 12 400 0 0 0 0 0 0
+calc 0 1 1
+team 1 1 3 1 12 100 100 3 12 100 400
+team 0 0 0 1 0 0 0 0 0 0 0
+validorder 1
+ppoints p1:1:0 p0:0:0
+award 0:0 1:400
+chat 1 103 Reward: 400/400
+chat 0 103 Reward: 0/0 (minimum team requirements not met)
+flags 0:1/p1/3/8/0/old:0,3,2,4,0 1:1/p1/3/8/0/old:0,3,2,4,0 2:1/p1/3/8/0/old:0,3,2,4,0
+advance 3000
+tag 0 0
+ding
+arena 0 2 2 2 2 0 20 3 20 400 1 1 1 1 0 0
+calc 0 1 1
+team 1 1 2 1 16 66.666666666666657 80 2 16 80 320
+team 0 1 1 1 4 33.333333333333329 20 1 4 20 80
+validorder 1 0
+ppoints p1:1:0 p0:0:0
+award 0:80 1:320
+chat 1 103 Reward: 320/400
+chat 0 103 Reward: 80/400
+flags 0:0/p0/3/8/1/old:1,1,3,8,0 1:1/p1/4/16/0/old:0,4,2,4,0 2:1/p1/4/16/0/old:0,4,2,4,0
+advance 3100
+tag 1 0
+ding
+arena 0 2 2 2 2 0 25 3 25 400 1 1 0 1 0 0
+calc 0 1 1
+team 1 1 1 1 16 33.333333333333329 64 1 16 64 256
+team 0 1 2 1 9 66.666666666666657 36 2 9 36 144
+validorder 1 0
+ppoints p1:1:0 p0:0:0
+award 0:144 1:256
+chat 1 103 Reward: 256/400
+chat 0 103 Reward: 144/400
+flags 0:0/p0/4/16/1/old:1,2,3,8,0 1:0/p0/1/2/0/old:1,1,4,16,0 2:1/p1/5/16/0
+# recovery by dings AND time: whichever cutoff bites first wins
+settings style=2 modifier=200 maxpoints=10000 minplayersteam=1 minplayersarena=1 minteams=1 minflags=1 minpctflags=0 minweights=1 minpctweights=0 minpct=0 spec=0 safe=0 weightcalc=0 recovery=2 recoverdings=2 recovertime=60 recovermax=-1 timerinitial=6000 timerinterval=6000 flags=3 weights=1,2,4,8,16
+seat 0w.1w.
+tag 0 0
+tag 1 0
+tag 2 0
+ding
+arena 0 2 2 2 1 1 3 3 3 400 3 0 0 0 0 0
+calc 0 1 1
+team 1 0 0 1 0 0 0 0 0 0 0
+team 0 1 3 1 3 100 100 3 3 100 400
+validorder 0
+ppoints p1:1:0 p0:0:0
+award 0:400 1:0
+chat 0 103 Reward: 400/400
+chat 1 103 Reward: 0/0 (minimum team requirements not met)
+flags 0:0/p0/1/2/0 1:0/p0/1/2/0 2:0/p0/1/2/0
+ding
+arena 0 2 2 2 1 1 6 3 6 400 0 0 0 0 0 0
+calc 0 1 1
+team 1 0 0 1 0 0 0 0 0 0 0
+team 0 1 3 1 6 100 100 3 6 100 400
+validorder 0
+ppoints p1:1:0 p0:0:0
+award 0:400 1:0
+chat 0 103 Reward: 400/400
+chat 1 103 Reward: 0/0 (minimum team requirements not met)
+flags 0:0/p0/2/4/0 1:0/p0/2/4/0 2:0/p0/2/4/0
+tag 0 1
+tag 1 1
+tag 2 1
+ding
+arena 0 2 2 2 1 1 3 3 3 400 3 3 0 3 0 0
+calc 0 1 1
+team 1 1 3 1 3 100 100 3 3 100 400
+team 0 0 0 1 0 0 0 0 0 0 0
+validorder 1
+ppoints p1:1:0 p0:0:0
+award 0:0 1:400
+chat 1 103 Reward: 400/400
+chat 0 103 Reward: 0/0 (minimum team requirements not met)
+flags 0:1/p1/1/2/0/old:0,1,2,4,0 1:1/p1/1/2/0/old:0,1,2,4,0 2:1/p1/1/2/0/old:0,1,2,4,0
+ding
+arena 0 2 2 2 1 1 6 3 6 400 0 0 0 0 0 0
+calc 0 1 1
+team 1 1 3 1 6 100 100 3 6 100 400
+team 0 0 0 1 0 0 0 0 0 0 0
+validorder 1
+ppoints p1:1:0 p0:0:0
+award 0:0 1:400
+chat 1 103 Reward: 400/400
+chat 0 103 Reward: 0/0 (minimum team requirements not met)
+flags 0:1/p1/2/4/0/old:0,2,2,4,0 1:1/p1/2/4/0/old:0,2,2,4,0 2:1/p1/2/4/0/old:0,2,2,4,0
+tag 0 0
+ding
+arena 0 2 2 2 2 0 12 3 12 400 1 1 1 1 0 0
+calc 0 1 1
+team 1 1 2 1 8 66.666666666666657 66.666666666666657 2 8 66.666666666666657 266
+team 0 1 1 1 4 33.333333333333329 33.333333333333329 1 4 33.333333333333329 133
+validorder 1 0
+ppoints p1:1:0 p0:0:0
+award 0:133 1:266
+chat 1 103 Reward: 266/400
+chat 0 103 Reward: 133/400
+flags 0:0/p0/3/8/1/old:1,1,2,4,0 1:1/p1/3/8/0 2:1/p1/3/8/0
+tag 1 0
+advance 7000
+tag 2 0
+ding
+arena 0 2 2 2 1 1 10 3 10 400 2 2 0 2 0 0
+calc 0 1 1
+team 1 0 0 1 0 0 0 0 0 0 0
+team 0 1 3 1 10 100 100 3 10 100 400
+validorder 0
+ppoints p1:1:0 p0:0:0
+award 0:400 1:0
+chat 0 103 Reward: 400/400
+chat 1 103 Reward: 0/0 (minimum team requirements not met)
+flags 0:0/p0/4/16/1 1:0/p0/1/2/0 2:0/p0/1/2/0/old:1,1,3,8,0
+# RecoverMax 2: the third loss records no recovery entry at all
+settings style=2 modifier=200 maxpoints=10000 minplayersteam=1 minplayersarena=1 minteams=1 minflags=1 minpctflags=0 minweights=1 minpctweights=0 minpct=0 spec=0 safe=0 weightcalc=0 recovery=0 recoverdings=5 recovertime=60 recovermax=2 timerinitial=6000 timerinterval=6000 flags=2 weights=1,2,4,8,16
+seat 0w.1w.
+tag 0 0
+tag 1 0
+ding
+arena 0 2 2 2 1 1 2 2 2 400 2 0 0 0 0 0
+calc 0 1 1
+team 1 0 0 1 0 0 0 0 0 0 0
+team 0 1 2 1 2 100 100 2 2 100 400
+validorder 0
+ppoints p1:1:0 p0:0:0
+award 0:400 1:0
+chat 0 103 Reward: 400/400
+chat 1 103 Reward: 0/0 (minimum team requirements not met)
+flags 0:0/p0/1/2/0 1:0/p0/1/2/0
+tag 0 1
+tag 0 0
+tag 0 1
+tag 0 0
+tag 0 1
+tag 0 0
+ding
+arena 0 2 2 2 1 1 3 2 3 400 6 6 4 6 0 0
+calc 0 1 1
+team 1 0 0 1 0 0 0 0 0 0 0
+team 0 1 2 1 3 100 100 2 3 100 400
+validorder 0
+ppoints p1:1:0 p0:0:0
+award 0:400 1:0
+chat 0 103 Reward: 400/400
+chat 1 103 Reward: 0/0 (minimum team requirements not met)
+flags 0:0/p0/1/2/0 1:0/p0/2/4/0
+# WeightCalc TIME: the weight index is whole minutes held, not dings
+settings style=2 modifier=200 maxpoints=10000 minplayersteam=1 minplayersarena=1 minteams=1 minflags=1 minpctflags=0 minweights=1 minpctweights=0 minpct=0 spec=0 safe=0 weightcalc=1 recovery=0 recoverdings=1 recovertime=60 recovermax=-1 timerinitial=6000 timerinterval=6000 flags=4 weights=1,2,4,8,16
+seat 0w.1w.
+tag 0 0
+tag 1 0
+ding
+arena 0 2 2 2 1 1 2 2 2 400 2 0 0 0 0 0
+calc 0 1 1
+team 1 0 0 1 0 0 0 0 0 0 0
+team 0 1 2 1 2 50 100 2 2 100 400
+validorder 0
+ppoints p1:1:0 p0:0:0
+award 0:400 1:0
+chat 0 103 Reward: 400/400
+chat 1 103 Reward: 0/0 (minimum team requirements not met)
+flags 0:0/p0/1/1/0 1:0/p0/1/1/0 2:-/-/-1/0/0 3:-/-/-1/0/0
+advance 6000
+ding
+arena 0 2 2 2 1 1 4 2 4 400 0 0 0 0 0 0
+calc 0 1 1
+team 1 0 0 1 0 0 0 0 0 0 0
+team 0 1 2 1 4 50 100 2 4 100 400
+validorder 0
+ppoints p1:1:0 p0:0:0
+award 0:400 1:0
+chat 0 103 Reward: 400/400
+chat 1 103 Reward: 0/0 (minimum team requirements not met)
+flags 0:0/p0/2/2/0 1:0/p0/2/2/0 2:-/-/-1/0/0 3:-/-/-1/0/0
+advance 12000
+ding
+arena 0 2 2 2 1 1 16 2 16 400 0 0 0 0 0 0
+calc 0 1 1
+team 1 0 0 1 0 0 0 0 0 0 0
+team 0 1 2 1 16 50 100 2 16 100 400
+validorder 0
+ppoints p1:1:0 p0:0:0
+award 0:400 1:0
+chat 0 103 Reward: 400/400
+chat 1 103 Reward: 0/0 (minimum team requirements not met)
+flags 0:0/p0/3/8/0 1:0/p0/3/8/0 2:-/-/-1/0/0 3:-/-/-1/0/0
+advance 60000
+ding
+arena 0 2 2 2 1 1 32 2 32 400 0 0 0 0 0 0
+calc 0 1 1
+team 1 0 0 1 0 0 0 0 0 0 0
+team 0 1 2 1 32 50 100 2 32 100 400
+validorder 0
+ppoints p1:1:0 p0:0:0
+award 0:400 1:0
+chat 0 103 Reward: 400/400
+chat 1 103 Reward: 0/0 (minimum team requirements not met)
+flags 0:0/p0/4/16/0 1:0/p0/4/16/0 2:-/-/-1/0/0 3:-/-/-1/0/0
+# a zero in the middle of the weight table, and the table running out
+settings style=2 modifier=200 maxpoints=10000 minplayersteam=1 minplayersarena=1 minteams=1 minflags=1 minpctflags=0 minweights=1 minpctweights=0 minpct=0 spec=0 safe=0 weightcalc=0 recovery=0 recoverdings=1 recovertime=60 recovermax=-1 timerinitial=6000 timerinterval=6000 flags=3 weights=5,0,7
+seat 0w.1w.
+tag 0 0
+tag 1 0
+tag 2 1
+ding
+arena 0 2 2 2 2 0 15 3 15 400 3 0 0 0 0 0
+calc 0 1 1
+team 1 1 1 1 5 33.333333333333329 33.333333333333329 1 5 33.333333333333329 133
+team 0 1 2 1 10 66.666666666666657 66.666666666666657 2 10 66.666666666666657 266
+validorder 1 0
+ppoints p1:1:0 p0:0:0
+award 0:266 1:133
+chat 1 103 Reward: 133/400
+chat 0 103 Reward: 266/400
+flags 0:0/p0/1/0/0 1:0/p0/1/0/0 2:1/p1/1/0/0
+ding
+arena 1 2 2 2 0 2 0 0 0 0 0 0 0 0 0 0
+calc 1 3 0
+team 1 0 1 1 0 33.333333333333329 0 0 0 0 0
+team 0 0 2 1 0 66.666666666666657 0 0 0 0 0
+validorder
+ppoints p1:1:0 p0:0:0
+award 0:0 1:0
+chat arena 103 Reward: 0 (arena minimum requirements not met)
+flags 0:0/p0/1/0/0 1:0/p0/1/0/0 2:1/p1/1/0/0
+ding
+arena 1 2 2 2 0 2 0 0 0 0 0 0 0 0 0 0
+calc 1 3 0
+team 1 0 1 1 0 33.333333333333329 0 0 0 0 0
+team 0 0 2 1 0 66.666666666666657 0 0 0 0 0
+validorder
+ppoints p1:1:0 p0:0:0
+award 0:0 1:0
+chat arena 103 Reward: 0 (arena minimum requirements not met)
+flags 0:0/p0/1/0/0 1:0/p0/1/0/0 2:1/p1/1/0/0
+ding
+arena 1 2 2 2 0 2 0 0 0 0 0 0 0 0 0 0
+calc 1 3 0
+team 1 0 1 1 0 33.333333333333329 0 0 0 0 0
+team 0 0 2 1 0 66.666666666666657 0 0 0 0 0
+validorder
+ppoints p1:1:0 p0:0:0
+award 0:0 1:0
+chat arena 103 Reward: 0 (arena minimum requirements not met)
+flags 0:0/p0/1/0/0 1:0/p0/1/0/0 2:1/p1/1/0/0
+# an unset weight inherits the one before it (loadSettings' defaultVal chain)
+settings style=2 modifier=200 maxpoints=10000 minplayersteam=1 minplayersarena=1 minteams=1 minflags=1 minpctflags=0 minweights=1 minpctweights=0 minpct=0 spec=0 safe=0 weightcalc=0 recovery=0 recoverdings=1 recovertime=60 recovermax=-1 timerinitial=6000 timerinterval=6000 flags=2 weights=40,0
+seat 0w.1w.
+tag 0 0
+ding
+arena 0 2 2 2 1 1 40 1 40 400 1 0 0 0 0 0
+calc 0 1 1
+team 1 0 0 1 0 0 0 0 0 0 0
+team 0 1 1 1 40 50 100 1 40 100 400
+validorder 0
+ppoints p1:1:0 p0:0:0
+award 0:400 1:0
+chat 0 103 Reward: 400/400
+chat 1 103 Reward: 0/0 (minimum team requirements not met)
+flags 0:0/p0/1/0/0 1:-/-/-1/0/0
+# loadSettings clamps every minimum up to 1 and both timers up to 1500
+settings style=2 modifier=200 maxpoints=10000 minplayersteam=1 minplayersarena=1 minteams=1 minflags=1 minpctflags=0 minweights=1 minpctweights=0 minpct=0 spec=0 safe=0 weightcalc=0 recovery=0 recoverdings=1 recovertime=60 recovermax=-1 timerinitial=1500 timerinterval=1500 flags=3 weights=1
+seat 0w.
+tag 0 0
+ding
+arena 0 1 1 1 1 0 1 1 1 200 1 0 0 0 0 0
+calc 0 1 1
+team 0 1 1 1 1 33.333333333333329 100 1 1 100 200
+validorder 0
+ppoints p0:0:0
+award 0:200
+chat 0 103 Reward: 200/200
+flags 0:0/p0/1/1/0 1:-/-/-1/0/0 2:-/-/-1/0/0

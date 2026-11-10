@@ -72,6 +72,23 @@ fn watch(zone: &mut Zone, p: PlayerId) -> Option<&mut Watch> {
         .map(|x| x.ext.get_or_default::<Watch>())
 }
 
+/// Who is watching this player's damage, in the order they started.
+pub fn watchers(zone: &Zone, p: PlayerId) -> Vec<PlayerId> {
+    zone.players
+        .get(p)
+        .and_then(|x| x.ext.get::<Watch>())
+        .map(|w| w.players.clone())
+        .unwrap_or_default()
+}
+
+/// How many modules are watching this player ([`module_watch`]).
+pub fn module_watch_count(zone: &Zone, p: PlayerId) -> u16 {
+    zone.players
+        .get(p)
+        .and_then(|x| x.ext.get::<Watch>())
+        .map_or(0, |w| w.modules)
+}
+
 /// How many watchers a player has (ASSS `WatchCount`).
 pub fn watch_count(zone: &Zone, p: PlayerId) -> usize {
     zone.players
@@ -132,6 +149,15 @@ pub fn clear_watch(zone: &mut Zone, p: PlayerId, and_theirs: bool) {
 
 /// A module starts or stops watching a player (ASSS `ModuleWatch`). These
 /// are counted apart from players' watches.
+///
+/// **Deliberate divergence.** ASSS's `ModuleWatch` moves the counter and
+/// sends nothing, so a module that asks for damage while nobody else is
+/// watching never gets the client told to report it -- and because the
+/// total is then already 1, the first real watcher afterwards takes it to 2
+/// and sends no toggle either, so neither of them ever sees a report. That
+/// makes the whole interface inert, and poisons the next watcher besides.
+/// Here a module watch toggles the client exactly as a player's watch does,
+/// on the same 0-to-1 and 1-to-0 transitions.
 pub fn module_watch(zone: &mut Zone, p: PlayerId, on: bool) {
     let Some(w) = watch(zone, p) else { return };
     let before = w.count();

@@ -5,6 +5,7 @@
 
 pub mod anticheat;
 pub mod arenaman;
+pub mod arenaperm;
 pub mod auth_file;
 pub mod balls;
 pub mod banners;
@@ -21,6 +22,7 @@ pub mod directory;
 pub mod fg_turf;
 pub mod fg_wz;
 pub mod flagcore;
+pub mod fm_lockspec;
 pub mod freqowners;
 pub mod game;
 pub mod jackpot;
@@ -76,6 +78,7 @@ pub const DEFAULT_MODULES: &[&str] = &[
     "points_goal",
     "fg_wz",
     "fg_turf",
+    "fm_lockspec",
     "jackpot",
     "points_flag",
     "playercmd",
@@ -134,6 +137,8 @@ pub fn builtin_catalog() -> ModuleCatalog {
         points_goal::PointsGoalModule
     });
     c.register("fg_wz", &["<py> fg_wz"], || fg_wz::FgWzModule);
+    c.register("fm_lockspec", &[], || fm_lockspec::FmLockSpecModule);
+    c.register("arenaperm", &[], || arenaperm::ArenaPermModule);
     c.register("fg_turf", &["<py> fg_turf"], || fg_turf::FgTurfModule);
     c.register("jackpot", &["scoring:jackpot"], || jackpot::JackpotModule);
     c.register("points_flag", &["scoring:points_flag"], || {

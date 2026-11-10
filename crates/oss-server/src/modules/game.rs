@@ -411,15 +411,22 @@ fn relay(
     let range = if send_wpn { cfg.range(wtype) } else { 0 };
     let (x1, y1) = (i64::from(pos.x), i64::from(pos.y));
 
+    let see_own = zone
+        .players
+        .get(pid)
+        .and_then(|p| p.ext.get::<BotFeatures>())
+        .is_some_and(|b| b.see_own_posn);
     let mut groups: [Vec<PlayerId>; 3] = Default::default();
     for i in zone.players.iter() {
         if i.status != PlayerStatus::Playing
             || i.arena != Some(arena)
-            || i.id == pid
+            || (i.id == pid && !see_own)
             || !matches!(i.kind, ClientKind::Vie | ClientKind::Continuum)
         {
             continue;
         }
+        // a bot that asked for every position packet (`?botfeature`)
+        let see_all = i.ext.get::<BotFeatures>().is_some_and(|b| b.see_all_posn);
         let d = i.ext.get::<GameData>();
         let (ix, iy) = d.map_or((0, 0), |d| (i64::from(d.x), i64::from(d.y)));
         let dist = (((x1 - ix).pow(2) + (y1 - iy).pow(2)) as f64).sqrt() as i64;
@@ -432,7 +439,7 @@ fn relay(
             let res = i64::from(i.resolution.0) + i64::from(i.resolution.1);
             dist < res || radar
         };
-        if !(near || to_all || watching || turret) {
+        if !(near || to_all || watching || turret || see_all) {
             continue;
         }
         let tail = match d {
@@ -1223,6 +1230,32 @@ pub fn set_lock_notify(zone: &mut Zone, pid: PlayerId, locked: bool, spec: bool,
         };
         super::chat::message(zone, pid, text);
     }
+}
+
+/// What a bot asked the server to send it (ASSS's `p->flags.see_all_posn`
+/// and `see_own_posn`, set with `?botfeature`). Unlike the rest of a
+/// player's game state these outlive an arena change, as they do in ASSS.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct BotFeatures {
+    /// Every position packet in the arena, however far away.
+    pub see_all_posn: bool,
+    /// The player's own position packets, echoed back.
+    pub see_own_posn: bool,
+}
+
+/// Turns one of ASSS's two bot features on or off. False if the name isn't
+/// one of `seeallposn` or `seeownposn`.
+pub fn set_bot_feature(zone: &mut Zone, pid: PlayerId, feature: &str, on: bool) -> bool {
+    let Some(p) = zone.players.get_mut(pid) else {
+        return false;
+    };
+    let b = p.ext.get_or_default::<BotFeatures>();
+    match feature {
+        "seeallposn" => b.see_all_posn = on,
+        "seeownposn" => b.see_own_posn = on,
+        _ => return false,
+    }
+    true
 }
 
 /// An arena's default locked state (ASSS's `initlockship` / `initspec`),

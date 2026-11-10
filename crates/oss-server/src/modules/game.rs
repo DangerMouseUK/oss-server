@@ -763,6 +763,15 @@ impl FreqManager for BalancedFreqs {
         if super::lagdata::no_ship(zone, player) || super::anticheat::no_ship(zone, player) {
             *ship = Ship::SPEC;
         }
+        // the arena is locked to spectator mode (`?lockarena`), or the zone
+        // always starts players there (`Team:InitialSpec`)
+        let initial_spec = zone
+            .arenas
+            .get(arena)
+            .is_some_and(|a| a.cfg.get_int("Team", "InitialSpec", 0) != 0);
+        if arena_lock(zone, arena).spec || initial_spec {
+            *ship = Ship::SPEC;
+        }
         *freq = if ship.is_spec() {
             zone.arenas.get(arena).map_or(8025, spec_freq)
         } else {
@@ -866,10 +875,12 @@ impl Module for GameModule {
                 return;
             };
             let now = z.now();
+            let locked = arena_lock(z, arena).lock_ship;
             if let Some(d) = gd(z, ev.player) {
                 let ignore_weapons = d.ignore_weapons;
                 *d = GameData {
                     ignore_weapons,
+                    locked,
                     changes_checked: now,
                     region_checked: now,
                     see_nrg: SeeEnergy::from_cfg(cfg.get_int("Misc", "SeeEnergy", 0)),
@@ -1182,6 +1193,12 @@ fn on_kickoff(zone: &mut Zone, pid: PlayerId, _pkt: &[u8]) {
 /// Locks or unlocks a player's ship (ASSS `Lock`/`Unlock`): a locked
 /// player can only change to spectator. `spec` first moves them to spec.
 pub fn set_lock(zone: &mut Zone, pid: PlayerId, locked: bool, spec: bool) {
+    set_lock_notify(zone, pid, locked, spec, false);
+}
+
+/// [`set_lock`], and with `notify` the player is told when it changes
+/// anything (ASSS `lock_work`).
+pub fn set_lock_notify(zone: &mut Zone, pid: PlayerId, locked: bool, spec: bool, notify: bool) {
     if locked && spec {
         let arena = zone.players.get(pid).and_then(|p| p.arena);
         if let Some(a) = arena {
@@ -1189,7 +1206,85 @@ pub fn set_lock(zone: &mut Zone, pid: PlayerId, locked: bool, spec: bool) {
             set_ship_and_freq(zone, pid, Ship::SPEC, sf);
         }
     }
+    let was = zone
+        .players
+        .get(pid)
+        .and_then(|p| p.ext.get::<GameData>())
+        .is_some_and(|d| d.locked);
     if let Some(d) = gd(zone, pid) {
         d.locked = locked;
+    }
+    if notify && was != locked {
+        let in_spec = zone.players.get(pid).is_some_and(|p| p.ship.is_spec());
+        let text = match (locked, in_spec) {
+            (true, true) => "You have been locked to spectator mode.",
+            (true, false) => "You have been locked to your ship.",
+            (false, _) => "Your ship has been unlocked.",
+        };
+        super::chat::message(zone, pid, text);
+    }
+}
+
+/// An arena's default locked state (ASSS's `initlockship` / `initspec`),
+/// which `?lockarena` sets and entering players inherit.
+#[derive(Debug, Clone, Copy, Default)]
+struct ArenaLock {
+    /// entering players are locked to the ship they come in with
+    lock_ship: bool,
+    /// entering players are put in spectator mode first
+    spec: bool,
+}
+
+fn arena_lock(zone: &Zone, arena: ArenaId) -> ArenaLock {
+    zone.arenas
+        .get(arena)
+        .and_then(|a| a.ext.get::<ArenaLock>())
+        .copied()
+        .unwrap_or_default()
+}
+
+/// ASSS `LockArena`: entering players are locked from now on, and unless
+/// `only_arena` everyone already here is locked too. `initial` locks them to
+/// the ship they arrive in rather than to spectator mode; `spec` moves the
+/// players already here to spectator mode first; `notify` tells them.
+pub fn lock_arena(
+    zone: &mut Zone,
+    arena: ArenaId,
+    notify: bool,
+    only_arena: bool,
+    initial: bool,
+    spec: bool,
+) {
+    if let Some(a) = zone.arenas.get_mut(arena) {
+        let l = a.ext.get_or_default::<ArenaLock>();
+        l.lock_ship = true;
+        l.spec |= !initial;
+    }
+    if !only_arena {
+        for p in zone
+            .players
+            .in_arena(arena)
+            .map(|p| p.id)
+            .collect::<Vec<_>>()
+        {
+            set_lock_notify(zone, p, true, spec, notify);
+        }
+    }
+}
+
+/// ASSS `UnlockArena`.
+pub fn unlock_arena(zone: &mut Zone, arena: ArenaId, notify: bool, only_arena: bool) {
+    if let Some(a) = zone.arenas.get_mut(arena) {
+        *a.ext.get_or_default::<ArenaLock>() = ArenaLock::default();
+    }
+    if !only_arena {
+        for p in zone
+            .players
+            .in_arena(arena)
+            .map(|p| p.id)
+            .collect::<Vec<_>>()
+        {
+            set_lock_notify(zone, p, false, false, notify);
+        }
     }
 }

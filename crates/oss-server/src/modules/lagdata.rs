@@ -98,14 +98,20 @@ pub struct LagData {
     pub cping: PingStat,
     /// Reliable round-trip ping.
     pub rping: PingStat,
-    /// Packets the server sent.
+    /// Packets the server had sent when the client's last time-sync
+    /// arrived. All four of these are one snapshot: a loss figure only
+    /// means anything if both sides of the ratio were read at the same
+    /// instant.
     pub s_sent: u64,
-    /// Packets the server received.
+    /// Packets the server had received at that same instant.
     pub s_received: u64,
-    /// Packets the client says it sent.
+    /// Packets the client said it had sent, from that time-sync.
     pub c_sent: u64,
-    /// Packets the client says it received.
+    /// Packets the client said it had received, from that time-sync.
     pub c_received: u64,
+    /// The client counts the snapshot above was taken from, so a repeat of
+    /// the same report is not mistaken for a fresh one.
+    pub last_peer: Option<(u32, u32)>,
     /// Weapon packets relayed to the player, as of their last security report.
     pub wpn_sent: u64,
     /// Weapon packets the client says it received.
@@ -189,9 +195,35 @@ pub fn transport(
         if rtt_ms > 0 {
             d.rping.add(rtt_ms);
         }
-        d.s_sent = sent;
-        d.s_received = received;
-        if let Some((cs, cr)) = peer {
+        // All four counters move together, and only when a time-sync
+        // brings a fresh report from the client.
+        //
+        // This used to take the server's two every second while the
+        // client's only moved when a sync arrived -- up to five seconds
+        // apart. The ratio then divided a live counter by a stale one, so
+        // in a busy arena the settings, the map download and the arena's
+        // relayed traffic all landed in `s_sent` while `c_received` still
+        // held the one datagram the client had acknowledged at connect.
+        // That reads as ~99.6% loss, and `S2CLossToSpec` specs everyone in
+        // the arena in the same second -- after `S2CLossToDisallowFlags`
+        // and `S2CLossToStartIgnoringWeapons`, which are lower, have
+        // already silently taken their flags and their weapons.
+        //
+        // ASSS has no such window: `net.c` fills s_pktsent/s_pktrcvd from
+        // the live connection and c_pktsent/c_pktrcvd from the packet
+        // inside the time-sync handler, and `lagdata.c` copies that struct
+        // whole, so its server side is never newer than its client side.
+        //
+        // Before the first sync there is no snapshot, so every counter is
+        // zero, `ploss` fails its 200-packet test and reports no loss --
+        // which is what ASSS does from its zeroed struct too. A stale pair
+        // cannot arise to be guarded against, because one is never built.
+        if let Some((cs, cr)) = peer
+            && Some((cs, cr)) != d.last_peer
+        {
+            d.last_peer = Some((cs, cr));
+            d.s_sent = sent;
+            d.s_received = received;
             d.c_sent = u64::from(cs);
             d.c_received = u64::from(cr);
         }

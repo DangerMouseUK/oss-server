@@ -532,3 +532,77 @@ fn recyclearena_puts_everyone_back() {
         assert_eq!(in_arena, arena, "the same arena id, built again");
     }
 }
+
+/// A busy arena does not spec everyone in it.
+///
+/// Packet loss is a ratio of two counters, and it only means anything if
+/// both were read at the same instant. The server's side used to be taken
+/// every second while the client's only moved when a time-sync arrived --
+/// up to five seconds apart -- so a busy arena's outbound traffic piled up
+/// against the one datagram a freshly joined client had acknowledged and
+/// read as ~99.6% loss. Everyone in the arena was specced in the same
+/// second, and the lower limits had already taken their flags and their
+/// weapons on the way past.
+#[test]
+fn a_busy_arena_does_not_spec_an_honest_client() {
+    let mut h = H::new();
+    let (a, _) = h.player("alpha");
+    h.send(a, &[c2s::kind::SET_SHIP, 0]);
+    assert_eq!(h.zone.players.get(a).map(|p| p.ship.0), Some(0));
+
+    // The client's first time-sync, at connect: it has seen one datagram
+    // and the server has sent one.
+    oss_server::modules::lagdata::transport(&mut h.zone, a, 50, 1, 1, Some((1, 1)));
+
+    // Now the arena gets busy. The settings, the map download and the
+    // relayed position traffic all count towards what the server has sent,
+    // and no new sync arrives for five seconds -- so every one of these
+    // calls carries the same client report.
+    for sent in [100u64, 200, 400, 600, 900] {
+        oss_server::modules::lagdata::transport(&mut h.zone, a, 50, sent, 90, Some((1, 1)));
+        h.tick(100);
+    }
+
+    let lag = oss_server::modules::lagdata::lag_data(&h.zone, a);
+    assert!(
+        lag.s2c_loss() < 0.01,
+        "a client that has not had a chance to report should not read as lost: {lag:?}"
+    );
+    assert_eq!(
+        h.zone.players.get(a).map(|p| p.ship.0),
+        Some(0),
+        "specced on a stale counter pair"
+    );
+    assert!(!lag.no_ship, "barred from a ship on a stale counter pair");
+    assert!(
+        !lag.no_flags_balls,
+        "refused flags on a stale counter pair: this limit is lower than the spec one"
+    );
+    assert!(
+        oss_server::modules::game::ignore_weapons(&h.zone, a).abs() < 1e-9,
+        "weapons ignored on a stale counter pair: this limit is lower still"
+    );
+
+    // The client's second sync, five seconds later: it has now acknowledged
+    // nearly everything, and the pair is contemporaneous again.
+    oss_server::modules::lagdata::transport(&mut h.zone, a, 50, 900, 95, Some((95, 896)));
+    h.tick(200);
+    let lag = oss_server::modules::lagdata::lag_data(&h.zone, a);
+    assert!(lag.s2c_loss() < 0.01, "{lag:?}");
+    assert_eq!(h.zone.players.get(a).map(|p| p.ship.0), Some(0));
+
+    // And a client that really is losing packets is still specced: the
+    // report is contemporaneous and says so.
+    oss_server::modules::lagdata::transport(&mut h.zone, a, 50, 2000, 100, Some((100, 400)));
+    let lag = oss_server::modules::lagdata::lag_data(&h.zone, a);
+    assert!(
+        lag.s2c_loss() > 0.75,
+        "real loss should still read: {lag:?}"
+    );
+    h.tick(300);
+    assert_eq!(
+        h.zone.players.get(a).map(|p| p.ship.0),
+        Some(8),
+        "real packet loss should still move a player to spectator"
+    );
+}

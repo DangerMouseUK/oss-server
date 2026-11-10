@@ -34,6 +34,7 @@ pub mod koth;
 pub mod lagdata;
 pub mod mapdata;
 pub mod mapnewsdl;
+pub mod objects;
 pub mod obscene;
 pub mod periodic;
 pub mod persist;
@@ -75,6 +76,7 @@ pub const DEFAULT_MODULES: &[&str] = &[
     "bricks",
     "banners",
     "koth",
+    "objects",
     "freqowners",
     "redirect",
     "lagdata",
@@ -134,6 +136,7 @@ pub fn builtin_catalog() -> ModuleCatalog {
     c.register("banners", &[], || banners::BannersModule);
     c.register("billing_ssc", &[], || billing_ssc::BillingSscModule);
     c.register("koth", &[], || koth::KothModule);
+    c.register("objects", &[], || objects::ObjectsModule);
     c.register("freqowners", &[], || freqowners::FreqOwnersModule);
     c.register("redirect", &[], || redirect::RedirectModule);
     c.register("lagdata", &[], || lagdata::LagDataModule);

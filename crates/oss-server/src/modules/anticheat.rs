@@ -75,13 +75,54 @@
 //! logged (`target: "anticheat"`, info) even though it costs no trust, so a
 //! wall hack that spends a portal a hop still leaves a trail.
 //!
+//! **Two kinds of check.** All eleven feed one score, but they are not one
+//! kind of evidence, and which kind a check is decides what its weight
+//! should be.
+//!
+//! - *Noise checks* — fire rate, flood, speed, rotation, energy, clock and
+//!   weapon level — fire on things an honest player on a bad connection
+//!   really does produce: a reordered packet, a burst delivered late, a
+//!   clock a few percent fast. Their low weights are a **tolerance**,
+//!   chosen so that a player who trips one now and then never drifts
+//!   towards a spec over a long session. They should stay low.
+//! - *Impossible checks* — wall, status, item, and a flash teleport nothing
+//!   explained — fire on things no honest client does at all. A ship does
+//!   not cross a wall; a client does not set a cloak bit it was never
+//!   given; a ship does not spend a repel it never held; and a flash jump
+//!   has already been offered every excuse the server has (warp signature
+//!   and spawn area, then a portal from the ship's own bound) before it
+//!   counts. Their weight is not a tolerance: whatever they cost short of
+//!   the whole score is a **concession**.
+//!
 //! **Trust.** Each finding lowers the player's trust (100 = clean) by its
 //! check's weight and raises [`CheatSuspected`]. Trust recovers by
-//! `RecoverPerMinute` (default 10), and that number is the cheat budget: a
-//! check of weight W costs nothing on average below one finding per
-//! W / RecoverPerMinute minutes (weight 10: one a minute). The 5-second
-//! cooldown caps the other end. It is a deliberate floor, so honest players
-//! don't drift towards a spec over a long session.
+//! `RecoverPerMinute` (default 10).
+//!
+//! There is **one pool and one recovery rate**, so no weight is a local
+//! edit. Raising one check's weight raises what every *other* check costs
+//! in practice, because the pool they all draw on refills no faster, and a
+//! player near the floor is specced by whichever check happens to fire
+//! next. A check of weight W costs nothing on average below one finding
+//! per W / RecoverPerMinute minutes — weight 10 is one a minute, weight 50
+//! one every five. The 5-second cooldown caps the other end.
+//!
+//! The impossible checks are weighted 50, which forgives exactly one. With
+//! the default `SpecTrust` 40 and `KickTrust` 10, a single finding leaves
+//! trust at 50 and the player keeps flying; two cost 100 and leave trust at
+//! 0, which is below `KickTrust`, so under `Action = 2` the second one is a
+//! kick rather than a spec. 50 is the top of the band that still forgives
+//! one: 61 or more specs on the first finding, 91 or more kicks on it.
+//!
+//! That is deliberately a **midway** position. The end state for a check
+//! nothing honest can produce is that it should not recover at all — a
+//! player who crossed a wall an hour ago still crossed a wall. These still
+//! expire only as insurance against our own detectors being wrong, which
+//! is not a theoretical worry: the flash bit used to disable the wall check
+//! for a player's whole session, and the map-checksum key was divided
+//! signed where the client divides it unsigned. Both were ours, and both
+//! would have convicted honest players. The case for letting an impossible
+//! finding expire runs out when there is a false-positive rate measured on
+//! real traffic — not before, and not on argument alone.
 //!
 //! **Actions.** With `Action = 1` a player whose trust falls below
 //! `SpecTrust` is moved to spectator mode and can't take a ship until trust
@@ -256,17 +297,21 @@ impl AcConfig {
             recover_per_minute: i("RecoverPerMinute", 10).max(0),
             cooldown: u64::try_from(i("Cooldown", 5)).unwrap_or(5) * 100,
             weights: [
+                // this array is indexed by `Check::index()`, so the order is
+                // the enum's, not a grouping. `I` marks the impossible
+                // checks, weighted so that two findings cost a ship; the
+                // rest are noise checks with a deliberate floor (module docs)
                 i("ClockWeight", 30),
                 i("FireRateWeight", 10),
                 i("WeaponLevelWeight", 25),
                 i("FloodWeight", 10),
-                i("TeleportWeight", 30),
+                i("TeleportWeight", 50), // I
                 i("SpeedWeight", 20),
                 i("RotationWeight", 10),
-                i("WallWeight", 30),
+                i("WallWeight", 50), // I
                 i("EnergyWeight", 15),
-                i("StatusWeight", 25),
-                i("ItemWeight", 25),
+                i("StatusWeight", 50), // I
+                i("ItemWeight", 50),   // I
             ],
             clock_window: u64::try_from(i("ClockWindow", 20)).unwrap_or(20).max(5) * 100,
             clock_windows: u("ClockWindows", 2).max(1),
@@ -1493,6 +1538,24 @@ mod tests {
         let mut e = Ac::default();
         clock_check(&mut e, &c, Ticks(0), u32::MAX - 500);
         assert_eq!(clock_check(&mut e, &c, Ticks(1000), 499), None);
+    }
+
+    #[test]
+    fn weights_line_up_with_their_checks() {
+        // `weights` is a positional array indexed by `Check::index()`, so a
+        // reordered literal would silently give every check the wrong
+        // weight. Pin the four that matter and one that must not move.
+        let c = AcConfig::load(&crate::config::ConfigFile::default());
+        for check in [Check::Wall, Check::Status, Check::Item, Check::Teleport] {
+            assert_eq!(c.weights[check.index()], 50, "{}", check.name());
+        }
+        // noise checks keep their tolerant floor
+        assert_eq!(c.weights[Check::Clock.index()], 30);
+        assert_eq!(c.weights[Check::WeaponLevel.index()], 25);
+        assert_eq!(c.weights[Check::FireRate.index()], 10);
+        // one impossible finding is forgiven, two are not
+        assert!(FULL_TRUST - 50 >= c.spec_trust);
+        assert!(FULL_TRUST - 100 < c.kick_trust);
     }
 
     #[test]

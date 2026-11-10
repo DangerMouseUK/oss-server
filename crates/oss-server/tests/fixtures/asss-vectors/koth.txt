@@ -1,0 +1,110 @@
+# King of the Hill from ASSS 1.4.4 src/core/koth.c (compiled unmodified).
+# state <tag> then one field per player:
+#   <index>:[spec,]<crown>/<hadcrown>/<deaths>/<crownkills>/<flag>
+#   crown is 1 while the player holds a crown. hadcrown is who held one as of the
+#   last check_koth (or game start) and decides who wins. deaths counts deaths
+#   suffered WITH a crown. crownkills counts kills of crowned players made without
+#   one. flag is the F_HAS_CROWN bit in the player's own packet data, which is what
+#   other clients see.
+# kill <killer> <killed> ran the CB_KILL handler for that pair.
+# start / check ran start_koth() / check_koth(); ASSS's arena timer calls check_koth.
+# Rules these records pin:
+#   start_koth crowns every non-spec player and clears their counters; spectators get
+#     no crown and have hadcrown cleared too.
+#   A crowned victim loses the crown only once deaths EXCEED King:DeathCount, so
+#     DeathCount 0 means the first death takes it.
+#   A crowned killer has their timer reset to the full ExpireTime. No recorded state
+#     changes, which is why those records look unchanged.
+#   An uncrowned killer who kills a CROWNED player counts a crownkill, and on reaching
+#     King:CrownRecoverKills gets a crown back with deaths and crownkills both reset.
+#   But a kill that REMOVES the victim's last crown does NOT count as a crownkill:
+#     ASSS re-tests the victim's crown after removing it, so with DeathCount 0 the
+#     CrownRecoverKills path is unreachable. Compare the two cases below.
+#   check_koth awards only when NO crowns are left. The winners are everyone whose
+#     hadcrown was set at the previous check; without a points-koth module each gets
+#     1000/winners points (integer division). A new game starts straight away if at
+#     least MinPlaying players are in ships. check_koth finally copies crown into
+#     hadcrown for every non-spec player.
+# start, 4 in ships + 2 spec: ExpireTime 18000 DeathCount 0 CrownRecoverKills 0 MinPlaying 3, 6 players (ship bitmap 0xf)
+start
+state after_start 0:1/1/0/0/flag 1:1/1/0/0/flag 2:1/1/0/0/flag 3:1/1/0/0/flag 4:spec,0/0/0/0/- 5:spec,0/0/0/0/-
+# DeathCount 0: ExpireTime 18000 DeathCount 0 CrownRecoverKills 0 MinPlaying 3, 4 players (ship bitmap 0xf)
+start
+kill 0 1
+state after_kill 0:1/1/0/0/flag 1:0/1/1/0/- 2:1/1/0/0/flag 3:1/1/0/0/flag
+# DeathCount 2: ExpireTime 18000 DeathCount 2 CrownRecoverKills 0 MinPlaying 3, 4 players (ship bitmap 0xf)
+start
+kill 0 1
+state after_kill 0:1/1/0/0/flag 1:1/1/1/0/flag 2:1/1/0/0/flag 3:1/1/0/0/flag
+kill 0 1
+state after_kill 0:1/1/0/0/flag 1:1/1/2/0/flag 2:1/1/0/0/flag 3:1/1/0/0/flag
+kill 0 1
+state after_kill 0:1/1/0/0/flag 1:0/1/3/0/- 2:1/1/0/0/flag 3:1/1/0/0/flag
+kill 0 1
+state after_kill 0:1/1/0/0/flag 1:0/1/3/0/- 2:1/1/0/0/flag 3:1/1/0/0/flag
+# CrownRecoverKills 3, DeathCount 0 (recovery unreachable): ExpireTime 18000 DeathCount 0 CrownRecoverKills 3 MinPlaying 3, 4 players (ship bitmap 0xf)
+start
+kill 0 1
+state after_kill 0:1/1/0/0/flag 1:0/1/1/0/- 2:1/1/0/0/flag 3:1/1/0/0/flag
+kill 1 2
+state after_kill 0:1/1/0/0/flag 1:0/1/1/0/- 2:0/1/1/0/- 3:1/1/0/0/flag
+kill 1 2
+state after_kill 0:1/1/0/0/flag 1:0/1/1/0/- 2:0/1/1/0/- 3:1/1/0/0/flag
+kill 1 2
+state after_kill 0:1/1/0/0/flag 1:0/1/1/0/- 2:0/1/1/0/- 3:1/1/0/0/flag
+kill 1 2
+state after_kill 0:1/1/0/0/flag 1:0/1/1/0/- 2:0/1/1/0/- 3:1/1/0/0/flag
+# CrownRecoverKills 2, DeathCount 2 (recovery works): ExpireTime 18000 DeathCount 2 CrownRecoverKills 2 MinPlaying 3, 4 players (ship bitmap 0xf)
+start
+kill 0 1
+kill 0 1
+kill 0 1
+state one_uncrowned 0:1/1/0/0/flag 1:0/1/3/0/- 2:1/1/0/0/flag 3:1/1/0/0/flag
+kill 1 2
+state after_kill 0:1/1/0/0/flag 1:0/1/3/1/- 2:1/1/1/0/flag 3:1/1/0/0/flag
+kill 1 2
+state after_kill 0:1/1/0/0/flag 1:1/1/0/0/flag 2:1/1/2/0/flag 3:1/1/0/0/flag
+kill 1 2
+state after_kill 0:1/1/0/0/flag 1:1/1/0/0/flag 2:0/1/3/0/- 3:1/1/0/0/flag
+# CrownRecoverKills 0: ExpireTime 18000 DeathCount 2 CrownRecoverKills 0 MinPlaying 3, 4 players (ship bitmap 0xf)
+start
+kill 1 2
+kill 1 2
+kill 1 2
+state after_kills 0:1/1/0/0/flag 1:1/1/0/0/flag 2:0/1/3/0/- 3:1/1/0/0/flag
+# uncrowned kills uncrowned: ExpireTime 18000 DeathCount 0 CrownRecoverKills 3 MinPlaying 3, 4 players (ship bitmap 0xf)
+start
+kill 0 1
+kill 0 2
+state both_uncrowned 0:1/1/0/0/flag 1:0/1/1/0/- 2:0/1/1/0/- 3:1/1/0/0/flag
+kill 1 2
+state after_kill 0:1/1/0/0/flag 1:0/1/1/0/- 2:0/1/1/0/- 3:1/1/0/0/flag
+# check_koth, all crowned: ExpireTime 18000 DeathCount 0 CrownRecoverKills 0 MinPlaying 3, 4 players (ship bitmap 0xf)
+start
+check
+state after_check 0:1/1/0/0/flag 1:1/1/0/0/flag 2:1/1/0/0/flag 3:1/1/0/0/flag
+# check_koth, one crown left (no award): ExpireTime 18000 DeathCount 0 CrownRecoverKills 0 MinPlaying 3, 4 players (ship bitmap 0xf)
+start
+kill 0 1
+kill 0 2
+kill 0 3
+state three_uncrowned 0:1/1/0/0/flag 1:0/1/1/0/- 2:0/1/1/0/- 3:0/1/1/0/-
+check
+state after_check 0:1/1/0/0/flag 1:0/0/1/0/- 2:0/0/1/0/- 3:0/0/1/0/-
+# check_koth, all crowns gone: ExpireTime 18000 DeathCount 0 CrownRecoverKills 0 MinPlaying 3, 4 players (ship bitmap 0xf)
+start
+kill 1 0
+kill 2 1
+kill 3 2
+kill 0 3
+state all_uncrowned 0:0/1/1/0/- 1:0/1/1/0/- 2:0/1/1/0/- 3:0/1/1/0/-
+check
+state after_check 0:1/1/0/0/flag 1:1/1/0/0/flag 2:1/1/0/0/flag 3:1/1/0/0/flag
+# check_koth, all crowns gone, MinPlaying 5: ExpireTime 18000 DeathCount 0 CrownRecoverKills 0 MinPlaying 5, 4 players (ship bitmap 0xf)
+start
+kill 1 0
+kill 2 1
+kill 3 2
+kill 0 3
+check
+state after_check 0:0/0/1/0/- 1:0/0/1/0/- 2:0/0/1/0/- 3:0/0/1/0/-

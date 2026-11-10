@@ -422,8 +422,11 @@ fn bricks_drop_resend_and_expire() {
 
 #[test]
 fn soccer_scoring() {
+    // WinBy is 1 rather than the default 0 on purpose: with 0 the leader
+    // satisfies its own score+WinBy <= score test, so ASSS counts 8 freqs
+    // where it needs 7 and an absolute-scoring game never ends at all.
     let conf = "[Modules]\nAttachModules = points_goal\n\
-        [Soccer]\nBallCount = 1\nSpawnRadius = 1\nMode = GOAL_LEFTRIGHT\nCapturePoints = -2\nReward = -100\nNewGameDelay = 100\n\
+        [Soccer]\nBallCount = 1\nSpawnRadius = 1\nMode = GOAL_LEFTRIGHT\nCapturePoints = -2\nReward = -100\nNewGameDelay = 100\nWinBy = 1\n\
         [Team]\nDesiredTeams = 2\n";
     let mut h = H::new(conf, None);
     let a = h.player("alpha", 0);

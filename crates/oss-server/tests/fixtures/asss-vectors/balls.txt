@@ -1,0 +1,201 @@
+# Balls from ASSS 1.4.4 src/core/balls.c (compiled unmodified).
+#   # <label>   starts a scenario; 'settings' is what load_ball_settings read
+#      from [Soccer] at AA_CREATE, with the four spawn points as x,y,radius
+#   uniforms <n> <v>...  the PRNG draws queued for the step that follows; they are
+#      consumed in order, two per ball placement
+#   solid <n> <x,y>...   the tiles FindEmptyTileNear must move a ball off
+#   seat <triples>   one per player: freq digit, 'w' in a ship or 's' spec, then
+#      '.' normal or 'l' flagged too lagged to carry (flags.no_flags_balls)
+#   spawn <ball>     called SpawnBall directly
+#   pickup <player> <ball> time=<n> len=<n>   fed a C2S 0x20 of that length
+#   fire <player> <ball> <x> <y> <xspeed> <yspeed> time=<n>   fed a C2S 0x1F
+#   goal <player> <ball> <x> <y>   fed a C2S 0x21
+#   kill <killer> <killed>   ran the kill handler
+#   leave <player>   ran the PA_LEAVEARENA action
+#   pkt <hex>        each S2C 0x2E ball packet, in order and in wire order
+#   cb <name>        each callback fired, in order
+#   balls <n> <bid>:<state>/<x>/<y>/<xspeed>/<yspeed>/<carrier>/<time>...
+#      every ball afterwards; carrier -1 means nobody
+#
+# Rules these records pin:
+#
+# 1. WHICH SPAWN POINT A BALL USES is decided by how many are CONFIGURED, and the
+#    test is 'spawnx[3] && spawny[3]' then 'spawnx[1] && spawny[1]' -- both
+#    coordinates must be NON-ZERO. So a legitimate spawn point on row 0 or column
+#    0 silently drops the arena to fewer spawn points: setting SpawnX3 to 0
+#    because you want x=0 turns a four-point arena into a two-point one.
+#    With four configured the index is bid % 4, with two it is bid % 2.
+# 2. THE SPAWN OFFSET IS TRUNCATED, NOT ROUNDED, and the truncation is applied to
+#    the OFFSET, not to the final coordinate: x = cx + (int)(rndrad * cos(rndang)).
+#    Compare fg_wz.py, which adds half a tile to the centre and truncates the sum
+#    -- the two flag/ball spawners in the same server round differently.
+# 3. THE WRAP IS A MODULO, NOT A REFLECTION: 'while (x < 0) x += 1024' and
+#    'while (x > 1023) x -= 1024'. fg_wz.py's wrap() for flags reflects instead.
+#    A ball drawn off the left edge comes back on the right; a flag bounces.
+# 4. THE SUB-TILE POSITION COMES FROM ONE 32-BIT DRAW. After the tile is chosen the
+#    coordinates are shifted left 4, then a single prng->Get32() is masked to a
+#    byte: x takes that byte / 16 and y takes that byte % 16. So the two axes are
+#    not independent, and the same draw places every ball spawned in that step.
+# 5. A PICKUP IS REFUSED five ways and each one returns: a wrong packet length, a
+#    player in spectator mode, a player flagged too lagged to carry, a ball id at
+#    or past the count, a ball that is not on the map, and a time that does not
+#    match the ball's -- that last one is the anti-cheat, and it means a client
+#    replaying an old pickup is ignored. Finally, a player already carrying a ball
+#    is refused SILENTLY, with no log line at all.
+# 6. PICKING UP SETS THE BALL'S TIME TO 0 and its position to the PLAYER's, not to
+#    where the ball was. Firing sets the time, position and speed from the packet
+#    verbatim -- the server does not sanity-check any of them.
+# 7. A GOAL IS GATED ON bd->carrier BEING NON-NULL, which is reused as a
+#    'this goal has not been counted yet' flag: the ball is on the map and its
+#    carrier field still names whoever last fired it. The second goal packet for
+#    the same ball is dropped silently because SpawnBall cleared that field.
+# 8. CLEANUP AFTER A CARRIER drops the ball AT THE PLAYER'S POSITION with zero
+#    speed and the current tick. Whether the carrier field is cleared depends on
+#    the caller: leaving, changing ship and changing freq all pass neut = 1, but a
+#    KILL passes !deathgoal -- so with Soccer:AllowGoalByDeath on, a player killed
+#    on a goal tile keeps the carrier field, which is exactly what lets rule 7
+#    count the goal.
+# 9. Cleanup's second branch, taken only when neut is set, also clears the carrier
+#    of a ball that is already on the map and was last touched by that player, so
+#    the last-toucher always names someone still present.
+sizes BallPacket=16 C2SPickupBall=6 C2SShootBall_is_BallPacket=16 C2SGoal=6
+uniforms 8 0.5 0 0.25 0.5 0.75 0.25 1 0.875
+# one spawn point: every ball uses index 0
+settings ballcount=2 get32=0000005a t0=1000 sendtime=1000 goaldelay=0 deathgoal=0 spawn0=512,512,10 spawn1=0,0,0 spawn2=0,0,0 spawn3=0,0,0
+balls 2 0:onmap/8277/8202/0/0/-1/1000 1:onmap/8165/8202/0/0/-1/1000
+pkt 2e0055200a2000000000ffffe8030000
+pkt 2e01e51f0a2000000000ffffe8030000
+uniforms 8 0.5 0 0.25 0.5 0.75 0.25 1 0.875
+# two spawn points configured: the index is bid %% 2
+settings ballcount=4 get32=0000003c t0=2000 sendtime=1000 goaldelay=0 deathgoal=0 spawn0=512,512,10 spawn1=100,900,5 spawn2=0,0,0 spawn3=0,0,0
+balls 4 0:onmap/8275/8204/0/0/-1/2000 1:onmap/1587/14412/0/0/-1/2000 2:onmap/8195/8316/0/0/-1/2000 3:onmap/1651/14364/0/0/-1/2000
+pkt 2e0053200c2000000000ffffd0070000
+pkt 2e0133064c3800000000ffffd0070000
+pkt 2e0203207c2000000000ffffd0070000
+pkt 2e0373061c3800000000ffffd0070000
+uniforms 8 0.5 0 0.25 0.5 0.75 0.25 1 0.875
+# four spawn points configured: the index is bid %% 4
+settings ballcount=4 get32=000000f0 t0=3000 sendtime=1000 goaldelay=0 deathgoal=0 spawn0=512,512,10 spawn1=100,900,5 spawn2=200,800,4 spawn3=300,700,3
+balls 4 0:onmap/8287/8192/0/0/-1/3000 1:onmap/1599/14400/0/0/-1/3000 2:onmap/3215/12848/0/0/-1/3000 3:onmap/4847/11168/0/0/-1/3000
+pkt 2e005f20002000000000ffffb80b0000
+pkt 2e013f06403800000000ffffb80b0000
+pkt 2e028f0c303200000000ffffb80b0000
+pkt 2e03ef12a02b00000000ffffb80b0000
+uniforms 8 0.5 0 0.25 0.5 0.75 0.25 1 0.875
+# SpawnX3 = 0 silently drops the arena back to two spawn points
+settings ballcount=4 get32=0000000f t0=4000 sendtime=1000 goaldelay=0 deathgoal=0 spawn0=512,512,10 spawn1=100,900,5 spawn2=200,800,4 spawn3=0,700,3
+balls 4 0:onmap/8272/8207/0/0/-1/4000 1:onmap/1584/14415/0/0/-1/4000 2:onmap/8192/8319/0/0/-1/4000 3:onmap/1648/14367/0/0/-1/4000
+pkt 2e0050200f2000000000ffffa00f0000
+pkt 2e0130064f3800000000ffffa00f0000
+pkt 2e0200207f2000000000ffffa00f0000
+pkt 2e0370061f3800000000ffffa00f0000
+uniforms 2 1 0.5
+# a draw off the left edge wraps round to the right, it does not reflect
+settings ballcount=1 get32=00000000 t0=5000 sendtime=1000 goaldelay=0 deathgoal=0 spawn0=5,5,100 spawn1=0,0,5 spawn2=0,0,4 spawn3=0,700,3
+balls 1 0:onmap/14864/80/0/0/-1/5000
+pkt 2e00103a500000000000ffff88130000
+solid 3 512,512 511,512 511,511
+uniforms 2 0 0
+# the chosen tile is solid, so FindEmptyTileNear moves it
+settings ballcount=1 get32=000000ff t0=6000 sendtime=1000 goaldelay=0 deathgoal=0 spawn0=512,512,0 spawn1=0,0,5 spawn2=0,0,4 spawn3=0,700,3
+balls 1 0:onmap/8207/8191/0/0/-1/6000
+pkt 2e000f20ff1f00000000ffff70170000
+solid 0
+uniforms 4 0 0 1 0.5
+# pickup, fire and goal
+settings ballcount=2 get32=00000000 t0=10000 sendtime=1000 goaldelay=0 deathgoal=0 spawn0=512,512,0 spawn1=0,0,5 spawn2=0,0,4 spawn3=0,700,3
+balls 2 0:onmap/8192/8192/0/0/-1/10000 1:onmap/8192/8192/0/0/-1/10000
+pkt 2e000020002000000000ffff10270000
+pkt 2e010020002000000000ffff10270000
+seat 0w.1w.0s.0wl
+pickup 0 0 time=10000 len=6
+balls 2 0:carried/100/200/0/0/0/0 1:onmap/8192/8192/0/0/-1/10000
+pkt 2e006400c80000000000000000000000
+cb ballpickup
+pickup 1 0 time=10000 len=6
+balls 2 0:carried/100/200/0/0/0/0 1:onmap/8192/8192/0/0/-1/10000
+pickup 0 1 time=10000 len=6
+balls 2 0:carried/100/200/0/0/0/0 1:onmap/8192/8192/0/0/-1/10000
+pickup 2 1 time=10000 len=6
+balls 2 0:carried/100/200/0/0/0/0 1:onmap/8192/8192/0/0/-1/10000
+pickup 3 1 time=10000 len=6
+balls 2 0:carried/100/200/0/0/0/0 1:onmap/8192/8192/0/0/-1/10000
+pickup 1 9 time=10000 len=6
+balls 2 0:carried/100/200/0/0/0/0 1:onmap/8192/8192/0/0/-1/10000
+pickup 1 1 time=99999 len=6
+balls 2 0:carried/100/200/0/0/0/0 1:onmap/8192/8192/0/0/-1/10000
+pickup 1 1 time=10000 len=5
+balls 2 0:carried/100/200/0/0/0/0 1:onmap/8192/8192/0/0/-1/10000
+pickup 1 1 time=10000 len=6
+balls 2 0:carried/100/200/0/0/0/0 1:carried/1100/1200/0/0/1/0
+pkt 2e014c04b00400000000010000000000
+cb ballpickup
+fire 0 0 777 888 -5 6 time=12345
+balls 2 0:onmap/777/888/-5/6/0/12345 1:carried/1100/1200/0/0/1/0
+pkt 2e0009037803fbff0600000039300000
+cb ballfire
+fire 1 0 1 2 3 4 time=1
+balls 2 0:onmap/777/888/-5/6/0/12345 1:carried/1100/1200/0/0/1/0
+goal 1 0 60 70
+balls 2 0:onmap/777/888/-5/6/0/12345 1:carried/1100/1200/0/0/1/0
+uniforms 2 0 0
+at 11000
+goal 0 0 60 70
+balls 2 0:onmap/8192/8192/0/0/-1/11000 1:carried/1100/1200/0/0/1/0
+pkt 2e000020002000000000fffff82a0000
+cb goal
+goal 0 0 60 70
+balls 2 0:onmap/8192/8192/0/0/-1/11000 1:carried/1100/1200/0/0/1/0
+uniforms 4 0 0 1 0.5
+# a kill with AllowGoalByDeath off neuts the carrier field
+settings ballcount=1 get32=00000000 t0=20000 sendtime=1000 goaldelay=0 deathgoal=0 spawn0=512,512,0 spawn1=0,0,5 spawn2=0,0,4 spawn3=0,700,3
+balls 1 0:onmap/8192/8192/0/0/-1/20000
+pkt 2e000020002000000000ffff204e0000
+seat 0w.1w.
+pickup 0 0 time=20000 len=6
+balls 1 0:carried/100/200/0/0/0/0
+pkt 2e006400c80000000000000000000000
+cb ballpickup
+at 20500
+kill 1 0
+balls 1 0:onmap/100/200/0/0/-1/20500
+pkt 2e006400c80000000000ffff14500000
+cb ballfire
+uniforms 4 0 0 1 0.5
+# a kill with AllowGoalByDeath on KEEPS the carrier, so a goal still counts
+settings ballcount=1 get32=00000000 t0=30000 sendtime=1000 goaldelay=0 deathgoal=1 spawn0=512,512,0 spawn1=0,0,5 spawn2=0,0,4 spawn3=0,700,3
+balls 1 0:onmap/8192/8192/0/0/-1/30000
+pkt 2e000020002000000000ffff30750000
+seat 0w.1w.
+pickup 0 0 time=30000 len=6
+balls 1 0:carried/100/200/0/0/0/0
+pkt 2e006400c80000000000000000000000
+cb ballpickup
+at 30500
+kill 1 0
+balls 1 0:onmap/100/200/0/0/0/30500
+pkt 2e006400c80000000000000024770000
+cb ballfire
+uniforms 2 0 0
+goal 0 0 60 70
+balls 1 0:onmap/8192/8192/0/0/-1/30500
+pkt 2e000020002000000000ffff24770000
+cb goal
+uniforms 4 0 0 1 0.5
+# leaving the arena drops the ball and clears the last toucher
+settings ballcount=1 get32=00000000 t0=40000 sendtime=1000 goaldelay=0 deathgoal=0 spawn0=512,512,0 spawn1=0,0,5 spawn2=0,0,4 spawn3=0,700,3
+balls 1 0:onmap/8192/8192/0/0/-1/40000
+pkt 2e000020002000000000ffff409c0000
+seat 0w.1w.
+pickup 0 0 time=40000 len=6
+balls 1 0:carried/100/200/0/0/0/0
+pkt 2e006400c80000000000000000000000
+cb ballpickup
+fire 0 0 500 600 1 2 time=40100
+balls 1 0:onmap/500/600/1/2/0/40100
+pkt 2e00f4015802010002000000a49c0000
+cb ballfire
+at 40200
+leave 0
+balls 1 0:onmap/500/600/1/2/-1/40100
+pkt 2e00f401580201000200ffffa49c0000

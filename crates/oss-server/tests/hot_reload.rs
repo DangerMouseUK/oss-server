@@ -2,6 +2,7 @@
 //! `ConfChanged` / `GlobalConfChanged`), and modules can be loaded, unloaded,
 //! attached and detached while the zone runs.
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use oss_proto::Packet;
@@ -27,17 +28,33 @@ impl Drop for TempDir {
     }
 }
 
+/// Makes each directory name unique within the process. The tests in this
+/// binary run as threads of one process, so the pid is the same for all of
+/// them, and `as_nanos` has nanosecond units but not nanosecond resolution
+/// -- two tests entering here together could agree on a name. They then
+/// shared a directory, and whichever finished first had its `TempDir::drop`
+/// remove it out from under the other, whose next `rewrite` failed with
+/// NotFound. A counter makes the uniqueness structural rather than a bet on
+/// clock resolution.
+static NEXT_DIR: AtomicU64 = AtomicU64::new(0);
+
 fn temp_zone(files: &[(&str, &str)]) -> TempDir {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_nanos());
-    let dir = std::env::temp_dir().join(format!("oss-hot-{}-{nanos}", std::process::id()));
+    let n = NEXT_DIR.fetch_add(1, Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("oss-hot-{}-{nanos}-{n}", std::process::id()));
+    // create_dir, not create_dir_all: if this name is somehow taken we want
+    // to hear about it here rather than quietly share someone else's files
+    std::fs::create_dir(&dir).expect("a directory of this name already exists");
+    // owned before anything is written, so a failure below still cleans up
+    let owned = TempDir(dir);
     for (path, data) in files {
-        let p = dir.join(path);
+        let p = owned.0.join(path);
         std::fs::create_dir_all(p.parent().expect("parent")).expect("mkdir");
         std::fs::write(p, data).expect("write");
     }
-    TempDir(dir)
+    owned
 }
 
 fn rewrite(dir: &TempDir, path: &str, data: &str) {

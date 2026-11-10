@@ -9,6 +9,7 @@ use std::collections::VecDeque;
 use std::io::Read;
 use std::net::{SocketAddr, UdpSocket};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use oss_net::{Config, Connection, Event, VieClientHandshake};
@@ -48,11 +49,18 @@ fn synthetic_map() -> Vec<u8> {
     out
 }
 
+/// Unique per call: the pid is shared by every test in this binary and the
+/// clock is not fine enough to separate two of them on its own. One test
+/// uses this today, which is one new test away from sharing a directory.
+static NEXT_DIR: AtomicU64 = AtomicU64::new(0);
+
 fn make_zone() -> TempZone {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_nanos());
-    let root = std::env::temp_dir().join(format!("oss-m2-{}-{nanos}", std::process::id()));
+    let n = NEXT_DIR.fetch_add(1, Ordering::Relaxed);
+    let root = std::env::temp_dir().join(format!("oss-m2-{}-{nanos}-{n}", std::process::id()));
+    std::fs::create_dir(&root).expect("a directory of this name already exists");
     let w = |rel: &str, data: &[u8]| {
         let p = root.join(rel);
         std::fs::create_dir_all(p.parent().expect("parent")).expect("mkdir");

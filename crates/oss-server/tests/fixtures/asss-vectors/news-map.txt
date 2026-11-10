@@ -1,0 +1,90 @@
+# News and map download from ASSS 1.4.4 src/core/mapnewsdl.c (compiled
+# unmodified). These are the two routines that turn a file on disk into the
+# packet a client downloads: RefreshNewsTxt for news.txt (S2C 0x10) and
+# compress_map for a map or LVZ file (S2C 0x2A).
+#
+#   input <len> <hex>     the file that was prepared, byte for byte
+#   news checksum=<crc32> size=<total> hdr=<17 bytes> payload=<hex>
+#   map path=[<path>] docomp=<0|1> filename=[<stored name>] checksum=<crc32>
+#       uncmplen=<n> cmplen=<n> hdr=<17 bytes> payload=<hex>
+#
+# A LIMIT OF THIS FILE, STATED UP FRONT. ASSS calls zlib's compress(), and the
+# harness does not link zlib: it supplies a compress() that emits a valid zlib
+# stream made of STORED (uncompressed) deflate blocks. So the payload here is a
+# real zlib stream that any zlib will decompress back to the input -- check.py
+# does exactly that -- but its LENGTH is the harness's, not real zlib's. Treat
+# 'size' and 'cmplen' on the compressed records as structure, not as numbers to
+# match. The checksum is different: crc32 here is the real CRC-32, and check.py
+# recomputes every one with Python's zlib.crc32, so those values are ground truth.
+# The docomp=0 records have no compressor in them at all and are exact.
+#
+# Rules these records pin:
+#
+# 1. Both packets have the SAME 17-byte header shape: one type byte then a
+#    16-byte name field, with the payload starting at offset 17. For news the
+#    name field is 16 zero bytes -- the buffer is calloc'd and nothing is written
+#    there -- and for a map it is the file's basename.
+# 2. The checksum is CRC-32 of the UNCOMPRESSED file, and it is what the client
+#    compares against its cache to decide whether to download at all. It is not a
+#    checksum of the packet or of the compressed data.
+# 3. compress_map stores the basename TWICE, with two different truncations: into
+#    its own 20-byte field with astrncpy, which always terminates, giving at most
+#    19 characters; and into the packet's 16-byte name field with strncpy, which
+#    does NOT terminate, so a basename of 16 characters or more fills all 16 bytes
+#    with no NUL and a shorter one is zero-padded to 16. A reader that expects a
+#    C string in the packet field will run off the end of it.
+# 4. The basename is taken by searching for the last '/' only. A path separated
+#    with backslashes is not split at all, so the whole path lands in the name.
+# 5. With docomp = 0 nothing is compressed: the buffer is exactly len + 17 and the
+#    file is copied in verbatim after the header. Those records are exact and a
+#    port can match them byte for byte.
+# 6. RefreshNewsTxt will not re-read a file whose modification time has not
+#    changed, so editing news.txt without the mtime moving leaves the old packet
+#    and the old checksum in place until the server restarts.
+# 7. GetNewsChecksum refreshes lazily: if nothing is cached yet it calls
+#    RefreshNewsTxt itself, so the first player to ask triggers the read.
+#
+# A hazard worth knowing, deliberately NOT driven. ASSS sizes the compression
+# buffer at (uLong)(1.0011 * len + 35). zlib's own worst case for incompressible
+# data is about len + len/16 + 64 + 5, which is far larger, so a news.txt or map
+# that does not compress can need more room than ASSS allocated. compress() then
+# returns Z_BUF_ERROR, which ASSS never checks, and the length it goes on to use
+# is whatever compress() left behind. Demonstrating that needs real zlib's
+# compressor, which this harness does not have, so no record here contains its
+# result -- but a port should either size the buffer properly or check the return
+# value, and should not copy the 1.0011 constant.
+# news.txt, 256 random bytes
+input 256 581a7d7fff52f278f203befbffaee3dd8d8920d05ced13489c831ec3f611211fea9c9cdfee5dd9d123d1b4346a30066f453047ac29617497acf6e2a167a281c9ff3c21f9934aa60305ac488c0f28e891588c802ae2dd622f07e737462af44fb160213f32ae08aed67a4aba2140db9308af90d418c2bfb76b003a1ea8ac125ede1382e224f57766adf74d24e410352df85553910d1586ff7af31bb84c3359f4a605e8bd10868d8f9daa45dc9cb1ee4c3a738007ad502d5811ff47858aa72e75c1d019ae89c4377b296cbc4afe8969401b067231e8489a919644a821de50679b5396a1f272b7c7f838d3e03ebae751f1e337f7d75c8d459b5e2e30e080e87e33bf
+news checksum=ff86f343 size=284 hdr=1000000000000000000000000000000000 payload=7801010001fffe581a7d7fff52f278f203befbffaee3dd8d8920d05ced13489c831ec3f611211fea9c9cdfee5dd9d123d1b4346a30066f453047ac29617497acf6e2a167a281c9ff3c21f9934aa60305ac488c0f28e891588c802ae2dd622f07e737462af44fb160213f32ae08aed67a4aba2140db9308af90d418c2bfb76b003a1ea8ac125ede1382e224f57766adf74d24e410352df85553910d1586ff7af31bb84c3359f4a605e8bd10868d8f9daa45dc9cb1ee4c3a738007ad502d5811ff47858aa72e75c1d019ae89c4377b296cbc4afe8969401b067231e8489a919644a821de50679b5396a1f272b7c7f838d3e03ebae751f1e337f7d75c8d459b5e2e30e080e87e33bf24f68008
+# news.txt, repeated text
+input 300 57656c636f6d6520746f20746865207a6f6e652e2057656c636f6d6520746f20746865207a6f6e652e2057656c636f6d6520746f20746865207a6f6e652e2057656c636f6d6520746f20746865207a6f6e652e2057656c636f6d6520746f20746865207a6f6e652e2057656c636f6d6520746f20746865207a6f6e652e2057656c636f6d6520746f20746865207a6f6e652e2057656c636f6d6520746f20746865207a6f6e652e2057656c636f6d6520746f20746865207a6f6e652e2057656c636f6d6520746f20746865207a6f6e652e2057656c636f6d6520746f20746865207a6f6e652e2057656c636f6d6520746f20746865207a6f6e652e2057656c636f6d6520746f20746865207a6f6e652e2057656c636f6d6520746f20746865207a6f6e652e2057656c636f6d
+news checksum=26781a4c size=328 hdr=1000000000000000000000000000000000 payload=7801012c01d3fe57656c636f6d6520746f20746865207a6f6e652e2057656c636f6d6520746f20746865207a6f6e652e2057656c636f6d6520746f20746865207a6f6e652e2057656c636f6d6520746f20746865207a6f6e652e2057656c636f6d6520746f20746865207a6f6e652e2057656c636f6d6520746f20746865207a6f6e652e2057656c636f6d6520746f20746865207a6f6e652e2057656c636f6d6520746f20746865207a6f6e652e2057656c636f6d6520746f20746865207a6f6e652e2057656c636f6d6520746f20746865207a6f6e652e2057656c636f6d6520746f20746865207a6f6e652e2057656c636f6d6520746f20746865207a6f6e652e2057656c636f6d6520746f20746865207a6f6e652e2057656c636f6d6520746f20746865207a6f6e652e2057656c636f6dfcaa6954
+# news.txt, empty
+input 0 -
+news checksum=00000000 size=28 hdr=1000000000000000000000000000000000 payload=7801010000ffff00000001
+# GetNewsChecksum refreshes lazily when nothing is cached
+input 64 581a7d7fff52f278f203befbffaee3dd8d8920d05ced13489c831ec3f611211fea9c9cdfee5dd9d123d1b4346a30066f453047ac29617497acf6e2a167a281c9
+lazy checksum=74e90276 cached=1
+reread checksum=a5c214d7
+skipped checksum=a5c214d7 unchanged=1
+# a map, compressed
+input 200 581a7d7fff52f278f203befbffaee3dd8d8920d05ced13489c831ec3f611211fea9c9cdfee5dd9d123d1b4346a30066f453047ac29617497acf6e2a167a281c9ff3c21f9934aa60305ac488c0f28e891588c802ae2dd622f07e737462af44fb160213f32ae08aed67a4aba2140db9308af90d418c2bfb76b003a1ea8ac125ede1382e224f57766adf74d24e410352df85553910d1586ff7af31bb84c3359f4a605e8bd10868d8f9daa45dc9cb1ee4c3a738007ad502d5811ff47858aa72e75c1d019ae89c4377b29
+map path=[smallmap.lvl] docomp=1 filename=[smallmap.lvl] checksum=2f459555 uncmplen=200 cmplen=228 hdr=2a736d616c6c6d61702e6c766c00000000 payload=780101c80037ff581a7d7fff52f278f203befbffaee3dd8d8920d05ced13489c831ec3f611211fea9c9cdfee5dd9d123d1b4346a30066f453047ac29617497acf6e2a167a281c9ff3c21f9934aa60305ac488c0f28e891588c802ae2dd622f07e737462af44fb160213f32ae08aed67a4aba2140db9308af90d418c2bfb76b003a1ea8ac125ede1382e224f57766adf74d24e410352df85553910d1586ff7af31bb84c3359f4a605e8bd10868d8f9daa45dc9cb1ee4c3a738007ad502d5811ff47858aa72e75c1d019ae89c4377b2982ce61df
+# the same map, docomp = 0: an exact, verbatim copy
+input 200 581a7d7fff52f278f203befbffaee3dd8d8920d05ced13489c831ec3f611211fea9c9cdfee5dd9d123d1b4346a30066f453047ac29617497acf6e2a167a281c9ff3c21f9934aa60305ac488c0f28e891588c802ae2dd622f07e737462af44fb160213f32ae08aed67a4aba2140db9308af90d418c2bfb76b003a1ea8ac125ede1382e224f57766adf74d24e410352df85553910d1586ff7af31bb84c3359f4a605e8bd10868d8f9daa45dc9cb1ee4c3a738007ad502d5811ff47858aa72e75c1d019ae89c4377b29
+map path=[smallmap.lvl] docomp=0 filename=[smallmap.lvl] checksum=2f459555 uncmplen=200 cmplen=217 hdr=2a736d616c6c6d61702e6c766c00000000 payload=581a7d7fff52f278f203befbffaee3dd8d8920d05ced13489c831ec3f611211fea9c9cdfee5dd9d123d1b4346a30066f453047ac29617497acf6e2a167a281c9ff3c21f9934aa60305ac488c0f28e891588c802ae2dd622f07e737462af44fb160213f32ae08aed67a4aba2140db9308af90d418c2bfb76b003a1ea8ac125ede1382e224f57766adf74d24e410352df85553910d1586ff7af31bb84c3359f4a605e8bd10868d8f9daa45dc9cb1ee4c3a738007ad502d5811ff47858aa72e75c1d019ae89c4377b29
+# a basename of exactly 16 characters fills the packet field with no NUL
+input 48 581a7d7fff52f278f203befbffaee3dd8d8920d05ced13489c831ec3f611211fea9c9cdfee5dd9d123d1b4346a30066f
+map path=[exactly16chars.l] docomp=0 filename=[exactly16chars.l] checksum=664a4173 uncmplen=48 cmplen=65 hdr=2a65786163746c79313663686172732e6c payload=581a7d7fff52f278f203befbffaee3dd8d8920d05ced13489c831ec3f611211fea9c9cdfee5dd9d123d1b4346a30066f
+# a long basename: 19 characters stored, 16 in the packet
+input 48 581a7d7fff52f278f203befbffaee3dd8d8920d05ced13489c831ec3f611211fea9c9cdfee5dd9d123d1b4346a30066f
+map path=[a-very-long-basename-well-past-twenty.lvz] docomp=0 filename=[a-very-long-basenam] checksum=664a4173 uncmplen=48 cmplen=65 hdr=2a612d766572792d6c6f6e672d62617365 payload=581a7d7fff52f278f203befbffaee3dd8d8920d05ced13489c831ec3f611211fea9c9cdfee5dd9d123d1b4346a30066f
+# a short basename is zero-padded to 16 in the packet
+input 8 581a7d7fff52f278
+map path=[tiny.lvz] docomp=0 filename=[tiny.lvz] checksum=25181b85 uncmplen=8 cmplen=25 hdr=2a74696e792e6c767a0000000000000000 payload=581a7d7fff52f278
+# a path with forward slashes IS split at the last one
+input 24 581a7d7fff52f278f203befbffaee3dd8d8920d05ced1348
+map path=[sub/inner.lvz] docomp=0 filename=[inner.lvz] checksum=6e735f00 uncmplen=24 cmplen=41 hdr=2a696e6e65722e6c767a00000000000000 payload=581a7d7fff52f278f203befbffaee3dd8d8920d05ced1348
+# a path with backslashes is NOT split: the whole string becomes the name
+input 24 581a7d7fff52f278f203befbffaee3dd8d8920d05ced1348
+map path=[sub\back.lvz] docomp=0 filename=[sub\back.lvz] checksum=6e735f00 uncmplen=24 cmplen=41 hdr=2a7375625c6261636b2e6c767a00000000 payload=581a7d7fff52f278f203befbffaee3dd8d8920d05ced1348

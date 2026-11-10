@@ -99,12 +99,15 @@ pub fn load_download(
     optional: bool,
 ) -> Option<Download> {
     let data = src.read(path)?;
-    let name: String = path
-        .file_name()?
-        .to_string_lossy()
-        .chars()
-        .take(19)
-        .collect();
+    // ASSS takes the basename by searching for the last '/' and nothing
+    // else, so a path written with backslashes is never split and the whole
+    // string becomes the name. `Path::file_name` would also split on '\' on
+    // Windows and not on Unix, which would make the name a client caches its
+    // map under depend on the server's platform. The name is then cut to 19
+    // characters, as ASSS's own 20-byte field does.
+    let full = path.to_string_lossy();
+    let base = full.rsplit_once('/').map_or(full.as_ref(), |(_, b)| b);
+    let name: String = base.chars().take(19).collect();
     let checksum = oss_proto::checksum::crc32(&data);
     let body = if compress { zlib(&data) } else { data.clone() };
     let packet = packet(oss_proto::s2c::kind::MAP_DATA, &name, &body);
@@ -293,6 +296,14 @@ fn on_map_request(zone: &mut Zone, pid: PlayerId, pkt: &[u8]) {
     }
 }
 
+/// The S2C `0x10` packet for a news file: the type byte, then sixteen zero
+/// bytes where a map download carries its name, then the compressed file.
+/// ASSS writes nothing into that field and the buffer is zeroed, so a
+/// client reading it sees an empty name.
+pub fn news_packet(data: &[u8]) -> Arc<[u8]> {
+    packet(oss_proto::s2c::kind::INCOMING_FILE, "", &zlib(data))
+}
+
 fn refresh_news(zone: &mut Zone) {
     let Some((path, last, have)) = zone
         .res
@@ -319,7 +330,7 @@ fn refresh_news(zone: &mut Zone) {
         return;
     };
     news.modified = modified;
-    news.packet = Some(packet(oss_proto::s2c::kind::INCOMING_FILE, "", &zlib(&raw)));
+    news.packet = Some(news_packet(&raw));
     zone.res
         .insert(NewsChecksum(oss_proto::checksum::crc32(&raw)));
     tracing::debug!(target: "mapnewsdl", "news file reread");

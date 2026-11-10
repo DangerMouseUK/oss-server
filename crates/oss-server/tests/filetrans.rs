@@ -4,6 +4,7 @@
 
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use oss_proto::Packet;
 use oss_proto::c2s::{self, GoArena, Login};
@@ -26,17 +27,29 @@ impl Drop for TempDir {
     }
 }
 
+/// Unique per call, not per clock reading. The tests here run as threads of
+/// one process, so the pid is shared and `as_nanos` is only as fine as the
+/// platform clock; two tests that agreed on a name would share a directory,
+/// and the first to finish would delete it under the others. Nine tests use
+/// this helper.
+static NEXT_DIR: AtomicU64 = AtomicU64::new(0);
+
 fn temp_zone(files: &[(&str, &str)]) -> TempDir {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_nanos());
-    let dir = std::env::temp_dir().join(format!("oss-ft-{}-{nanos}", std::process::id()));
+    let n = NEXT_DIR.fetch_add(1, Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("oss-ft-{}-{nanos}-{n}", std::process::id()));
+    // create_dir, not create_dir_all: a name that is somehow taken should
+    // fail here rather than quietly share someone else's files
+    std::fs::create_dir(&dir).expect("a directory of this name already exists");
+    let owned = TempDir(dir);
     for (path, data) in files {
-        let p = dir.join(path);
+        let p = owned.0.join(path);
         std::fs::create_dir_all(p.parent().expect("parent")).expect("mkdir");
         std::fs::write(p, data).expect("write");
     }
-    TempDir(dir)
+    owned
 }
 
 struct H {

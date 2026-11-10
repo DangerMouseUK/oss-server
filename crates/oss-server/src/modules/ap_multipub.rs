@@ -25,6 +25,20 @@ use super::arenaman::ArenaPlace;
 /// How many numbered arenas of each kind to consider (ASSS tries 9 passes).
 const MAX_PASSES: u32 = 9;
 
+/// ASSS copies each name, and then each `<name><pass>`, into a 20-byte
+/// buffer, so both are cut to 19 characters. A name near that limit loses
+/// its pass digit, and two names that differ only past the 19th character
+/// become the same arena.
+const MAX_NAME: usize = 19;
+
+/// Cuts to [`MAX_NAME`] bytes without splitting a character.
+fn truncate(s: &str) -> String {
+    s.char_indices()
+        .take_while(|(i, c)| i + c.len_utf8() <= MAX_NAME)
+        .map(|(_, c)| c)
+        .collect()
+}
+
 struct MultiPub;
 
 /// Players in `name` who are in a ship, and whether the arena exists.
@@ -49,7 +63,7 @@ impl ArenaPlace for MultiPub {
     fn place(&self, zone: &mut Zone, player: PlayerId) -> Option<String> {
         // a virtual server's players stay among its own arenas
         let names: Vec<String> = match zone.players.get(player).and_then(|p| p.connect_as.clone()) {
-            Some(c) => vec![c],
+            Some(c) => vec![truncate(&c)],
             None => zone
                 .cfg
                 .global()
@@ -57,7 +71,7 @@ impl ArenaPlace for MultiPub {
                 .unwrap_or("")
                 .split([' ', ',', ':', ';'])
                 .filter(|s| !s.is_empty())
-                .map(str::to_owned)
+                .map(truncate)
                 .collect(),
         };
         if names.is_empty() {
@@ -68,7 +82,7 @@ impl ArenaPlace for MultiPub {
         let mut backup: Option<String> = None;
         for pass in 1..=MAX_PASSES {
             for name in &names {
-                let candidate = format!("{name}{pass}");
+                let candidate = truncate(&format!("{name}{pass}"));
                 match playing_in(zone, &candidate) {
                     None => {
                         if backup.is_none() {

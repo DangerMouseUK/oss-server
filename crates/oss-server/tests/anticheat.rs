@@ -409,6 +409,58 @@ fn teleports_speeds_and_energy() {
 }
 
 #[test]
+fn a_short_burst_of_fast_clock_is_caught() {
+    // The clock check averages over 20 s, so a burst this short is invisible
+    // to it; the motion bounds have to be what sees it.
+    let mut h = H::new("Enabled = 1\nCooldown = 0\n");
+    let p = h.player("alice");
+    let (mut t, mut x) = (h.t as u32, 2000i32);
+    // a second of honest flight at the ship's top speed
+    for _ in 0..10 {
+        h.tick(10);
+        t += 10;
+        x += 32;
+        h.send_pos(p, t, x as i16, 8000, 3250, 1000, 0, 0);
+    }
+    assert!(h.seen().is_empty(), "{:?}", h.seen());
+    // the clock jumps to four times speed: each packet claims 40 ticks where
+    // the server saw 10, and the ship covers what 40 ticks would allow. The
+    // first second or so is paid for out of the budget (a lag spike looks
+    // like this); after that the bounds go by the server's clock.
+    for i in 0..25 {
+        h.tick(10);
+        t += 40;
+        x += 130;
+        h.send_pos(p, t, x as i16, 8000, 3250, 1000, 0, 0);
+        if i == 5 {
+            assert!(h.seen().is_empty(), "{:?}", h.seen());
+        }
+    }
+    assert!(
+        h.seen().contains(&Check::Teleport),
+        "a 4x clock burst went unnoticed: {:?}",
+        h.seen()
+    );
+}
+
+#[test]
+fn packets_bunched_after_a_lag_spike_are_not_findings() {
+    // The same mechanism must not punish a backlog: three seconds of
+    // positions delivered at once, each claiming its honest 10 ticks.
+    let mut h = H::new("Enabled = 1\nCooldown = 0\n");
+    let p = h.player("alice");
+    let (mut t, mut x) = (h.t as u32, 2000i32);
+    h.tick(10);
+    h.send_pos(p, t, x as i16, 8000, 0, 1000, 0, 0);
+    for _ in 0..30 {
+        t += 10;
+        x += 20;
+        h.send_pos(p, t, x as i16, 8000, 0, 1000, 0, 0);
+    }
+    assert!(h.seen().is_empty(), "{:?}", h.seen());
+}
+
+#[test]
 fn item_counts() {
     let items = "[Warbird]\nInitialRepel = 2\nRepelMax = 3\nThorMax = 0\n";
     let mut h = H::with("Enabled = 1\nCooldown = 0\n", items);

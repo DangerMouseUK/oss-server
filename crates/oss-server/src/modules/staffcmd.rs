@@ -668,6 +668,29 @@ fn c_unlock(zone: &mut Zone, inv: &Invocation<'_>) {
     message(zone, inv.sender, "Unlocked.");
 }
 
+fn c_lockarena(zone: &mut Zone, inv: &Invocation<'_>) {
+    let Some(a) = inv.arena else { return };
+    let p = inv.params;
+    super::game::lock_arena(
+        zone,
+        a,
+        p.contains("-n"),
+        p.contains("-a"),
+        p.contains("-i"),
+        p.contains("-s"),
+    );
+}
+
+fn c_unlockarena(zone: &mut Zone, inv: &Invocation<'_>) {
+    let Some(a) = inv.arena else { return };
+    super::game::unlock_arena(
+        zone,
+        a,
+        inv.params.contains("-n"),
+        inv.params.contains("-a"),
+    );
+}
+
 fn c_send(zone: &mut Zone, inv: &Invocation<'_>) {
     let Target::Player(t) = inv.target else {
         message(zone, inv.sender, "send: must use on a player");
@@ -1267,6 +1290,16 @@ const COMMANDS: &[(&str, Handler, &str)] = &[
         "lock",
         c_lock,
         "Targets: player, freq, or arena\nArgs: [-s]\nLocks players in their ship (-s: in spec).",
+    ),
+    (
+        "lockarena",
+        c_lockarena,
+        "Targets: arena\nArgs: [-n] [-a] [-i] [-s]\nLocks the arena, so players entering it are held in spectator mode, and locks everyone already here. -n tells them, -a changes only the arena's own state, -i holds entering players in the ship they arrive in instead of spec, -s specs everyone here first.",
+    ),
+    (
+        "unlockarena",
+        c_unlockarena,
+        "Targets: arena\nArgs: [-n] [-a]\nUnlocks the arena and everyone in it. -n tells them, -a changes only the arena's own state.",
     ),
     (
         "unlock",

@@ -45,6 +45,7 @@ impl H {
                  privcmd_freqkick\nprivcmd_giveowner\ncmd_takeownership\ncmd_sheep\n\
                  [mod]\ncmd_version = 1\ncmd_go = 1\nseemodchat\nsendmodchat\n\
                  cmd_arena\ncmd_zone\ncmd_owner\ncmd_listarena\ncmd_modinfo\ncmd_netstats\n\
+                 cmd_lockarena\ncmd_unlockarena\n\
                  privcmd_setship\nprivcmd_lock\nprivcmd_prize\nprivcmd_info\n\
                  privcmd_warpto\ncmd_z\nhigher_than_default\n\
                  privcmd_freqkick\nprivcmd_giveowner\ncmd_takeownership\n"
@@ -918,4 +919,60 @@ fn sheep() {
             "{conf}"
         );
     }
+}
+
+#[test]
+fn arena_lock_and_initial_spec() {
+    let mut h = H::new();
+    let (alice, _) = h.login("alice", "x");
+    let (bob, _) = h.login("bob", "secret");
+    h.enter(alice);
+    h.enter(bob);
+    h.send(alice, &[c2s::kind::SET_SHIP, 0]);
+    assert_eq!(h.zone.players.get(alice).map(|p| p.ship.0), Some(0));
+    h.take(alice);
+
+    // ?lockarena -n -s: everyone here goes to spec, is locked, and is told
+    h.chat(bob, chat_type::PUBLIC, 0, "?lockarena -n -s");
+    assert_eq!(h.zone.players.get(alice).map(|p| p.ship.0), Some(8));
+    let out = texts(&h.take(alice));
+    assert!(
+        out.iter()
+            .any(|t| t == "You have been locked to spectator mode."),
+        "{out:?}"
+    );
+    h.send(alice, &[c2s::kind::SET_SHIP, 1]);
+    assert_eq!(h.zone.players.get(alice).map(|p| p.ship.0), Some(8));
+
+    // and someone entering now starts in spec, locked
+    let (carol, _) = h.login("carol", "x");
+    h.enter(carol);
+    assert_eq!(h.zone.players.get(carol).map(|p| p.ship.0), Some(8));
+    h.send(carol, &[c2s::kind::SET_SHIP, 2]);
+    assert_eq!(h.zone.players.get(carol).map(|p| p.ship.0), Some(8));
+
+    // ?unlockarena lets everyone back into ships
+    h.chat(bob, chat_type::PUBLIC, 0, "?unlockarena -n");
+    let out = texts(&h.take(alice));
+    assert!(
+        out.iter().any(|t| t == "Your ship has been unlocked."),
+        "{out:?}"
+    );
+    h.send(alice, &[c2s::kind::SET_SHIP, 1]);
+    assert_eq!(h.zone.players.get(alice).map(|p| p.ship.0), Some(1));
+}
+
+#[test]
+fn initial_spec_setting() {
+    let mut h = H::with_conf(
+        &format!("{ARENA_CONF}[Team]\nInitialSpec = 1\n"),
+        "[Chat]\nMessageReliable = 1\n",
+    );
+    let (alice, _) = h.login("alice", "x");
+    h.enter(alice);
+    // the client asked for a ship in its arena request; the zone says spec
+    assert_eq!(h.zone.players.get(alice).map(|p| p.ship.0), Some(8));
+    // but nothing stops them taking one
+    h.send(alice, &[c2s::kind::SET_SHIP, 0]);
+    assert_eq!(h.zone.players.get(alice).map(|p| p.ship.0), Some(0));
 }

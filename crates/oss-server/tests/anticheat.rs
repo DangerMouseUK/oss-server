@@ -623,3 +623,36 @@ fn endless_energy_while_firing() {
         assert_eq!(n.min(1), want, "honest: {honest}, {:?}", h.seen());
     }
 }
+
+#[test]
+fn one_impossible_finding_is_forgiven_and_two_are_not() {
+    // The impossible checks are weighted 50, so the first finding leaves
+    // trust at 50 -- above SpecTrust 40 -- and the second leaves 0, below
+    // KickTrust 10. Under Action = 2 that second one is a kick, not a spec.
+    let mut map = Vec::new();
+    for y in 295..=305u32 {
+        map.extend_from_slice(&(300u32 | (y << 12) | (1u32 << 24)).to_le_bytes());
+    }
+    let mut h = H::with_map(
+        "Enabled = 1\nAction = 2\nCooldown = 0\n",
+        "[General]\nMap = test.lvl\n[Warbird]\nPortalMax = 0\nInitialPortal = 0\n",
+        Some(map),
+    );
+    let p = h.player("alice");
+    let t0 = h.t as u32;
+
+    flash_hop(&mut h, p, t0);
+    assert_eq!(h.seen(), vec![Check::Wall]);
+    assert_eq!(trust(&h.zone, p), 50);
+    assert_eq!(h.ship(p), 0, "one finding does not cost the ship");
+    assert!(h.lo.take_disconnects().is_empty());
+
+    flash_hop(&mut h, p, t0 + 100);
+    assert_eq!(h.seen(), vec![Check::Wall, Check::Wall]);
+    assert_eq!(trust(&h.zone, p), 0);
+    assert_eq!(h.ship(p), 8, "specced");
+    // the kick runs through the lifecycle rather than dropping the socket
+    // there and then, so let it play out
+    h.tick(50);
+    assert_eq!(h.lo.take_disconnects().len(), 1, "and kicked");
+}

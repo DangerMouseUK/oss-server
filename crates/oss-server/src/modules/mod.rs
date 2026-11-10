@@ -43,6 +43,7 @@ pub mod redirect;
 pub mod security;
 pub mod staffcmd;
 pub mod stats;
+pub mod turf_reward;
 pub mod watchdamage;
 
 use crate::module::ModuleCatalog;
@@ -84,6 +85,8 @@ pub const DEFAULT_MODULES: &[&str] = &[
     "fg_wz",
     "fg_turf",
     "fm_lockspec",
+    "turf_reward",
+    "points_turf_reward",
     "buy",
     "game_timer",
     "filetrans",
@@ -151,6 +154,12 @@ pub fn builtin_catalog() -> ModuleCatalog {
     c.register("game_timer", &[], || game_timer::GameTimerModule);
     c.register("watchdamage", &[], || watchdamage::WatchDamageModule);
     c.register("ap_multipub", &[], || ap_multipub::ApMultiPubModule);
+    c.register("turf_reward", &["turf:turf_reward"], || {
+        turf_reward::TurfRewardModule
+    });
+    c.register("points_turf_reward", &["turf:points_turf_reward"], || {
+        turf_reward::PointsTurfRewardModule
+    });
     c.register("filetrans", &[], || filetrans::FileTransModule);
     c.register("sendfile", &[], || filetrans::SendFileModule);
     c.register("arenaperm", &[], || arenaperm::ArenaPermModule);

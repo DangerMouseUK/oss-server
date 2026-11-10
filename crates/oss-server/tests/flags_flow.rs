@@ -725,3 +725,121 @@ fn flag_commands() {
     let out = h.cmd(a, "?neutflag 7");
     assert!(out.iter().any(|t| t == "neutflag: bad flag id"), "{out:?}");
 }
+
+/// turf_reward: weighted flags, the standard jackpot, and the minimums.
+#[test]
+fn turf_reward_weighted_scoring() {
+    let map = tile_list(&[(100, 100, 170), (200, 200, 170), (300, 300, 170)]);
+    let conf = "[General]\nMap = test.lvl\n\
+        [Modules]\nAttachModules = fg_turf turf_reward points_turf_reward\n\
+        [TurfReward]\nRewardStyle = TR_STYLE_STANDARD\nTimerInitial = 1500\n\
+        TimerInterval = 1500\nMinPlayersTeam = 1\nMinPlayersArena = 2\nMinTeams = 1\n\
+        MinFlags = 1\nMinWeights = 1\nRewardModifier = 100\nSetWeights = 3\n\
+        Weight0 = 1\nWeight1 = 5\nWeight2 = 10\n\
+        [Team]\nDesiredTeams = 2\n";
+    let mut h = H::new(conf, Some(map));
+    let a = h.player("alpha", 0);
+    let b = h.player("bravo", 1);
+    assert_eq!(h.zone.players.get(a).map(|p| p.freq), Some(0));
+    assert_eq!(h.zone.players.get(b).map(|p| p.freq), Some(1));
+
+    // alpha takes two flags, bravo one
+    h.touch(a, 0);
+    h.touch(a, 1);
+    h.touch(b, 2);
+    h.take(a);
+    h.take(b);
+
+    // first ding: every flag is worth Weight0, so alpha holds 2 of 3 weights
+    h.tick(1600);
+    let texts: Vec<String> = of(&h.take(a), s2c::kind::CHAT)
+        .iter()
+        .map(|c| {
+            String::from_utf8_lossy(&s2c::S2CChat::decode(c).expect("chat").0.text).into_owned()
+        })
+        .collect();
+    // jackpot = RewardModifier * players = 200; alpha's share is 2/3 of it
+    assert!(
+        texts.iter().any(|t| t == "Reward: 133/200"),
+        "alpha's share of the jackpot: {texts:?}"
+    );
+    assert_eq!(
+        h.zone.players.get(a).map(|p| p.score.flag_points),
+        Some(133)
+    );
+    assert_eq!(h.zone.players.get(b).map(|p| p.score.flag_points), Some(66));
+
+    // second ding: the flags have been held through one ding, so they are
+    // now worth Weight1 each -- the shares are the same, the points are not
+    h.take(a);
+    h.tick(1600);
+    assert_eq!(
+        h.zone.players.get(a).map(|p| p.score.flag_points),
+        Some(266)
+    );
+}
+
+/// turf_reward: a flag tagged back inside the recovery window keeps the
+/// weight it had, rather than starting again.
+#[test]
+fn turf_reward_recovers_a_lost_flag() {
+    let map = tile_list(&[(100, 100, 170), (200, 200, 170)]);
+    let conf = "[General]\nMap = test.lvl\n\
+        [Modules]\nAttachModules = fg_turf turf_reward points_turf_reward\n\
+        [TurfReward]\nRewardStyle = TR_STYLE_WEIGHTS\nTimerInitial = 1500\n\
+        TimerInterval = 1500\nMinPlayersTeam = 1\nMinPlayersArena = 1\nMinTeams = 1\n\
+        SetWeights = 4\nWeight0 = 1\nWeight1 = 4\nWeight2 = 9\nWeight3 = 16\n\
+        RecoverDings = 1\n[Team]\nDesiredTeams = 2\n";
+    let mut h = H::new(conf, Some(map));
+    let a = h.player("alpha", 0);
+    let b = h.player("bravo", 1);
+    h.touch(a, 0);
+    h.touch(a, 1);
+    // two dings: alpha's flags are worth Weight2 = 9 each
+    h.tick(1600);
+    h.tick(1600);
+    let before = h.zone.players.get(a).map(|p| p.score.flag_points);
+    assert_eq!(before, Some(2 + 8), "1 then 4 a flag");
+
+    // bravo steals flag 0; it starts again at Weight0 for them
+    h.touch(b, 0);
+    // alpha tags it straight back, inside the recovery window
+    h.touch(a, 0);
+    h.take(a);
+    h.tick(1600);
+    // flag 0 came back at its old weight (9), as did flag 1
+    assert_eq!(
+        h.zone.players.get(a).map(|p| p.score.flag_points),
+        Some(10 + 18),
+        "both flags paid 9 again, not 1"
+    );
+    assert_eq!(h.zone.players.get(b).map(|p| p.score.flag_points), Some(0));
+}
+
+/// turf_reward: an arena below its minimums pays nobody and says so.
+#[test]
+fn turf_reward_minimums() {
+    let map = tile_list(&[(100, 100, 170)]);
+    let conf = "[General]\nMap = test.lvl\n\
+        [Modules]\nAttachModules = fg_turf turf_reward points_turf_reward\n\
+        [TurfReward]\nRewardStyle = TR_STYLE_STANDARD\nTimerInitial = 1500\n\
+        TimerInterval = 1500\nMinPlayersArena = 5\n[Team]\nDesiredTeams = 2\n";
+    let mut h = H::new(conf, Some(map));
+    let a = h.player("alpha", 0);
+    h.touch(a, 0);
+    h.take(a);
+    h.tick(1600);
+    let texts: Vec<String> = of(&h.take(a), s2c::kind::CHAT)
+        .iter()
+        .map(|c| {
+            String::from_utf8_lossy(&s2c::S2CChat::decode(c).expect("chat").0.text).into_owned()
+        })
+        .collect();
+    assert!(
+        texts
+            .iter()
+            .any(|t| t == "Reward: 0 (arena minimum requirements not met)"),
+        "{texts:?}"
+    );
+    assert_eq!(h.zone.players.get(a).map(|p| p.score.flag_points), Some(0));
+}

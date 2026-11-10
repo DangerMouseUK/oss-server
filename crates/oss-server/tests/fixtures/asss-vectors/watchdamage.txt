@@ -1,0 +1,195 @@
+# Watch damage from ASSS 1.4.4 src/core/watchdamage.c (compiled unmodified).
+#   seat <pairs>   one pair per player: 'c' a Continuum client or 'v' a VIE client,
+#      then 'p' playing in this arena, 'o' in another arena, 'n' with no arena
+#   cmd <player> player <target> [<args>]   ran ?watchdamage aimed at one player
+#   cmd <player> arena [<args>]             ran it as a public command
+#   modwatch <player> <0|1>  called Iwatchdamage::ModuleWatch, which is how another
+#      module asks for a player's damage without being a watcher itself
+#   leave <player>   ran the PA_LEAVEARENA player action
+#   damage <player> count=<n> tick=<n> fill=<byte> len=<n>   fed the module a
+#      C2S 0x32 of that length carrying that many damage records
+#   pkt set|one [<player>] <hex>   each packet, in order and in wire order.
+#      'set' is a send to the watcher list, 'one' names a single recipient.
+#   cb <name>      each callback fired
+#   chat <player> <text>   each chat line and who got it
+#   state <player>:<watchers>/<modwatch>/<watcher list>...   per player: how many
+#      others are watching THEIR damage, the module-watch counter on them, and
+#      which players those watchers are.
+#
+# Rules these records pin:
+#
+# 1. The watch count that decides whether the client is toggled is
+#    LLCount(watches) + modwatch, and the S2C 0x37 toggle is sent ONLY when a watch
+#    is added and the total becomes exactly 1, or removed and it becomes 0.
+# 2. ModuleWatch NEVER SENDS A PACKET. It only moves the counter. So a module that
+#    asks for a player's damage while nobody else is watching bumps the total from
+#    0 to 1 with no toggle going out, and the client is never told to start
+#    reporting -- and because the total is then already 1, the first real watcher
+#    to come along takes it to 2 and does not send one either. The module's damage
+#    callback then never fires. Records below drive exactly that order.
+# 3. The decrement is floored: ModuleWatch(off) on a player whose counter is
+#    already 0 leaves it at 0 rather than going negative.
+# 4. The toggle is sent only to T_CONT players. A VIE client is added to the watch
+#    list and counted like anyone else, but never receives the toggle, so it never
+#    reports -- and ?watchdamage aimed AT a non-Continuum player is refused outright
+#    with a message naming them.
+# 5. ?watchdamage with exactly '0' or '1' forces that state; anything else, the
+#    empty string included, TOGGLES -- and the toggle is implemented by trying to
+#    add and removing again if the add reported it was already there.
+# 6. The public form only does anything for exactly '0', which clears all of that
+#    player's watches on others. Any other argument, '1' included, is silently
+#    ignored.
+# 7. ClearWatch on leaving the arena is called with himtoo=1, so it removes both
+#    his watches on other people AND the list of people watching him. Removing his
+#    own watches goes through RemoveWatch, so the people he was watching get their
+#    toggle-off packets; emptying his own watcher list does NOT, so HE is never
+#    told to stop -- he is leaving anyway.
+# 8. The damage packet's length must satisfy (len - 5) % sizeof(DamageData) == 0,
+#    and the relayed S2C 0x38 is 7 bytes of header plus the records copied
+#    verbatim. The server fills in the damaged player's id, which the C2S does not
+#    carry. A report with zero records is valid and is relayed as a bare header.
+# 9. The relay goes out before the callback, and the callback fires only when
+#    modwatch is above zero -- the comment in the source says these can go in mass
+#    spamming, so it is deliberate.
+sizes DamageData=9 C2SWatchDamage_header=5 S2C_header=7
+seat cpcpcp
+state 0:0/0/- 1:0/0/- 2:0/0/-
+cmd 0 player 1 []
+state 0:0/0/- 1:1/0/0 2:0/0/-
+pkt one 1 3701
+chat 0 Damage watching on p1 turned on
+cmd 0 player 1 []
+state 0:0/0/- 1:0/0/- 2:0/0/-
+pkt one 1 3700
+chat 0 Damage watching on p1 turned off
+cmd 0 player 1 [1]
+state 0:0/0/- 1:1/0/0 2:0/0/-
+pkt one 1 3701
+chat 0 Damage watching on p1 turned on
+cmd 0 player 1 [1]
+state 0:0/0/- 1:1/0/0 2:0/0/-
+chat 0 Damage watching on p1 turned on
+cmd 2 player 1 [1]
+state 0:0/0/- 1:2/0/02 2:0/0/-
+chat 2 Damage watching on p1 turned on
+cmd 0 player 1 [0]
+state 0:0/0/- 1:1/0/2 2:0/0/-
+chat 0 Damage watching on p1 turned off
+cmd 2 player 1 [0]
+state 0:0/0/- 1:0/0/- 2:0/0/-
+pkt one 1 3700
+chat 2 Damage watching on p1 turned off
+cmd 0 player 1 [0]
+state 0:0/0/- 1:0/0/- 2:0/0/-
+chat 0 Damage watching on p1 turned off
+cmd 0 player 1 [11]
+state 0:0/0/- 1:1/0/0 2:0/0/-
+pkt one 1 3701
+chat 0 Damage watching on p1 turned on
+seat cpcp
+state 0:0/0/- 1:0/0/-
+modwatch 1 1
+state 0:0/0/- 1:0/1/-
+cmd 0 player 1 [1]
+state 0:0/0/- 1:1/1/0
+chat 0 Damage watching on p1 turned on
+cmd 0 player 1 [0]
+state 0:0/0/- 1:0/1/-
+chat 0 Damage watching on p1 turned off
+modwatch 1 0
+state 0:0/0/- 1:0/0/-
+modwatch 1 0
+state 0:0/0/- 1:0/0/-
+cmd 0 player 1 [1]
+state 0:0/0/- 1:1/0/0
+pkt one 1 3701
+chat 0 Damage watching on p1 turned on
+seat cpvpcp
+state 0:0/0/- 1:0/0/- 2:0/0/-
+cmd 0 player 1 [1]
+state 0:0/0/- 1:0/0/- 2:0/0/-
+chat 0 watchdamage requires p1 to use Continuum
+cmd 1 player 2 [1]
+state 0:0/0/- 1:0/0/- 2:1/0/1
+pkt one 2 3701
+chat 1 Damage watching on p2 turned on
+cmd 0 player 2 [1]
+state 0:0/0/- 1:0/0/- 2:2/0/10
+chat 0 Damage watching on p2 turned on
+state 0:0/0/- 1:0/0/- 2:2/0/10
+seat cpcpcpcp
+state 0:0/0/- 1:0/0/- 2:0/0/- 3:0/0/-
+cmd 0 player 1 [1]
+state 0:0/0/- 1:1/0/0 2:0/0/- 3:0/0/-
+pkt one 1 3701
+chat 0 Damage watching on p1 turned on
+cmd 0 player 2 [1]
+state 0:0/0/- 1:1/0/0 2:1/0/0 3:0/0/-
+pkt one 2 3701
+chat 0 Damage watching on p2 turned on
+cmd 3 player 2 [1]
+state 0:0/0/- 1:1/0/0 2:2/0/03 3:0/0/-
+chat 3 Damage watching on p2 turned on
+cmd 0 arena [0]
+state 0:0/0/- 1:0/0/- 2:1/0/3 3:0/0/-
+pkt one 1 3700
+chat 0 All damage watching turned off
+cmd 3 arena [1]
+state 0:0/0/- 1:0/0/- 2:1/0/3 3:0/0/-
+cmd 3 arena []
+state 0:0/0/- 1:0/0/- 2:1/0/3 3:0/0/-
+seat cpcpcp
+state 0:0/0/- 1:0/0/- 2:0/0/-
+cmd 0 player 1 [1]
+state 0:0/0/- 1:1/0/0 2:0/0/-
+pkt one 1 3701
+chat 0 Damage watching on p1 turned on
+cmd 0 player 2 [1]
+state 0:0/0/- 1:1/0/0 2:1/0/0
+pkt one 2 3701
+chat 0 Damage watching on p2 turned on
+cmd 1 player 0 [1]
+state 0:1/0/1 1:1/0/0 2:1/0/0
+pkt one 0 3701
+chat 1 Damage watching on p0 turned on
+# p0 leaves: p1 and p2 get toggle-offs, p0's own watcher list is just
+# emptied, so p0 is never told to stop
+leave 0
+state 0:0/0/- 1:0/0/- 2:0/0/-
+pkt one 1 3700
+pkt one 2 3700
+seat cpcpcp
+state 0:0/0/- 1:0/0/- 2:0/0/-
+cmd 0 player 2 [1]
+state 0:0/0/- 1:0/0/- 2:1/0/0
+pkt one 2 3701
+chat 0 Damage watching on p2 turned on
+cmd 1 player 2 [1]
+state 0:0/0/- 1:0/0/- 2:2/0/01
+chat 1 Damage watching on p2 turned on
+damage 2 count=1 tick=287454020 fill=5a len=14
+state 0:0/0/- 1:0/0/- 2:2/0/01
+pkt set 380200443322115a5a5a5a5a5a5a5a5a
+damage 2 count=3 tick=1432778632 fill=6b len=32
+state 0:0/0/- 1:0/0/- 2:2/0/01
+pkt set 380200887766556b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b
+damage 2 count=0 tick=2578103244 fill=7c len=5
+state 0:0/0/- 1:0/0/- 2:2/0/01
+pkt set 380200ccbbaa99
+damage 2 count=1 tick=287454020 fill=5a len=15
+state 0:0/0/- 1:0/0/- 2:2/0/01
+damage 0 count=1 tick=287454020 fill=8d len=14
+state 0:0/0/- 1:0/0/- 2:2/0/01
+pkt set 380000443322118d8d8d8d8d8d8d8d8d
+# with a module watching, the damage callback fires as well
+modwatch 2 1
+state 0:0/0/- 1:0/0/- 2:2/1/01
+damage 2 count=1 tick=3735928559 fill=9e len=14
+state 0:0/0/- 1:0/0/- 2:2/1/01
+pkt set 380200efbeadde9e9e9e9e9e9e9e9e9e
+cb playerdamage
+modwatch 2 0
+state 0:0/0/- 1:0/0/- 2:2/0/01
+damage 2 count=1 tick=3735928559 fill=af len=14
+state 0:0/0/- 1:0/0/- 2:2/0/01
+pkt set 380200efbeaddeafafafafafafafafaf

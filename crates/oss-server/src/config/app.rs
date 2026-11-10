@@ -198,10 +198,24 @@ impl<'a> Preprocessor<'a> {
         match self.src.open(self.arena.as_deref(), name) {
             Some((path, data)) => {
                 self.opened.push(path.clone());
+                // A UTF-8 BOM is not content, and every .conf file enters
+                // the preprocessor here, so this is the one place to drop
+                // it. Windows editors add one silently; without this the
+                // first line's leading character is no longer leading, so a
+                // ';' comment is read as a value and a '[' section header
+                // names a different section. modules.conf loses its whole
+                // first line that way. ASSS reads the bytes as they come
+                // and has the same bug, but this can only ever change a
+                // file that has a BOM, and such a file is already wrong.
+                let pos = if data.starts_with(&[0xEF, 0xBB, 0xBF]) {
+                    3
+                } else {
+                    0
+                };
                 Some(OpenFile {
                     path,
                     data,
-                    pos: 0,
+                    pos,
                     lineno: 0,
                 })
             }
@@ -457,5 +471,31 @@ mod tests {
         let src = MemSource::new([("conf/global.conf", long.as_str())]);
         let (l, _) = lines(&src, None, "global.conf");
         assert_eq!(l.iter().map(String::len).sum::<usize>(), 10_000);
+    }
+}
+
+#[cfg(test)]
+mod bom_tests {
+    use crate::config::MemSource;
+
+    #[test]
+    fn a_byte_order_mark_does_not_eat_the_first_line() {
+        // Notepad writes one of these without asking. Before it was
+        // stripped, modules.conf lost its first line: the ';;' comment was
+        // no longer at the start of the line, so the whole comment was read
+        // as a module name and logged as "no such module".
+        let bom = "\u{feff}";
+        let src = MemSource::new([
+            (
+                "conf/modules.conf",
+                format!("{bom};; a comment\ncore\nchat\n"),
+            ),
+            ("conf/global.conf", format!("{bom}[General]\nPort = 5000\n")),
+        ]);
+        let names = crate::module::read_modules_conf(&src).expect("modules.conf");
+        assert_eq!(names, vec!["core".to_owned(), "chat".to_owned()]);
+
+        let cfg = crate::config::ConfigManager::new(src).expect("global.conf");
+        assert_eq!(cfg.global().get_int("General", "Port", 0), 5000);
     }
 }

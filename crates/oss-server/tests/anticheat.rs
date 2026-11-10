@@ -656,3 +656,47 @@ fn one_impossible_finding_is_forgiven_and_two_are_not() {
     h.tick(50);
     assert_eq!(h.lo.take_disconnects().len(), 1, "and kicked");
 }
+
+/// Being specced by the server is not a teleport.
+///
+/// The question came from the client thread's lag write-up: a false spec
+/// moves the player's ship, and if that move were judged as motion an
+/// honest client would earn a Teleport finding at the exact moment it
+/// happened -- and Teleport is one of the checks weighted 50, so two would
+/// be a kick. The exemption is stronger than an excuse: a ship or freq
+/// change clears the player's previous position sample, so there is no
+/// pair to compare and the first packet afterwards just becomes the new
+/// baseline. A spectator is not motion-checked at all on the way through.
+#[test]
+fn a_server_spec_and_the_ship_after_it_are_not_a_teleport() {
+    let mut h = H::with(
+        "Enabled = 1\nAction = 2\nCooldown = 0\n",
+        "[General]\nMap = test.lvl\n",
+    );
+    let p = h.player("alice");
+    let t0 = h.t as u32;
+    h.send_pos(p, t0, 2000, 8000, 0, 1000, 0, 0);
+    h.tick(10);
+    assert!(h.seen().is_empty(), "{:?}", h.seen());
+
+    // lagaction and anticheat both spec through set_ship_and_freq
+    let sf = 8025;
+    oss_server::modules::game::set_ship_and_freq(
+        &mut h.zone,
+        p,
+        oss_server::player::Ship::SPEC,
+        sf,
+    );
+    h.tick(10);
+
+    // back into a ship, spawning right across the map from where they were
+    oss_server::modules::game::set_ship_and_freq(&mut h.zone, p, oss_server::player::Ship(0), 0);
+    h.tick(10);
+    h.send_pos(p, h.t as u32, 15000, 1000, 0, 1000, 0, 0);
+    h.tick(10);
+    assert!(
+        h.seen().is_empty(),
+        "a server-initiated spec should leave no finding: {:?}",
+        h.seen()
+    );
+}

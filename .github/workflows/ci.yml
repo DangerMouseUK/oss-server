@@ -38,6 +38,30 @@ jobs:
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
 
+  # docs.rs builds every crate with all features; broken or ambiguous
+  # intra-doc links fail here rather than render wrongly there.
+  docs:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: oss-server
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: oss-server
+      - uses: actions/checkout@v4
+        with:
+          repository: DangerMouseUK/oss-core
+          path: oss-core
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: oss-server
+      - run: cargo doc --workspace --no-deps --all-features
+        env:
+          RUSTDOCFLAGS: -D warnings
+
   deny:
     runs-on: ubuntu-latest
     steps:

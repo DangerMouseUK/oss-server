@@ -4,8 +4,8 @@
 //! `arenas/<name>/arena.conf`, `#include` trees, `groupdef.conf`, ... The
 //! parsing rules (preprocessor directives, sections, escapes, case-insensitive
 //! keys, "last definition wins", `strtol`-style integers) follow ASSS 1.4.4's
-//! `app.c` and `config.c`; see [`app`] and [`file`] for the details and the few
-//! deliberate divergences.
+//! `app.c` and `config.c`; see [`app`] and [`file`](mod@file) for the details and
+//! the few deliberate divergences.
 //!
 //! Text is decoded as Latin-1, so every byte of a config value survives and can
 //! be sent to clients unchanged with [`to_latin1`].

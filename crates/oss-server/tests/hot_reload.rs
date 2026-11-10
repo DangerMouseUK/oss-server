@@ -122,6 +122,88 @@ impl H {
 }
 
 #[test]
+fn setting_commands_change_config_live() {
+    let dir = temp_zone(&[
+        ("conf/global.conf", "[Misc]\nGreeting = one\n"),
+        ("conf/passwd.conf", "[General]\nAllowUnknown = yes\n"),
+        (
+            "conf/groupdef.conf",
+            "[default]\ncmd_setg = 1\ncmd_seta = 1\ncmd_getg = 1\ncmd_geta = 1\n",
+        ),
+        ("conf/staff.conf", ""),
+        ("arenas/(default)/arena.conf", "[Misc]\nValue = 1\n"),
+    ]);
+    let zone = ServerBuilder::new(&dir.0).build_zone().expect("zone");
+    let mut h = H {
+        zone,
+        lo: Loopback::default(),
+        t: 0,
+    };
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let (s1, s2) = (seen.clone(), seen.clone());
+    h.zone
+        .on::<ArenaAction>(Owner(999), Scope::Global, move |_, ev| {
+            if ev.action == ArenaActionKind::ConfChanged {
+                s1.lock().expect("lock").push("arena");
+            }
+        });
+    h.zone
+        .on::<GlobalConfChanged>(Owner(999), Scope::Global, move |_, _| {
+            s2.lock().expect("lock").push("global");
+        });
+    let p = h.player("alice");
+    let arena = h.zone.players.get(p).and_then(|x| x.arena).expect("arena");
+
+    let out = h.cmd(p, "?getg Misc:Greeting");
+    assert!(out.iter().any(|t| t == "Misc:Greeting=one"), "{out:?}");
+    let out = h.cmd(p, "?getg Misc:Nothing");
+    assert!(out.iter().any(|t| t == "Misc:Nothing not found"), "{out:?}");
+
+    // a permanent change reaches the running zone and the file
+    h.cmd(p, "?setg Misc:Greeting=three");
+    assert_eq!(h.zone.cfg.global().get("Misc", "Greeting"), Some("three"));
+    let text = std::fs::read_to_string(dir.0.join("conf/global.conf")).expect("read");
+    assert!(text.contains("Misc:Greeting = three"), "{text}");
+    assert!(text.contains("; set by alice at "), "{text}");
+
+    // -t changes the running zone only
+    h.cmd(p, "?setg -t Misc:Greeting=four");
+    assert_eq!(h.zone.cfg.global().get("Misc", "Greeting"), Some("four"));
+    let text = std::fs::read_to_string(dir.0.join("conf/global.conf")).expect("read");
+    assert!(!text.contains("four"), "{text}");
+
+    // ?seta is the same for the arena's own config
+    h.cmd(p, "?seta Misc:Value=7");
+    assert_eq!(
+        h.zone
+            .arenas
+            .get(arena)
+            .map(|a| a.cfg.get_int("Misc", "Value", 0)),
+        Some(7)
+    );
+    let out = h.cmd(p, "?geta Misc:Value");
+    assert!(out.iter().any(|t| t == "Misc:Value=7"), "{out:?}");
+
+    // ASSS also takes a second colon in place of the equals sign
+    h.cmd(p, "?seta Misc:Value:9");
+    assert_eq!(
+        h.zone
+            .arenas
+            .get(arena)
+            .map(|a| a.cfg.get_int("Misc", "Value", 0)),
+        Some(9)
+    );
+    // every change told the arena and the zone
+    let seen = seen.lock().expect("lock").clone();
+    assert_eq!(
+        seen,
+        vec!["global", "global", "arena", "arena"],
+        "each ?set* fires the change its file belongs to"
+    );
+    drop(h);
+}
+
+#[test]
 fn config_and_modules_reload_live() {
     let dir = temp_zone(&[
         ("conf/global.conf", "[Misc]\nGreeting = one\n"),

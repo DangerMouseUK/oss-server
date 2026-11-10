@@ -293,6 +293,39 @@ pub fn reload_config(zone: &mut Zone) -> usize {
     n
 }
 
+/// One config file was changed in place (`?setg`, `?seta`): point the arenas
+/// that were using it at the new one and tell them, as a reload would.
+pub fn config_updated(
+    zone: &mut Zone,
+    old: &std::sync::Arc<crate::config::ConfigFile>,
+    new: &std::sync::Arc<crate::config::ConfigFile>,
+) {
+    if std::sync::Arc::ptr_eq(old, new) {
+        return;
+    }
+    let affected: Vec<ArenaId> = zone
+        .arenas
+        .iter()
+        .filter(|a| std::sync::Arc::ptr_eq(&a.cfg, old))
+        .map(|a| a.id)
+        .collect();
+    for id in affected {
+        let running = match zone.arenas.get_mut(id) {
+            Some(a) => {
+                a.cfg = new.clone();
+                a.status == ArenaStatus::Running
+            }
+            None => false,
+        };
+        if running {
+            fire(zone, id, ArenaActionKind::ConfChanged);
+        }
+    }
+    if std::sync::Arc::ptr_eq(new, zone.cfg.global()) {
+        zone.fire(&GlobalConfChanged);
+    }
+}
+
 /// ASSS arena-name cleaning: at most 15 characters, `#` allowed first,
 /// anything else not alphanumeric becomes `x`, lowercased; empty → `x`.
 pub fn clean_arena_name(req: &str) -> String {

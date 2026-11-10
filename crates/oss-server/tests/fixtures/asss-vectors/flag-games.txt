@@ -1,0 +1,872 @@
+# The two flag games of ASSS 1.4.4, run UNMODIFIED: src/py/fg_turf.py (90 lines)
+# and src/py/fg_wz.py (372 lines). There is no fg_wz.c or fg_turf.c anywhere in
+# ASSS 1.4.4 -- both flag games are Python -- so these were produced by
+# vectors/pyharness, which supplies the five interfaces they pick up at import
+# time and executes their source as written. The only name injected into their
+# namespace is `xrange`, because they are Python 2 source.
+#
+# WHAT THIS FILE PINS. The flagcore behind these modules is a plain store, not
+# ASSS's flagcore.c, so these records are ground truth for the GAME modules --
+# where flags spawn, how a drop is routed, when a win is declared -- and for
+# nothing else. flagcore.c's own state machine is pinned separately, in
+# vectors/flagcore.txt. The two files are meant to be read together.
+#
+#   # <label>    starts a scenario, with a fresh arena and a fresh module
+#   settings <section>:<key>=<value>...   the arena config for that scenario
+#   map flagcount=<n> solid=<n> noflags=<n>   the map the game sees: how many
+#       turf flags, how many solid tiles and how many tiles inside a no-flag
+#       region, each then listed one per line as 'solid <x> <y>' / 'noflag <x> <y>'
+#   cbresult <callback> <value>   a scoring module's answer, scripted for this
+#       scenario; CB_WARZONEWIN is the one that matters, since it decides the points
+#   op FlagTouch <player> <fid> carried=<n>   how many flags that player already
+#       holds, which is an input because fg_wz's carry limit tests it
+#   op <call>    the entry point driven: attach, Init, FlagTouch, Cleanup, or
+#       one of the module's own top-level functions, which in a live zone is
+#       what its timers and callbacks call
+#   current <n>  set fg_wz's live flag count directly, standing in for however
+#       many flags its spawn timer had put out
+#   place <fid> <state>/<carrier>/<x>/<y>/<freq>   put a flag straight into the
+#       store, standing in for whatever flagcore would have done
+#   log <line>   everything the module did during that step, in order: calls
+#       into flagcore, PRNG draws and what they returned, callbacks it fired,
+#       timers it set, and log lines it wrote
+#   flags <n> <fid>:<state>/<carrier>/<x>/<y>/<freq>...   every reserved flag
+#   arena <attr>=<value>...   the attributes the module hangs off the arena
+#   sets <key>=<value>...     fg_wz's parsed [Flag] settings
+#
+# The PRNG is scripted: every draw a scenario needs is queued in advance and
+# shown in the log, so nothing here depends on a seed.
+#
+# Rules these records pin:
+#
+# 1. fg_turf's Init sets CARRY_NONE, reserves one flag per turf flag on the map,
+#    and puts every one of them FI_ONMAP at freq -1. Its FlagTouch sets the
+#    state to FI_ONMAP again on every tag -- it never trusts what was there --
+#    and fires CB_TURFTAG with the OLD freq read before the write and the new
+#    freq taken from the player.
+# 2. fg_wz parses Flag:FlagCount with a three-level try/except: '<min>-<max>'
+#    first, then a bare integer for both, then 0 for both. So a malformed value
+#    silently means no flags, and '5-' or '-5' falls all the way through to 0.
+#    max is clipped to 0..255 and min to 0..max, in that order, so a min above
+#    max is pulled DOWN to max rather than raising it.
+# 3. The spawn timer only picks a new flag count when the current count is below
+#    the minimum, and it picks it with prng.Number(min, max) -- so a zone whose
+#    min and max differ gets a different number of flags each game.
+# 4. spawn_flag tries up to 30 times, GROWING THE RADIUS BY ONE EACH TRY, and
+#    rejects a spot that is already occupied by another flag on the map or that
+#    lies in a region with a NOFLAGS chunk. Only after all 30 does it fall back
+#    to the arena's centre, and the fallback is itself a spawn_flag call with
+#    fallback disabled, so it can fail outright and log an error.
+# 5. circular_random picks the radius and the angle as two separate uniform
+#    draws, IN THAT ORDER, scales by the radius, offsets the centre by half a
+#    tile, truncates toward zero with int(), and then wraps. The wrap is a
+#    REFLECTION, not a clamp and not a modulo: a coordinate of -3 becomes 3 and
+#    one of 1026 becomes 1020, looping until it lands in range.
+# 6. A neuted flag is remembered in a list on the arena, and when the spawn
+#    timer comes round it respawns AT THE POSITION IT WAS NEUTED AT, with the
+#    freq it was neuted with, using DropRadius or SpawnRadius depending on
+#    Flag:NeutCenter -- not at the arena's spawn point like a fresh flag.
+# 7. Cleanup routes the ten reasons to three different behaviours: a plain drop,
+#    a safe-zone drop and a team-kill drop all SPAWN the flag with their own
+#    owned/centre settings, a team kill does nothing at all when
+#    Flag:FriendlyTransfer is on, and ship change, freq change, leaving the
+#    arena and 'other' NEUT the flag instead, which is a different function.
+#    CLEANUP_KILL_NORMAL is in none of those branches, so fg_wz ignores it.
+# 8. check_win counts flags in CONSECUTIVE RUNS of the same freq, resetting the
+#    count whenever the freq changes, and a flag that is not on the map is
+#    skipped WITHOUT resetting the run. A win needs every flag on the map, all
+#    on one freq, and that freq not -1. The points come from the CB_WARZONEWIN
+#    callback, with a hardcoded 1000 when nothing answers.
+# 9. The loop right after it, the one the source comments '# just to check',
+#    reads flag index `current` on every iteration instead of `i`. It is only an
+#    assert, so it changes nothing, but a port that transcribes it faithfully
+#    will be checking the wrong flag.
+# turf: Init reserves one flag per turf flag, all unowned
+map flagcount=5 solid=0 noflags=0
+op attach
+flags 0
+op Init
+log flagcore SetCarryMode 0
+log flagcore ReserveFlags 5
+log flagcore SetFlags 0 onmap/-/0/0/-1
+log flagcore SetFlags 1 onmap/-/0/0/-1
+log flagcore SetFlags 2 onmap/-/0/0/-1
+log flagcore SetFlags 3 onmap/-/0/0/-1
+log flagcore SetFlags 4 onmap/-/0/0/-1
+flags 5 0:onmap/-/0/0/-1 1:onmap/-/0/0/-1 2:onmap/-/0/0/-1 3:onmap/-/0/0/-1 4:onmap/-/0/0/-1
+arena fg_turf_fc=5 fg_turf_persist=1
+op FlagTouch p0 0 carried=0
+log flagcore SetFlags 0 onmap/-/0/0/0
+log callback turftag (flags, p0, 0, -1, 0)
+flags 5 0:onmap/-/0/0/0 1:onmap/-/0/0/-1 2:onmap/-/0/0/-1 3:onmap/-/0/0/-1 4:onmap/-/0/0/-1
+arena fg_turf_fc=5 fg_turf_persist=1
+op FlagTouch p1 1 carried=0
+log flagcore SetFlags 1 onmap/-/0/0/1
+log callback turftag (flags, p1, 1, -1, 1)
+flags 5 0:onmap/-/0/0/0 1:onmap/-/0/0/1 2:onmap/-/0/0/-1 3:onmap/-/0/0/-1 4:onmap/-/0/0/-1
+arena fg_turf_fc=5 fg_turf_persist=1
+op FlagTouch p0 1 carried=0
+log flagcore SetFlags 1 onmap/-/0/0/0
+log callback turftag (flags, p0, 1, 1, 0)
+flags 5 0:onmap/-/0/0/0 1:onmap/-/0/0/0 2:onmap/-/0/0/-1 3:onmap/-/0/0/-1 4:onmap/-/0/0/-1
+arena fg_turf_fc=5 fg_turf_persist=1
+op FlagTouch p0 1 carried=0
+log flagcore SetFlags 1 onmap/-/0/0/0
+log callback turftag (flags, p0, 1, 0, 0)
+flags 5 0:onmap/-/0/0/0 1:onmap/-/0/0/0 2:onmap/-/0/0/-1 3:onmap/-/0/0/-1 4:onmap/-/0/0/-1
+arena fg_turf_fc=5 fg_turf_persist=1
+op FlagTouch p1 4 carried=0
+log flagcore SetFlags 4 onmap/-/0/0/1
+log callback turftag (flags, p1, 4, -1, 1)
+flags 5 0:onmap/-/0/0/0 1:onmap/-/0/0/0 2:onmap/-/0/0/-1 3:onmap/-/0/0/-1 4:onmap/-/0/0/1
+arena fg_turf_fc=5 fg_turf_persist=1
+# turf: PersistentTurfOwners off
+settings Flag:PersistentTurfOwners=0
+map flagcount=3 solid=0 noflags=0
+op attach
+flags 0
+op Init
+log flagcore SetCarryMode 0
+log flagcore ReserveFlags 3
+log flagcore SetFlags 0 onmap/-/0/0/-1
+log flagcore SetFlags 1 onmap/-/0/0/-1
+log flagcore SetFlags 2 onmap/-/0/0/-1
+flags 3 0:onmap/-/0/0/-1 1:onmap/-/0/0/-1 2:onmap/-/0/0/-1
+arena fg_turf_fc=3 fg_turf_persist=0
+op FlagTouch p0 2 carried=0
+log flagcore SetFlags 2 onmap/-/0/0/0
+log callback turftag (flags, p0, 2, -1, 0)
+flags 3 0:onmap/-/0/0/-1 1:onmap/-/0/0/-1 2:onmap/-/0/0/0
+arena fg_turf_fc=3 fg_turf_persist=0
+# turf: a map with no turf flags at all
+map flagcount=0 solid=0 noflags=0
+op attach
+flags 0
+op Init
+log flagcore SetCarryMode 0
+log flagcore ReserveFlags 0
+flags 0
+arena fg_turf_fc=0 fg_turf_persist=1
+# wz settings: Flag:FlagCount = 5 -- a bare integer sets both min and max
+settings Flag:FlagCount=5
+map flagcount=0 solid=0 noflags=0
+op attach
+flags 0
+op Init
+log flagcore SetCarryMode 1
+log flagcore ReserveFlags 5
+log set_timer 500
+flags 5 0:none/-/0/0/0 1:none/-/0/0/0 2:none/-/0/0/0 3:none/-/0/0/0 4:none/-/0/0/0
+arena fg_wz_current=0 fg_wz_neuts=[]
+sets carryflags=1 dropcenter=0 dropowned=1 dropr=2 friendlytransfer=1 max=5 min=5 neutcenter=0 neutowned=0 resetdelay=0 safecenter=0 safeowned=1 spawnr=50 spawnx=512 spawny=512 tkcenter=0 tkowned=1 windelay=200
+# wz settings: Flag:FlagCount = 3-7 -- a range sets them separately
+settings Flag:FlagCount=3-7
+map flagcount=0 solid=0 noflags=0
+op attach
+flags 0
+op Init
+log flagcore SetCarryMode 1
+log flagcore ReserveFlags 7
+log set_timer 500
+flags 7 0:none/-/0/0/0 1:none/-/0/0/0 2:none/-/0/0/0 3:none/-/0/0/0 4:none/-/0/0/0 5:none/-/0/0/0 6:none/-/0/0/0
+arena fg_wz_current=0 fg_wz_neuts=[]
+sets carryflags=1 dropcenter=0 dropowned=1 dropr=2 friendlytransfer=1 max=7 min=3 neutcenter=0 neutowned=0 resetdelay=0 safecenter=0 safeowned=1 spawnr=50 spawnx=512 spawny=512 tkcenter=0 tkowned=1 windelay=200
+# wz settings: Flag:FlagCount = 9-4 -- a backwards range: min is clipped DOWN to max
+settings Flag:FlagCount=9-4
+map flagcount=0 solid=0 noflags=0
+op attach
+flags 0
+op Init
+log flagcore SetCarryMode 1
+log flagcore ReserveFlags 4
+log set_timer 500
+flags 4 0:none/-/0/0/0 1:none/-/0/0/0 2:none/-/0/0/0 3:none/-/0/0/0
+arena fg_wz_current=0 fg_wz_neuts=[]
+sets carryflags=1 dropcenter=0 dropowned=1 dropr=2 friendlytransfer=1 max=4 min=4 neutcenter=0 neutowned=0 resetdelay=0 safecenter=0 safeowned=1 spawnr=50 spawnx=512 spawny=512 tkcenter=0 tkowned=1 windelay=200
+# wz settings: Flag:FlagCount = 0-300 -- a max above 255 is clipped
+settings Flag:FlagCount=0-300
+map flagcount=0 solid=0 noflags=0
+op attach
+flags 0
+op Init
+log flagcore SetCarryMode 1
+log flagcore ReserveFlags 255
+log set_timer 500
+flags 255 0:none/-/0/0/0 1:none/-/0/0/0 2:none/-/0/0/0 3:none/-/0/0/0 4:none/-/0/0/0 5:none/-/0/0/0 6:none/-/0/0/0 7:none/-/0/0/0 8:none/-/0/0/0 9:none/-/0/0/0 10:none/-/0/0/0 11:none/-/0/0/0 12:none/-/0/0/0 13:none/-/0/0/0 14:none/-/0/0/0 15:none/-/0/0/0 16:none/-/0/0/0 17:none/-/0/0/0 18:none/-/0/0/0 19:none/-/0/0/0 20:none/-/0/0/0 21:none/-/0/0/0 22:none/-/0/0/0 23:none/-/0/0/0 24:none/-/0/0/0 25:none/-/0/0/0 26:none/-/0/0/0 27:none/-/0/0/0 28:none/-/0/0/0 29:none/-/0/0/0 30:none/-/0/0/0 31:none/-/0/0/0 32:none/-/0/0/0 33:none/-/0/0/0 34:none/-/0/0/0 35:none/-/0/0/0 36:none/-/0/0/0 37:none/-/0/0/0 38:none/-/0/0/0 39:none/-/0/0/0 40:none/-/0/0/0 41:none/-/0/0/0 42:none/-/0/0/0 43:none/-/0/0/0 44:none/-/0/0/0 45:none/-/0/0/0 46:none/-/0/0/0 47:none/-/0/0/0 48:none/-/0/0/0 49:none/-/0/0/0 50:none/-/0/0/0 51:none/-/0/0/0 52:none/-/0/0/0 53:none/-/0/0/0 54:none/-/0/0/0 55:none/-/0/0/0 56:none/-/0/0/0 57:none/-/0/0/0 58:none/-/0/0/0 59:none/-/0/0/0 60:none/-/0/0/0 61:none/-/0/0/0 62:none/-/0/0/0 63:none/-/0/0/0 64:none/-/0/0/0 65:none/-/0/0/0 66:none/-/0/0/0 67:none/-/0/0/0 68:none/-/0/0/0 69:none/-/0/0/0 70:none/-/0/0/0 71:none/-/0/0/0 72:none/-/0/0/0 73:none/-/0/0/0 74:none/-/0/0/0 75:none/-/0/0/0 76:none/-/0/0/0 77:none/-/0/0/0 78:none/-/0/0/0 79:none/-/0/0/0 80:none/-/0/0/0 81:none/-/0/0/0 82:none/-/0/0/0 83:none/-/0/0/0 84:none/-/0/0/0 85:none/-/0/0/0 86:none/-/0/0/0 87:none/-/0/0/0 88:none/-/0/0/0 89:none/-/0/0/0 90:none/-/0/0/0 91:none/-/0/0/0 92:none/-/0/0/0 93:none/-/0/0/0 94:none/-/0/0/0 95:none/-/0/0/0 96:none/-/0/0/0 97:none/-/0/0/0 98:none/-/0/0/0 99:none/-/0/0/0 100:none/-/0/0/0 101:none/-/0/0/0 102:none/-/0/0/0 103:none/-/0/0/0 104:none/-/0/0/0 105:none/-/0/0/0 106:none/-/0/0/0 107:none/-/0/0/0 108:none/-/0/0/0 109:none/-/0/0/0 110:none/-/0/0/0 111:none/-/0/0/0 112:none/-/0/0/0 113:none/-/0/0/0 114:none/-/0/0/0 115:none/-/0/0/0 116:none/-/0/0/0 117:none/-/0/0/0 118:none/-/0/0/0 119:none/-/0/0/0 120:none/-/0/0/0 121:none/-/0/0/0 122:none/-/0/0/0 123:none/-/0/0/0 124:none/-/0/0/0 125:none/-/0/0/0 126:none/-/0/0/0 127:none/-/0/0/0 128:none/-/0/0/0 129:none/-/0/0/0 130:none/-/0/0/0 131:none/-/0/0/0 132:none/-/0/0/0 133:none/-/0/0/0 134:none/-/0/0/0 135:none/-/0/0/0 136:none/-/0/0/0 137:none/-/0/0/0 138:none/-/0/0/0 139:none/-/0/0/0 140:none/-/0/0/0 141:none/-/0/0/0 142:none/-/0/0/0 143:none/-/0/0/0 144:none/-/0/0/0 145:none/-/0/0/0 146:none/-/0/0/0 147:none/-/0/0/0 148:none/-/0/0/0 149:none/-/0/0/0 150:none/-/0/0/0 151:none/-/0/0/0 152:none/-/0/0/0 153:none/-/0/0/0 154:none/-/0/0/0 155:none/-/0/0/0 156:none/-/0/0/0 157:none/-/0/0/0 158:none/-/0/0/0 159:none/-/0/0/0 160:none/-/0/0/0 161:none/-/0/0/0 162:none/-/0/0/0 163:none/-/0/0/0 164:none/-/0/0/0 165:none/-/0/0/0 166:none/-/0/0/0 167:none/-/0/0/0 168:none/-/0/0/0 169:none/-/0/0/0 170:none/-/0/0/0 171:none/-/0/0/0 172:none/-/0/0/0 173:none/-/0/0/0 174:none/-/0/0/0 175:none/-/0/0/0 176:none/-/0/0/0 177:none/-/0/0/0 178:none/-/0/0/0 179:none/-/0/0/0 180:none/-/0/0/0 181:none/-/0/0/0 182:none/-/0/0/0 183:none/-/0/0/0 184:none/-/0/0/0 185:none/-/0/0/0 186:none/-/0/0/0 187:none/-/0/0/0 188:none/-/0/0/0 189:none/-/0/0/0 190:none/-/0/0/0 191:none/-/0/0/0 192:none/-/0/0/0 193:none/-/0/0/0 194:none/-/0/0/0 195:none/-/0/0/0 196:none/-/0/0/0 197:none/-/0/0/0 198:none/-/0/0/0 199:none/-/0/0/0 200:none/-/0/0/0 201:none/-/0/0/0 202:none/-/0/0/0 203:none/-/0/0/0 204:none/-/0/0/0 205:none/-/0/0/0 206:none/-/0/0/0 207:none/-/0/0/0 208:none/-/0/0/0 209:none/-/0/0/0 210:none/-/0/0/0 211:none/-/0/0/0 212:none/-/0/0/0 213:none/-/0/0/0 214:none/-/0/0/0 215:none/-/0/0/0 216:none/-/0/0/0 217:none/-/0/0/0 218:none/-/0/0/0 219:none/-/0/0/0 220:none/-/0/0/0 221:none/-/0/0/0 222:none/-/0/0/0 223:none/-/0/0/0 224:none/-/0/0/0 225:none/-/0/0/0 226:none/-/0/0/0 227:none/-/0/0/0 228:none/-/0/0/0 229:none/-/0/0/0 230:none/-/0/0/0 231:none/-/0/0/0 232:none/-/0/0/0 233:none/-/0/0/0 234:none/-/0/0/0 235:none/-/0/0/0 236:none/-/0/0/0 237:none/-/0/0/0 238:none/-/0/0/0 239:none/-/0/0/0 240:none/-/0/0/0 241:none/-/0/0/0 242:none/-/0/0/0 243:none/-/0/0/0 244:none/-/0/0/0 245:none/-/0/0/0 246:none/-/0/0/0 247:none/-/0/0/0 248:none/-/0/0/0 249:none/-/0/0/0 250:none/-/0/0/0 251:none/-/0/0/0 252:none/-/0/0/0 253:none/-/0/0/0 254:none/-/0/0/0
+arena fg_wz_current=0 fg_wz_neuts=[]
+sets carryflags=1 dropcenter=0 dropowned=1 dropr=2 friendlytransfer=1 max=255 min=0 neutcenter=0 neutowned=0 resetdelay=0 safecenter=0 safeowned=1 spawnr=50 spawnx=512 spawny=512 tkcenter=0 tkowned=1 windelay=200
+# wz settings: Flag:FlagCount = 5- -- a malformed range falls through to no flags
+settings Flag:FlagCount=5-
+map flagcount=0 solid=0 noflags=0
+op attach
+flags 0
+op Init
+log flagcore SetCarryMode 1
+log flagcore ReserveFlags 0
+log set_timer 500
+flags 0
+arena fg_wz_current=0 fg_wz_neuts=[]
+sets carryflags=1 dropcenter=0 dropowned=1 dropr=2 friendlytransfer=1 max=0 min=0 neutcenter=0 neutowned=0 resetdelay=0 safecenter=0 safeowned=1 spawnr=50 spawnx=512 spawny=512 tkcenter=0 tkowned=1 windelay=200
+# wz settings: Flag:FlagCount = abc -- a non-numeric value falls through to no flags
+settings Flag:FlagCount=abc
+map flagcount=0 solid=0 noflags=0
+op attach
+flags 0
+op Init
+log flagcore SetCarryMode 1
+log flagcore ReserveFlags 0
+log set_timer 500
+flags 0
+arena fg_wz_current=0 fg_wz_neuts=[]
+sets carryflags=1 dropcenter=0 dropowned=1 dropr=2 friendlytransfer=1 max=0 min=0 neutcenter=0 neutowned=0 resetdelay=0 safecenter=0 safeowned=1 spawnr=50 spawnx=512 spawny=512 tkcenter=0 tkowned=1 windelay=200
+# wz: CARRY_NONE is not a warzone game and Init bails out
+settings Flag:FlagCount=2 Flag:CarryFlags=0
+map flagcount=0 solid=0 noflags=0
+op attach
+flags 0
+op Init
+log log E <fg_wz> invalid Flag:CarryFlags for warzone-style game
+flags 0
+# wz: the spawn timer picks a count and places every flag
+settings Flag:FlagCount=2-4 Flag:SpawnX=512 Flag:SpawnY=512 Flag:SpawnRadius=10
+map flagcount=0 solid=0 noflags=0
+op attach
+flags 0
+op Init
+log flagcore SetCarryMode 1
+log flagcore ReserveFlags 4
+log set_timer 500
+flags 4 0:none/-/0/0/0 1:none/-/0/0/0 2:none/-/0/0/0 3:none/-/0/0/0
+arena fg_wz_current=0 fg_wz_neuts=[]
+sets carryflags=1 dropcenter=0 dropowned=1 dropr=2 friendlytransfer=1 max=4 min=2 neutcenter=0 neutowned=0 resetdelay=0 safecenter=0 safeowned=1 spawnr=10 spawnx=512 spawny=512 tkcenter=0 tkowned=1 windelay=200
+op spawn_timer
+log prng Number 2 4 -> 3
+log prng Uniform -> 0.5
+log prng Uniform -> 0.0
+log flagcore SetFlags 0 onmap/-/517/512/-1
+log prng Uniform -> 0.25
+log prng Uniform -> 0.5
+log flagcore SetFlags 1 onmap/-/510/512/-1
+log prng Uniform -> 0.75
+log prng Uniform -> 0.25
+log flagcore SetFlags 2 onmap/-/512/520/-1
+flags 4 0:onmap/-/517/512/-1 1:onmap/-/510/512/-1 2:onmap/-/512/520/-1 3:none/-/0/0/0
+arena fg_wz_current=3 fg_wz_neuts=[]
+sets carryflags=1 dropcenter=0 dropowned=1 dropr=2 friendlytransfer=1 max=4 min=2 neutcenter=0 neutowned=0 resetdelay=0 safecenter=0 safeowned=1 spawnr=10 spawnx=512 spawny=512 tkcenter=0 tkowned=1 windelay=200
+op spawn_timer
+flags 4 0:onmap/-/517/512/-1 1:onmap/-/510/512/-1 2:onmap/-/512/520/-1 3:none/-/0/0/0
+arena fg_wz_current=3 fg_wz_neuts=[]
+sets carryflags=1 dropcenter=0 dropowned=1 dropr=2 friendlytransfer=1 max=4 min=2 neutcenter=0 neutowned=0 resetdelay=0 safecenter=0 safeowned=1 spawnr=10 spawnx=512 spawny=512 tkcenter=0 tkowned=1 windelay=200
+# wz: two flags drawn onto the same tile, so the second retries
+settings Flag:FlagCount=2 Flag:SpawnX=500 Flag:SpawnY=500 Flag:SpawnRadius=4
+map flagcount=0 solid=0 noflags=0
+op attach
+flags 0
+op Init
+log flagcore SetCarryMode 1
+log flagcore ReserveFlags 2
+log set_timer 500
+flags 2 0:none/-/0/0/0 1:none/-/0/0/0
+arena fg_wz_current=0 fg_wz_neuts=[]
+sets carryflags=1 dropcenter=0 dropowned=1 dropr=2 friendlytransfer=1 max=2 min=2 neutcenter=0 neutowned=0 resetdelay=0 safecenter=0 safeowned=1 spawnr=4 spawnx=500 spawny=500 tkcenter=0 tkowned=1 windelay=200
+op spawn_timer
+log prng Number 2 2 -> 2
+log prng Uniform -> 0.0
+log prng Uniform -> 0.0
+log flagcore SetFlags 0 onmap/-/500/500/-1
+log prng Uniform -> 0.0
+log prng Uniform -> 0.0
+log prng Uniform -> 0.5
+log prng Uniform -> 0.25
+log flagcore SetFlags 1 onmap/-/500/503/-1
+flags 2 0:onmap/-/500/500/-1 1:onmap/-/500/503/-1
+arena fg_wz_current=2 fg_wz_neuts=[]
+sets carryflags=1 dropcenter=0 dropowned=1 dropr=2 friendlytransfer=1 max=2 min=2 neutcenter=0 neutowned=0 resetdelay=0 safecenter=0 safeowned=1 spawnr=4 spawnx=500 spawny=500 tkcenter=0 tkowned=1 windelay=200
+# wz: a no-flag region rejects a draw
+settings Flag:FlagCount=1 Flag:SpawnX=600 Flag:SpawnY=600 Flag:SpawnRadius=0
+map flagcount=0 solid=0 noflags=1
+noflag 600 600
+op attach
+flags 0
+op Init
+log flagcore SetCarryMode 1
+log flagcore ReserveFlags 1
+log set_timer 500
+flags 1 0:none/-/0/0/0
+arena fg_wz_current=0 fg_wz_neuts=[]
+sets carryflags=1 dropcenter=0 dropowned=1 dropr=2 friendlytransfer=1 max=1 min=1 neutcenter=0 neutowned=0 resetdelay=0 safecenter=0 safeowned=1 spawnr=0 spawnx=600 spawny=600 tkcenter=0 tkowned=1 windelay=200
+op spawn_timer
+log prng Number 1 1 -> 1
+log prng Uniform -> 0.0
+log prng Uniform -> 0.0
+log prng Uniform -> 0.5
+log prng Uniform -> 0.5
+log prng Uniform -> 0.5
+log prng Uniform -> 0.0
+log flagcore SetFlags 0 onmap/-/601/600/-1
+flags 1 0:onmap/-/601/600/-1
+arena fg_wz_current=1 fg_wz_neuts=[]
+sets carryflags=1 dropcenter=0 dropowned=1 dropr=2 friendlytransfer=1 max=1 min=1 neutcenter=0 neutowned=0 resetdelay=0 safecenter=0 safeowned=1 spawnr=0 spawnx=600 spawny=600 tkcenter=0 tkowned=1 windelay=200
+# wz: the draw lands on a wall and FindEmptyTileNear moves it
+settings Flag:FlagCount=1 Flag:SpawnX=300 Flag:SpawnY=300 Flag:SpawnRadius=0
+map flagcount=0 solid=3 noflags=0
+solid 299 299
+solid 299 300
+solid 300 300
+op attach
+flags 0
+op Init
+log flagcore SetCarryMode 1
+log flagcore ReserveFlags 1
+log set_timer 500
+flags 1 0:none/-/0/0/0
+arena fg_wz_current=0 fg_wz_neuts=[]
+sets carryflags=1 dropcenter=0 dropowned=1 dropr=2 friendlytransfer=1 max=1 min=1 neutcenter=0 neutowned=0 resetdelay=0 safecenter=0 safeowned=1 spawnr=0 spawnx=300 spawny=300 tkcenter=0 tkowned=1 windelay=200
+op spawn_timer
+log prng Number 1 1 -> 1
+log prng Uniform -> 0.0
+log prng Uniform -> 0.0
+log flagcore SetFlags 0 onmap/-/300/299/-1
+flags 1 0:onmap/-/300/299/-1
+arena fg_wz_current=1 fg_wz_neuts=[]
+sets carryflags=1 dropcenter=0 dropowned=1 dropr=2 friendlytransfer=1 max=1 min=1 neutcenter=0 neutowned=0 resetdelay=0 safecenter=0 safeowned=1 spawnr=0 spawnx=300 spawny=300 tkcenter=0 tkowned=1 windelay=200
+# wz: a spawn point at the very edge, to show wrap() reflecting
+settings Flag:FlagCount=1 Flag:SpawnX=2 Flag:SpawnY=1021 Flag:SpawnRadius=20
+map flagcount=0 solid=0 noflags=0
+op attach
+flags 0
+op Init
+log flagcore SetCarryMode 1
+log flagcore ReserveFlags 1
+log set_timer 500
+flags 1 0:none/-/0/0/0
+arena fg_wz_current=0 fg_wz_neuts=[]
+sets carryflags=1 dropcenter=0 dropowned=1 dropr=2 friendlytransfer=1 max=1 min=1 neutcenter=0 neutowned=0 resetdelay=0 safecenter=0 safeowned=1 spawnr=20 spawnx=2 spawny=1021 tkcenter=0 tkowned=1 windelay=200
+op spawn_timer
+log prng Number 1 1 -> 1
+log prng Uniform -> 1.0
+log prng Uniform -> 0.5
+log flagcore SetFlags 0 onmap/-/17/1021/-1
+flags 1 0:onmap/-/17/1021/-1
+arena fg_wz_current=1 fg_wz_neuts=[]
+sets carryflags=1 dropcenter=0 dropowned=1 dropr=2 friendlytransfer=1 max=1 min=1 neutcenter=0 neutowned=0 resetdelay=0 safecenter=0 safeowned=1 spawnr=20 spawnx=2 spawny=1021 tkcenter=0 tkowned=1 windelay=200
+# wz: FlagTouch under CARRY_ALL
+settings Flag:FlagCount=3 Flag:CarryFlags=1
+map flagcount=0 solid=0 noflags=0
+op attach
+flags 0
+op Init
+log flagcore SetCarryMode 1
+log flagcore ReserveFlags 3
+log set_timer 500
+flags 3 0:none/-/0/0/0 1:none/-/0/0/0 2:none/-/0/0/0
+arena fg_wz_current=0 fg_wz_neuts=[]
+sets carryflags=1 dropcenter=0 dropowned=1 dropr=2 friendlytransfer=1 max=3 min=3 neutcenter=0 neutowned=0 resetdelay=0 safecenter=0 safeowned=1 spawnr=50 spawnx=512 spawny=512 tkcenter=0 tkowned=1 windelay=200
+place 0 onmap/-/10/10/-1
+op FlagTouch p0 0 carried=0
+log flagcore SetFlags 0 carried/p0/0/0/0
+flags 3 0:carried/p0/0/0/0 1:none/-/0/0/0 2:none/-/0/0/0
+arena fg_wz_current=0 fg_wz_neuts=[]
+sets carryflags=1 dropcenter=0 dropowned=1 dropr=2 friendlytransfer=1 max=3 min=3 neutcenter=0 neutowned=0 resetdelay=0 safecenter=0 safeowned=1 spawnr=50 spawnx=512 spawny=512 tkcenter=0 tkowned=1 windelay=200
+op FlagTouch p0 1 carried=200
+log flagcore SetFlags 1 carried/p0/0/0/0
+flags 3 0:carried/p0/0/0/0 1:carried/p0/0/0/0 2:none/-/0/0/0
+arena fg_wz_current=0 fg_wz_neuts=[]
+sets carryflags=1 dropcenter=0 dropowned=1 dropr=2 friendlytransfer=1 max=3 min=3 neutcenter=0 neutowned=0 resetdelay=0 safecenter=0 safeowned=1 spawnr=50 spawnx=512 spawny=512 tkcenter=0 tkowned=1 windelay=200
+op FlagTouch p0 1 carried=254
+log flagcore SetFlags 1 carried/p0/0/0/0
+flags 3 0:carried/p0/0/0/0 1:carried/p0/0/0/0 2:none/-/0/0/0
+arena fg_wz_current=0 fg_wz_neuts=[]
+sets carryflags=1 dropcenter=0 dropowned=1 dropr=2 friendlytransfer=1 max=3 min=3 neutcenter=0 neutowned=0 resetdelay=0 safecenter=0 safeowned=1 spawnr=50 spawnx=512 spawny=512 tkcenter=0 tkowned=1 windelay=200
+op FlagTouch p0 1 carried=255
+log log M <flagcore> [p0] tried to pick up too many flags
+flags 3 0:carried/p0/0/0/0 1:carried/p0/0/0/0 2:none/-/0/0/0
+arena fg_wz_current=0 fg_wz_neuts=[]
+sets carryflags=1 dropcenter=0 dropowned=1 dropr=2 friendlytransfer=1 max=3 min=3 neutcenter=0 neutowned=0 resetdelay=0 safecenter=0 safeowned=1 spawnr=50 spawnx=512 spawny=512 tkcenter=0 tkowned=1 windelay=200
+# wz: FlagTouch under CARRY_ONE refuses a second flag
+settings Flag:FlagCount=3 Flag:CarryFlags=2
+map flagcount=0 solid=0 noflags=0
+op attach
+flags 0
+op Init
+log flagcore SetCarryMode 2
+log flagcore ReserveFlags 3
+log set_timer 500
+flags 3 0:none/-/0/0/0 1:none/-/0/0/0 2:none/-/0/0/0
+arena fg_wz_current=0 fg_wz_neuts=[]
+sets carryflags=2 dropcenter=0 dropowned=1 dropr=2 friendlytransfer=1 max=3 min=3 neutcenter=0 neutowned=0 resetdelay=0 safecenter=0 safeowned=1 spawnr=50 spawnx=512 spawny=512 tkcenter=0 tkowned=1 windelay=200
+op FlagTouch p1 0 carried=0
+log flagcore SetFlags 0 carried/p1/0/0/0
+flags 3 0:carried/p1/0/0/0 1:none/-/0/0/0 2:none/-/0/0/0
+arena fg_wz_current=0 fg_wz_neuts=[]
+sets carryflags=2 dropcenter=0 dropowned=1 dropr=2 friendlytransfer=1 max=3 min=3 neutcenter=0 neutowned=0 resetdelay=0 safecenter=0 safeowned=1 spawnr=50 spawnx=512 spawny=512 tkcenter=0 tkowned=1 windelay=200
+op FlagTouch p1 1 carried=1
+log log M <flagcore> [p1] tried to pick up too many flags
+flags 3 0:carried/p1/0/0/0 1:none/-/0/0/0 2:none/-/0/0/0
+arena fg_wz_current=0 fg_wz_neuts=[]
+sets carryflags=2 dropcenter=0 dropowned=1 dropr=2 friendlytransfer=1 max=3 min=3 neutcenter=0 neutowned=0 resetdelay=0 safecenter=0 safeowned=1 spawnr=50 spawnx=512 spawny=512 tkcenter=0 tkowned=1 windelay=200
+# wz cleanup: reason 0 (CLEANUP_DROPPED), FriendlyTransfer on
+settings Flag:FlagCount=2 Flag:SpawnX=512 Flag:SpawnY=512 Flag:SpawnRadius=5 Flag:DropRadius=2 Flag:DropOwned=1 Flag:DropCenter=0 Flag:NeutOwned=0 Flag:NeutCenter=0 Flag:TKOwned=1 Flag:TKCenter=0 Flag:SafeOwned=1 Flag:SafeCenter=0 Flag:FriendlyTransfer=1
+map flagcount=0 solid=0 noflags=0
+op attach
+flags 0
+op Init
+log flagcore SetCarryMode 1
+log flagcore ReserveFlags 2
+log set_timer 500
+flags 2 0:none/-/0/0/0 1:none/-/0/0/0
+arena fg_wz_current=0 fg_wz_neuts=[]
+sets carryflags=1 dropcenter=0 dropowned=1 dropr=2 friendlytransfer=1 max=2 min=2 neutcenter=0 neutowned=0 resetdelay=0 safecenter=0 safeowned=1 spawnr=5 spawnx=512 spawny=512 tkcenter=0 tkowned=1 windelay=200
+op Cleanup 0 reason=0 carrier=p0 freq=7
+log prng Uniform -> 0.5
+log prng Uniform -> 0.125
+log flagcore SetFlags 0 onmap/-/101/201/7
+flags 2 0:onmap/-/101/201/7 1:none/-/0/0/0
+arena fg_wz_current=0 fg_wz_neuts=[]
+sets carryflags=1 dropcenter=0 dropowned=1 dropr=2 friendlytransfer=1 max=2 min=2 neutcenter=0 neutowned=0 resetdelay=0 safecenter=0 safeowned=1 spawnr=5 spawnx=512 spawny=512 tkcenter=0 tkowned=1 windelay=200
+# wz cleanup: reason 1 (CLEANUP_INSAFE), FriendlyTransfer on
+settings Flag:FlagCount=2 Flag:SpawnX=512 Flag:SpawnY=512 Flag:SpawnRadius=5 Flag:DropRadius=2 Flag:DropOwned=1 Flag:DropCenter=0 Flag:NeutOwned=0 Flag:NeutCenter=0 Flag:TKOwned=1 Flag:TKCenter=0 Flag:SafeOwned=1 Flag:SafeCenter=0 Flag:FriendlyTransfer=1
+map flagcount=0 solid=0 noflags=0
+op attach
+flags 0
+op Init
+log flagcore SetCarryMode 1
+log flagcore ReserveFlags 2
+log set_timer 500
+flags 2 0:none/-/0/0/0 1:none/-/0/0/0
+arena fg_wz_current=0 fg_wz_neuts=[]
+sets carryflags=1 dropcenter=0 dropowned=1 dropr=2 friendlytransfer=1 max=2 min=2 neutcenter=0 neutowned=0 resetdelay=0 safecenter=0 safeowned=1 spawnr=5 spawnx=512 spawny=512 tkcenter=0 tkowned=1 windelay=200
+op Cleanup 0 reason=1 carrier=p0 freq=7
+log prng Uniform -> 0.5
+log prng Uniform -> 0.125
+log flagcore SetFlags 0 onmap/-/101/201/7
+flags 2 0:onmap/-/101/201/7 1:none/-/0/0/0
+arena fg_wz_current=0 fg_wz_neuts=[]
+sets carryflags=1 dropcenter=0 dropowned=1 dropr=2 friendlytransfer=1 max=2 min=2 neutcenter=0 neutowned=0 resetdelay=0 safecenter=0 safeowned=1 spawnr=5 spawnx=512 spawny=512 tkcenter=0 tkowned=1 windelay=200
+# wz cleanup: reason 2 (CLEANUP_SHIPCHANGE), FriendlyTransfer on
+settings Flag:FlagCount=2 Flag:SpawnX=512 Flag:SpawnY=512 Flag:SpawnRadius=5 Flag:DropRadius=2 Flag:DropOwned=1 Flag:DropCenter=0 Flag:NeutOwned=0 Flag:NeutCenter=0 Flag:TKOwned=1 Flag:TKCenter=0 Flag:SafeOwned=1 Flag:SafeCenter=0 Flag:FriendlyTransfer=1
+map flagcount=0 solid=0 noflags=0
+op attach
+flags 0
+op Init
+log flagcore SetCarryMode 1
+log flagcore ReserveFlags 2
+log set_timer 500
+flags 2 0:none/-/0/0/0 1:none/-/0/0/0
+arena fg_wz_current=0 fg_wz_neuts=[]
+sets carryflags=1 dropcenter=0 dropowned=1 dropr=2 friendlytransfer=1 max=2 min=2 neutcenter=0 neutowned=0 resetdelay=0 safecenter=0 safeowned=1 spawnr=5 spawnx=512 spawny=512 tkcenter=0 tkowned=1 windelay=200
+op Cleanup 0 reason=2 carrier=p0 freq=7
+log flagcore SetFlags 0 none/-/100/200/-1
+flags 2 0:none/-/100/200/-1 1:none/-/0/0/0
+arena fg_wz_current=0 fg_wz_neuts=[0]
+sets carryflags=1 dropcenter=0 dropowned=1 dropr=2 friendlytransfer=1 max=2 min=2 neutcenter=0 neutowned=0 resetdelay=0 safecenter=0 safeowned=1 spawnr=5 spawnx=512 spawny=512 tkcenter=0 tkowned=1 windelay=200
+# wz cleanup: reason 3 (CLEANUP_FREQCHANGE), FriendlyTransfer on
+settings Flag:FlagCount=2 Flag:SpawnX=512 Flag:SpawnY=512 Flag:SpawnRadius=5 Flag:DropRadius=2 Flag:DropOwned=1 Flag:DropCenter=0 Flag:NeutOwned=0 Flag:NeutCenter=0 Flag:TKOwned=1 Flag:TKCenter=0 Flag:SafeOwned=1 Flag:SafeCenter=0 Flag:FriendlyTransfer=1
+map flagcount=0 solid=0 noflags=0
+op attach
+flags 0
+op Init
+log flagcore SetCarryMode 1
+log flagcore ReserveFlags 2
+log set_timer 500
+flags 2 0:none/-/0/0/0 1:none/-/0/0/0
+arena fg_wz_current=0 fg_wz_neuts=[]
+sets carryflags=1 dropcenter=0 dropowned=1 dropr=2 friendlytransfer=1 max=2 min=2 neutcenter=0 neutowned=0 resetdelay=0 safecenter=0 safeowned=1 spawnr=5 spawnx=512 spawny=512 tkcenter=0 tkowned=1 windelay=200
+op Cleanup 0 reason=3 carrier=p0 freq=7
+log flagcore SetFlags 0 none/-/100/200/-1
+flags 2 0:none/-/100/200/-1 1:none/-/0/0/0
+arena fg_wz_current=0 fg_wz_neuts=[0]
+sets carryflags=1 dropcenter=0 dropowned=1 dropr=2 friendlytransfer=1 max=2 min=2 neutcenter=0 neutowned=0 resetdelay=0 safecenter=0 safeowned=1 spawnr=5 spawnx=512 spawny=512 tkcenter=0 tkowned=1 windelay=200
+# wz cleanup: reason 4 (CLEANUP_LEFTARENA), FriendlyTransfer on
+settings Flag:FlagCount=2 Flag:SpawnX=512 Flag:SpawnY=512 Flag:SpawnRadius=5 Flag:DropRadius=2 Flag:DropOwned=1 Flag:DropCenter=0 Flag:NeutOwned=0 Flag:NeutCenter=0 Flag:TKOwned=1 Flag:TKCenter=0 Flag:SafeOwned=1 Flag:SafeCenter=0 Flag:FriendlyTransfer=1
+map flagcount=0 solid=0 noflags=0
+op attach
+flags 0
+op Init
+log flagcore SetCarryMode 1
+log flagcore ReserveFlags 2
+log set_timer 500
+flags 2 0:none/-/0/0/0 1:none/-/0/0/0
+arena fg_wz_current=0 fg_wz_neuts=[]
+sets carryflags=1 dropcenter=0 dropowned=1 dropr=2 friendlytransfer=1 max=2 min=2 neutcenter=0 neutowned=0 resetdelay=0 safecenter=0 safeowned=1 spawnr=5 spawnx=512 spawny=512 tkcenter=0 tkowned=1 windelay=200
+op Cleanup 0 reason=4 carrier=p0 freq=7
+log flagcore SetFlags 0 none/-/100/200/-1
+flags 2 0:none/-/100/200/-1 1:none/-/0/0/0
+arena fg_wz_current=0 fg_wz_neuts=[0]
+sets carryflags=1 dropcenter=0 dropowned=1 dropr=2 friendlytransfer=1 max=2 min=2 neutcenter=0 neutowned=0 resetdelay=0 safecenter=0 safeowned=1 spawnr=5 spawnx=512 spawny=512 tkcenter=0 tkowned=1 windelay=200
+# wz cleanup: reason 5 (CLEANUP_KILL_NORMAL), FriendlyTransfer on
+settings Flag:FlagCount=2 Flag:SpawnX=512 Flag:SpawnY=512 Flag:SpawnRadius=5 Flag:DropRadius=2 Flag:DropOwned=1 Flag:DropCenter=0 Flag:NeutOwned=0 Flag:NeutCenter=0 Flag:TKOwned=1 Flag:TKCenter=0 Flag:SafeOwned=1 Flag:SafeCenter=0 Flag:FriendlyTransfer=1
+map flagcount=0 solid=0 noflags=0
+op attach
+flags 0
+op Init
+log flagcore SetCarryMode 1
+log flagcore ReserveFlags 2
+log set_timer 500
+flags 2 0:none/-/0/0/0 1:none/-/0/0/0
+arena fg_wz_current=0 fg_wz_neuts=[]
+sets carryflags=1 dropcenter=0 dropowned=1 dropr=2 friendlytransfer=1 max=2 min=2 neutcenter=0 neutowned=0 resetdelay=0 safecenter=0 safeowned=1 spawnr=5 spawnx=512 spawny=512 tkcenter=0 tkowned=1 windelay=200
+op Cleanup 0 reason=5 carrier=p0 freq=7
+flags 2 0:none/-/0/0/0 1:none/-/0/0/0
+arena fg_wz_current=0 fg_wz_neuts=[]
+sets carryflags=1 dropcenter=0 dropowned=1 dropr=2 friendlytransfer=1 max=2 min=2 neutcenter=0 neutowned=0 resetdelay=0 safecenter=0 safeowned=1 spawnr=5 spawnx=512 spawny=512 tkcenter=0 tkowned=1 windelay=200
+# wz cleanup: reason 6 (CLEANUP_KILL_TK), FriendlyTransfer on
+settings Flag:FlagCount=2 Flag:SpawnX=512 Flag:SpawnY=512 Flag:SpawnRadius=5 Flag:DropRadius=2 Flag:DropOwned=1 Flag:DropCenter=0 Flag:NeutOwned=0 Flag:NeutCenter=0 Flag:TKOwned=1 Flag:TKCenter=0 Flag:SafeOwned=1 Flag:SafeCenter=0 Flag:FriendlyTransfer=1
+map flagcount=0 solid=0 noflags=0
+op attach
+flags 0
+op Init
+log flagcore SetCarryMode 1
+log flagcore ReserveFlags 2
+log set_timer 500
+flags 2 0:none/-/0/0/0 1:none/-/0/0/0
+arena fg_wz_current=0 fg_wz_neuts=[]
+sets carryflags=1 dropcenter=0 dropowned=1 dropr=2 friendlytransfer=1 max=2 min=2 neutcenter=0 neutowned=0 resetdelay=0 safecenter=0 safeowned=1 spawnr=5 spawnx=512 spawny=512 tkcenter=0 tkowned=1 windelay=200
+op Cleanup 0 reason=6 carrier=p0 freq=7
+flags 2 0:none/-/0/0/0 1:none/-/0/0/0
+arena fg_wz_current=0 fg_wz_neuts=[]
+sets carryflags=1 dropcenter=0 dropowned=1 dropr=2 friendlytransfer=1 max=2 min=2 neutcenter=0 neutowned=0 resetdelay=0 safecenter=0 safeowned=1 spawnr=5 spawnx=512 spawny=512 tkcenter=0 tkowned=1 windelay=200
+# wz cleanup: reason 7 (CLEANUP_KILL_CANTCARRY), FriendlyTransfer on
+settings Flag:FlagCount=2 Flag:SpawnX=512 Flag:SpawnY=512 Flag:SpawnRadius=5 Flag:DropRadius=2 Flag:DropOwned=1 Flag:DropCenter=0 Flag:NeutOwned=0 Flag:NeutCenter=0 Flag:TKOwned=1 Flag:TKCenter=0 Flag:SafeOwned=1 Flag:SafeCenter=0 Flag:FriendlyTransfer=1
+map flagcount=0 solid=0 noflags=0
+op attach
+flags 0
+op Init
+log flagcore SetCarryMode 1
+log flagcore ReserveFlags 2
+log set_timer 500
+flags 2 0:none/-/0/0/0 1:none/-/0/0/0
+arena fg_wz_current=0 fg_wz_neuts=[]
+sets carryflags=1 dropcenter=0 dropowned=1 dropr=2 friendlytransfer=1 max=2 min=2 neutcenter=0 neutowned=0 resetdelay=0 safecenter=0 safeowned=1 spawnr=5 spawnx=512 spawny=512 tkcenter=0 tkowned=1 windelay=200
+op Cleanup 0 reason=7 carrier=p0 freq=7
+log prng Uniform -> 0.5
+log prng Uniform -> 0.125
+log flagcore SetFlags 0 onmap/-/101/201/7
+flags 2 0:onmap/-/101/201/7 1:none/-/0/0/0
+arena fg_wz_current=0 fg_wz_neuts=[]
+sets carryflags=1 dropcenter=0 dropowned=1 dropr=2 friendlytransfer=1 max=2 min=2 neutcenter=0 neutowned=0 resetdelay=0 safecenter=0 safeowned=1 spawnr=5 spawnx=512 spawny=512 tkcenter=0 tkowned=1 windelay=200
+# wz cleanup: reason 8 (CLEANUP_KILL_FAKE), FriendlyTransfer on
+settings Flag:FlagCount=2 Flag:SpawnX=512 Flag:SpawnY=512 Flag:SpawnRadius=5 Flag:DropRadius=2 Flag:DropOwned=1 Flag:DropCenter=0 Flag:NeutOwned=0 Flag:NeutCenter=0 Flag:TKOwned=1 Flag:TKCenter=0 Flag:SafeOwned=1 Flag:SafeCenter=0 Flag:FriendlyTransfer=1
+map flagcount=0 solid=0 noflags=0
+op attach
+flags 0
+op Init
+log flagcore SetCarryMode 1
+log flagcore ReserveFlags 2
+log set_timer 500
+flags 2 0:none/-/0/0/0 1:none/-/0/0/0
+arena fg_wz_current=0 fg_wz_neuts=[]
+sets carryflags=1 dropcenter=0 dropowned=1 dropr=2 friendlytransfer=1 max=2 min=2 neutcenter=0 neutowned=0 resetdelay=0 safecenter=0 safeowned=1 spawnr=5 spawnx=512 spawny=512 tkcenter=0 tkowned=1 windelay=200
+op Cleanup 0 reason=8 carrier=p0 freq=7
+log prng Uniform -> 0.5
+log prng Uniform -> 0.125
+log flagcore SetFlags 0 onmap/-/101/201/7
+flags 2 0:onmap/-/101/201/7 1:none/-/0/0/0
+arena fg_wz_current=0 fg_wz_neuts=[]
+sets carryflags=1 dropcenter=0 dropowned=1 dropr=2 friendlytransfer=1 max=2 min=2 neutcenter=0 neutowned=0 resetdelay=0 safecenter=0 safeowned=1 spawnr=5 spawnx=512 spawny=512 tkcenter=0 tkowned=1 windelay=200
+# wz cleanup: reason 9 (CLEANUP_OTHER), FriendlyTransfer on
+settings Flag:FlagCount=2 Flag:SpawnX=512 Flag:SpawnY=512 Flag:SpawnRadius=5 Flag:DropRadius=2 Flag:DropOwned=1 Flag:DropCenter=0 Flag:NeutOwned=0 Flag:NeutCenter=0 Flag:TKOwned=1 Flag:TKCenter=0 Flag:SafeOwned=1 Flag:SafeCenter=0 Flag:FriendlyTransfer=1
+map flagcount=0 solid=0 noflags=0
+op attach
+flags 0
+op Init
+log flagcore SetCarryMode 1
+log flagcore ReserveFlags 2
+log set_timer 500
+flags 2 0:none/-/0/0/0 1:none/-/0/0/0
+arena fg_wz_current=0 fg_wz_neuts=[]
+sets carryflags=1 dropcenter=0 dropowned=1 dropr=2 friendlytransfer=1 max=2 min=2 neutcenter=0 neutowned=0 resetdelay=0 safecenter=0 safeowned=1 spawnr=5 spawnx=512 spawny=512 tkcenter=0 tkowned=1 windelay=200
+op Cleanup 0 reason=9 carrier=p0 freq=7
+log flagcore SetFlags 0 none/-/100/200/-1
+flags 2 0:none/-/100/200/-1 1:none/-/0/0/0
+arena fg_wz_current=0 fg_wz_neuts=[0]
+sets carryflags=1 dropcenter=0 dropowned=1 dropr=2 friendlytransfer=1 max=2 min=2 neutcenter=0 neutowned=0 resetdelay=0 safecenter=0 safeowned=1 spawnr=5 spawnx=512 spawny=512 tkcenter=0 tkowned=1 windelay=200
+# wz cleanup: a team kill WITH FriendlyTransfer off does spawn
+settings Flag:FlagCount=2 Flag:SpawnX=512 Flag:SpawnY=512 Flag:SpawnRadius=5 Flag:DropRadius=2 Flag:DropOwned=1 Flag:DropCenter=0 Flag:NeutOwned=0 Flag:NeutCenter=0 Flag:TKOwned=1 Flag:TKCenter=0 Flag:SafeOwned=1 Flag:SafeCenter=0 Flag:FriendlyTransfer=0
+map flagcount=0 solid=0 noflags=0
+op attach
+flags 0
+op Init
+log flagcore SetCarryMode 1
+log flagcore ReserveFlags 2
+log set_timer 500
+flags 2 0:none/-/0/0/0 1:none/-/0/0/0
+arena fg_wz_current=0 fg_wz_neuts=[]
+sets carryflags=1 dropcenter=0 dropowned=1 dropr=2 friendlytransfer=0 max=2 min=2 neutcenter=0 neutowned=0 resetdelay=0 safecenter=0 safeowned=1 spawnr=5 spawnx=512 spawny=512 tkcenter=0 tkowned=1 windelay=200
+op Cleanup 0 reason=6 carrier=p0 freq=7
+log prng Uniform -> 0.5
+log prng Uniform -> 0.125
+log flagcore SetFlags 0 onmap/-/101/201/7
+flags 2 0:onmap/-/101/201/7 1:none/-/0/0/0
+arena fg_wz_current=0 fg_wz_neuts=[]
+sets carryflags=1 dropcenter=0 dropowned=1 dropr=2 friendlytransfer=0 max=2 min=2 neutcenter=0 neutowned=0 resetdelay=0 safecenter=0 safeowned=1 spawnr=5 spawnx=512 spawny=512 tkcenter=0 tkowned=1 windelay=200
+# wz cleanup: DropCenter and NeutCenter send the flag to the middle
+settings Flag:FlagCount=2 Flag:SpawnX=512 Flag:SpawnY=512 Flag:SpawnRadius=5 Flag:DropRadius=2 Flag:DropOwned=1 Flag:DropCenter=1 Flag:NeutOwned=0 Flag:NeutCenter=1 Flag:TKOwned=1 Flag:TKCenter=0 Flag:SafeOwned=1 Flag:SafeCenter=0 Flag:FriendlyTransfer=1
+map flagcount=0 solid=0 noflags=0
+op attach
+flags 0
+op Init
+log flagcore SetCarryMode 1
+log flagcore ReserveFlags 2
+log set_timer 500
+flags 2 0:none/-/0/0/0 1:none/-/0/0/0
+arena fg_wz_current=0 fg_wz_neuts=[]
+sets carryflags=1 dropcenter=1 dropowned=1 dropr=2 friendlytransfer=1 max=2 min=2 neutcenter=1 neutowned=0 resetdelay=0 safecenter=0 safeowned=1 spawnr=5 spawnx=512 spawny=512 tkcenter=0 tkowned=1 windelay=200
+op Cleanup 0 reason=0 carrier=p0 freq=7
+log prng Uniform -> 0.5
+log prng Uniform -> 0.125
+log flagcore SetFlags 0 onmap/-/514/514/7
+flags 2 0:onmap/-/514/514/7 1:none/-/0/0/0
+arena fg_wz_current=0 fg_wz_neuts=[]
+sets carryflags=1 dropcenter=1 dropowned=1 dropr=2 friendlytransfer=1 max=2 min=2 neutcenter=1 neutowned=0 resetdelay=0 safecenter=0 safeowned=1 spawnr=5 spawnx=512 spawny=512 tkcenter=0 tkowned=1 windelay=200
+op Cleanup 1 reason=2 carrier=p1 freq=3
+log flagcore SetFlags 1 none/-/512/512/-1
+flags 2 0:onmap/-/514/514/7 1:none/-/512/512/-1
+arena fg_wz_current=0 fg_wz_neuts=[1]
+sets carryflags=1 dropcenter=1 dropowned=1 dropr=2 friendlytransfer=1 max=2 min=2 neutcenter=1 neutowned=0 resetdelay=0 safecenter=0 safeowned=1 spawnr=5 spawnx=512 spawny=512 tkcenter=0 tkowned=1 windelay=200
+# wz: a neuted flag respawns at the spot it was neuted, not at spawn
+settings Flag:FlagCount=2 Flag:SpawnX=512 Flag:SpawnY=512 Flag:SpawnRadius=5 Flag:DropRadius=2 Flag:DropOwned=1 Flag:DropCenter=0 Flag:NeutOwned=0 Flag:NeutCenter=0 Flag:TKOwned=1 Flag:TKCenter=0 Flag:SafeOwned=1 Flag:SafeCenter=0 Flag:FriendlyTransfer=1
+map flagcount=0 solid=0 noflags=0
+op attach
+flags 0
+op Init
+log flagcore SetCarryMode 1
+log flagcore ReserveFlags 2
+log set_timer 500
+flags 2 0:none/-/0/0/0 1:none/-/0/0/0
+arena fg_wz_current=0 fg_wz_neuts=[]
+sets carryflags=1 dropcenter=0 dropowned=1 dropr=2 friendlytransfer=1 max=2 min=2 neutcenter=0 neutowned=0 resetdelay=0 safecenter=0 safeowned=1 spawnr=5 spawnx=512 spawny=512 tkcenter=0 tkowned=1 windelay=200
+op spawn_timer
+log prng Number 2 2 -> 2
+log prng Uniform -> 0.0
+log prng Uniform -> 0.0
+log flagcore SetFlags 0 onmap/-/512/512/-1
+log prng Uniform -> 0.0
+log prng Uniform -> 0.0
+log prng Uniform -> 0.0
+log prng Uniform -> 0.0
+log prng Uniform -> 0.0
+log prng Uniform -> 0.0
+log prng Uniform -> 0.0
+log prng Uniform -> 0.0
+log prng Uniform -> 0.0
+log prng Uniform -> 0.0
+log prng Uniform -> 0.0
+log prng Uniform -> 0.0
+log prng Uniform -> 0.0
+log prng Uniform -> 0.0
+log prng Uniform -> 0.0
+log prng Uniform -> 0.0
+log prng Uniform -> 0.0
+log prng Uniform -> 0.0
+log prng Uniform -> 0.0
+log prng Uniform -> 0.0
+log prng Uniform -> 0.0
+log prng Uniform -> 0.0
+log prng Uniform -> 0.0
+log prng Uniform -> 0.0
+log prng Uniform -> 0.0
+log prng Uniform -> 0.0
+log prng Uniform -> 0.0
+log prng Uniform -> 0.0
+log prng Uniform -> 0.0
+log prng Uniform -> 0.0
+log prng Uniform -> 0.0
+log prng Uniform -> 0.0
+log prng Uniform -> 0.0
+log prng Uniform -> 0.0
+log prng Uniform -> 0.0
+log prng Uniform -> 0.0
+log prng Uniform -> 0.0
+log prng Uniform -> 0.0
+log prng Uniform -> 0.0
+log prng Uniform -> 0.0
+log prng Uniform -> 0.0
+log prng Uniform -> 0.0
+log prng Uniform -> 0.0
+log prng Uniform -> 0.0
+log prng Uniform -> 0.0
+log prng Uniform -> 0.0
+log prng Uniform -> 0.0
+log prng Uniform -> 0.0
+log prng Uniform -> 0.0
+log prng Uniform -> 0.0
+log prng Uniform -> 0.0
+log prng Uniform -> 0.0
+log prng Uniform -> 0.0
+log prng Uniform -> 0.0
+log prng Uniform -> 0.0
+log prng Uniform -> 0.0
+log prng Uniform -> 0.0
+log prng Uniform -> 0.0
+log prng Uniform -> 0.0
+log prng Uniform -> 0.0
+log log W <flagcore> failed to place a flag at (512,512)-5, falling back to center
+log prng Uniform -> 0.0
+log prng Uniform -> 0.0
+log prng Uniform -> 0.0
+log prng Uniform -> 0.0
+log prng Uniform -> 0.0
+log prng Uniform -> 0.0
+log prng Uniform -> 0.0
+log prng Uniform -> 0.0
+log prng Uniform -> 0.0
+log prng Uniform -> 0.0
+log prng Uniform -> 0.0
+log prng Uniform -> 0.0
+log prng Uniform -> 0.0
+log prng Uniform -> 0.0
+log prng Uniform -> 0.0
+log prng Uniform -> 0.0
+log prng Uniform -> 0.0
+log prng Uniform -> 0.0
+log prng Uniform -> 0.0
+log prng Uniform -> 0.0
+log prng Uniform -> 0.0
+log prng Uniform -> 0.0
+log prng Uniform -> 0.0
+log prng Uniform -> 0.0
+log prng Uniform -> 0.0
+log prng Uniform -> 0.0
+log prng Uniform -> 0.0
+log prng Uniform -> 0.0
+log prng Uniform -> 0.0
+log prng Uniform -> 0.0
+log prng Uniform -> 0.0
+log prng Uniform -> 0.0
+log prng Uniform -> 0.0
+log prng Uniform -> 0.0
+log prng Uniform -> 0.0
+log prng Uniform -> 0.0
+log prng Uniform -> 0.0
+log prng Uniform -> 0.0
+log prng Uniform -> 0.0
+log prng Uniform -> 0.0
+log prng Uniform -> 0.0
+log prng Uniform -> 0.0
+log prng Uniform -> 0.0
+log prng Uniform -> 0.0
+log prng Uniform -> 0.0
+log prng Uniform -> 0.0
+log prng Uniform -> 0.0
+log prng Uniform -> 0.0
+log prng Uniform -> 0.0
+log prng Uniform -> 0.0
+log prng Uniform -> 0.0
+log prng Uniform -> 0.0
+log prng Uniform -> 0.0
+log prng Uniform -> 0.0
+log prng Uniform -> 0.0
+log prng Uniform -> 0.0
+log prng Uniform -> 0.0
+log prng Uniform -> 0.0
+log prng Uniform -> 0.0
+log prng Uniform -> 0.0
+log log E <flagcore> failed to place a flag at (512,512)-5, fallback disabled
+flags 2 0:onmap/-/512/512/-1 1:none/-/0/0/0
+arena fg_wz_current=2 fg_wz_neuts=[]
+sets carryflags=1 dropcenter=0 dropowned=1 dropr=2 friendlytransfer=1 max=2 min=2 neutcenter=0 neutowned=0 resetdelay=0 safecenter=0 safeowned=1 spawnr=5 spawnx=512 spawny=512 tkcenter=0 tkowned=1 windelay=200
+op Cleanup 0 reason=2 carrier=p1 freq=3
+log flagcore SetFlags 0 none/-/800/900/-1
+flags 2 0:none/-/800/900/-1 1:none/-/0/0/0
+arena fg_wz_current=2 fg_wz_neuts=[0]
+sets carryflags=1 dropcenter=0 dropowned=1 dropr=2 friendlytransfer=1 max=2 min=2 neutcenter=0 neutowned=0 resetdelay=0 safecenter=0 safeowned=1 spawnr=5 spawnx=512 spawny=512 tkcenter=0 tkowned=1 windelay=200
+op spawn_timer
+log prng Uniform -> 0.0
+log prng Uniform -> 0.0
+log flagcore SetFlags 0 onmap/-/800/900/-1
+log prng Uniform -> 0.0
+log prng Uniform -> 0.0
+log flagcore SetFlags 1 onmap/-/512/512/-1
+flags 2 0:onmap/-/800/900/-1 1:onmap/-/512/512/-1
+arena fg_wz_current=2 fg_wz_neuts=[]
+sets carryflags=1 dropcenter=0 dropowned=1 dropr=2 friendlytransfer=1 max=2 min=2 neutcenter=0 neutowned=0 resetdelay=0 safecenter=0 safeowned=1 spawnr=5 spawnx=512 spawny=512 tkcenter=0 tkowned=1 windelay=200
+# wz: check_win needs every flag on the map on one freq
+settings Flag:FlagCount=3
+map flagcount=0 solid=0 noflags=0
+op attach
+flags 0
+op Init
+log flagcore SetCarryMode 1
+log flagcore ReserveFlags 3
+log set_timer 500
+flags 3 0:none/-/0/0/0 1:none/-/0/0/0 2:none/-/0/0/0
+arena fg_wz_current=0 fg_wz_neuts=[]
+sets carryflags=1 dropcenter=0 dropowned=1 dropr=2 friendlytransfer=1 max=3 min=3 neutcenter=0 neutowned=0 resetdelay=0 safecenter=0 safeowned=1 spawnr=50 spawnx=512 spawny=512 tkcenter=0 tkowned=1 windelay=200
+current 3
+place 0 onmap/-/1/1/1
+place 1 onmap/-/2/2/2
+place 2 onmap/-/3/3/1
+op check_win
+flags 3 0:onmap/-/1/1/1 1:onmap/-/2/2/2 2:onmap/-/3/3/1
+arena fg_wz_current=3 fg_wz_neuts=[]
+sets carryflags=1 dropcenter=0 dropowned=1 dropr=2 friendlytransfer=1 max=3 min=3 neutcenter=0 neutowned=0 resetdelay=0 safecenter=0 safeowned=1 spawnr=50 spawnx=512 spawny=512 tkcenter=0 tkowned=1 windelay=200
+place 1 onmap/-/2/2/1
+op check_win
+log callback warzonewin (flags, 1, 0)
+log flagcore FlagReset 1 1000
+flags 3 0:onmap/-/1/1/1 1:onmap/-/2/2/1 2:onmap/-/3/3/1
+arena fg_wz_current=0 fg_wz_neuts=[]
+sets carryflags=1 dropcenter=0 dropowned=1 dropr=2 friendlytransfer=1 max=3 min=3 neutcenter=0 neutowned=0 resetdelay=0 safecenter=0 safeowned=1 spawnr=50 spawnx=512 spawny=512 tkcenter=0 tkowned=1 windelay=200
+# wz: a carried flag is skipped without breaking the run
+settings Flag:FlagCount=3
+map flagcount=0 solid=0 noflags=0
+op attach
+flags 0
+op Init
+log flagcore SetCarryMode 1
+log flagcore ReserveFlags 3
+log set_timer 500
+flags 3 0:none/-/0/0/0 1:none/-/0/0/0 2:none/-/0/0/0
+arena fg_wz_current=0 fg_wz_neuts=[]
+sets carryflags=1 dropcenter=0 dropowned=1 dropr=2 friendlytransfer=1 max=3 min=3 neutcenter=0 neutowned=0 resetdelay=0 safecenter=0 safeowned=1 spawnr=50 spawnx=512 spawny=512 tkcenter=0 tkowned=1 windelay=200
+current 3
+place 0 onmap/-/1/1/1
+place 1 carried/p1/0/0/1
+place 2 onmap/-/3/3/1
+op check_win
+flags 3 0:onmap/-/1/1/1 1:carried/p1/0/0/1 2:onmap/-/3/3/1
+arena fg_wz_current=3 fg_wz_neuts=[]
+sets carryflags=1 dropcenter=0 dropowned=1 dropr=2 friendlytransfer=1 max=3 min=3 neutcenter=0 neutowned=0 resetdelay=0 safecenter=0 safeowned=1 spawnr=50 spawnx=512 spawny=512 tkcenter=0 tkowned=1 windelay=200
+# wz: every flag unowned (freq -1) is never a win
+settings Flag:FlagCount=2
+map flagcount=0 solid=0 noflags=0
+op attach
+flags 0
+op Init
+log flagcore SetCarryMode 1
+log flagcore ReserveFlags 2
+log set_timer 500
+flags 2 0:none/-/0/0/0 1:none/-/0/0/0
+arena fg_wz_current=0 fg_wz_neuts=[]
+sets carryflags=1 dropcenter=0 dropowned=1 dropr=2 friendlytransfer=1 max=2 min=2 neutcenter=0 neutowned=0 resetdelay=0 safecenter=0 safeowned=1 spawnr=50 spawnx=512 spawny=512 tkcenter=0 tkowned=1 windelay=200
+current 2
+place 0 onmap/-/1/1/-1
+place 1 onmap/-/2/2/-1
+op check_win
+flags 2 0:onmap/-/1/1/-1 1:onmap/-/2/2/-1
+arena fg_wz_current=2 fg_wz_neuts=[]
+sets carryflags=1 dropcenter=0 dropowned=1 dropr=2 friendlytransfer=1 max=2 min=2 neutcenter=0 neutowned=0 resetdelay=0 safecenter=0 safeowned=1 spawnr=50 spawnx=512 spawny=512 tkcenter=0 tkowned=1 windelay=200
+# wz: a scoring module answering CB_WARZONEWIN overrides the 1000
+settings Flag:FlagCount=2
+map flagcount=0 solid=0 noflags=0
+cbresult warzonewin 2750
+op attach
+flags 0
+op Init
+log flagcore SetCarryMode 1
+log flagcore ReserveFlags 2
+log set_timer 500
+flags 2 0:none/-/0/0/0 1:none/-/0/0/0
+arena fg_wz_current=0 fg_wz_neuts=[]
+sets carryflags=1 dropcenter=0 dropowned=1 dropr=2 friendlytransfer=1 max=2 min=2 neutcenter=0 neutowned=0 resetdelay=0 safecenter=0 safeowned=1 spawnr=50 spawnx=512 spawny=512 tkcenter=0 tkowned=1 windelay=200
+current 2
+place 0 onmap/-/1/1/3
+place 1 onmap/-/2/2/3
+op check_win
+log callback warzonewin (flags, 3, 0)
+log callback warzonewin returns 2750 (scripted)
+log flagcore FlagReset 3 2750
+flags 2 0:onmap/-/1/1/3 1:onmap/-/2/2/3
+arena fg_wz_current=0 fg_wz_neuts=[]
+sets carryflags=1 dropcenter=0 dropowned=1 dropr=2 friendlytransfer=1 max=2 min=2 neutcenter=0 neutowned=0 resetdelay=0 safecenter=0 safeowned=1 spawnr=50 spawnx=512 spawny=512 tkcenter=0 tkowned=1 windelay=200

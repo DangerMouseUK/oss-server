@@ -4,8 +4,14 @@
 //! (`\` prefix) chat, and hands `?`/`*` lines to [`super::cmdman`]
 //! (several commands per line with `?|cmd1|cmd2`, up to
 //! `Chat:CommandLimit`). Control characters are replaced with `_`, sounds
-//! need the `sendsoundmessages` capability. Not yet ported: chat masks
-//! (`?shutup`), flood control, the obscenity filter and chat channels.
+//! need the `sendsoundmessages` capability.
+//!
+//! Also here: per-player chat masks ([`set_player_chat_mask`], with a
+//! timeout) and the arena's own `Chat:RestrictChat` mask; flood control
+//! (`Chat:FloodLimit`, which shuts a player up for `Chat:FloodShutup`
+//! seconds). The obscenity filter is [`super::obscene`]. Chat channels,
+//! remote private messages and squad messages are routed by
+//! [`super::billing_ssc`] and need a connected biller, as in ASSS.
 
 use std::sync::Arc;
 

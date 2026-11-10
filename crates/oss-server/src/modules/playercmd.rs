@@ -1,5 +1,6 @@
-//! `playercmd`: everyday player commands (a first slice of ASSS
-//! `playercmd.c`): `?go`, `?help`, `?version`.
+//! `playercmd`: everyday player commands (part of ASSS `playercmd.c`):
+//! `?go`, `?help`, `?version` and `?sheep`, plus `?serverkey`, which is this
+//! server's own.
 
 use crate::commands::Invocation;
 use crate::module::{Module, ModuleError};

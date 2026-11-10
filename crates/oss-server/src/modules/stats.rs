@@ -1,9 +1,10 @@
 //! `stats` and `basicstats`: per-player statistics and score updates (ASSS
 //! `scoring/stats.c` and `scoring/basicstats.c`).
 //!
-//! Stats use ASSS's stat codes. Only the "reset" interval exists for now
-//! (no persistent storage yet), and stats start from zero each time a
-//! player enters an arena. The four public scores (kill points, flag points,
+//! Stats use ASSS's stat codes. The forever, reset and game intervals are
+//! registered as [`super::persist`] slots, so a player's stats come back
+//! with them when they log in; [`super::persist::end_interval`] starts a new
+//! period. The four public scores (kill points, flag points,
 //! kills, deaths) are mirrored into [`crate::player::Score`] so they appear
 //! in player records, and changed scores are broadcast as S2C `0x09` every
 //! 5 seconds (ASSS sends them at persist interval ends and on entry).

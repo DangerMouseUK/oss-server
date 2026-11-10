@@ -2,8 +2,10 @@
 //!
 //! The map's static flags (tile 170) stay where they are; touching one
 //! claims it for your team. Owners are broadcast every 30 seconds and on
-//! every claim. Not yet ported: keeping owners across restarts
-//! (`Flag:PersistentTurfOwners`, needs the persist module).
+//! every claim, and a [`TurfTag`] event is raised for each claim, which is
+//! what a reward module watches. Not ported: keeping owners across restarts
+//! (`Flag:PersistentTurfOwners`), which would be arena data in
+//! [`super::persist`].
 
 use std::sync::Arc;
 

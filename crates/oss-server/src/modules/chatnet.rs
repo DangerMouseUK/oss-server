@@ -49,8 +49,11 @@ pub const MAX_LINE: usize = 2035;
 /// string handling needs -- `LEFT(buf)` is `MAXMSGSIZE - used - 1` -- so a
 /// line is refused one byte sooner than `MAXMSGSIZE` suggests.
 const MAX_BUFFERED: usize = MAX_LINE - 1;
-/// Characters of an outbound line, before its terminator.
-const MAX_OUT_TEXT: usize = MAX_LINE - 2;
+/// Characters of an outbound line. ASSS formats with
+/// `vsnprintf(buf, MAXMSGSIZE - 2, ...)`, whose size argument includes the
+/// NUL, so at most `MAXMSGSIZE - 3` survive; the LF then makes 2033 bytes
+/// on the wire, however long the message was.
+const MAX_OUT_TEXT: usize = MAX_LINE - 3;
 /// Unsent output a client may have before it is dropped.
 const MAX_PENDING_OUT: usize = 256 * 1024;
 /// Idle ticks (both ways) before a `NOOP` is sent.
@@ -79,7 +82,10 @@ pub fn send_line(zone: &mut Zone, p: PlayerId, line: &str) {
 /// Formats one line the way it goes on the wire.
 ///
 /// The terminator is a bare LF, not CRLF, and the text is cut at
-/// `MAX_OUT_TEXT` however long the message was.
+/// `MAX_OUT_TEXT`: ASSS formats with `vsnprintf(buf, MAXMSGSIZE - 2, ...)`,
+/// whose size argument includes the NUL, so at most 2032 characters
+/// survive and the LF makes 2033 bytes on the wire, however long the
+/// message was.
 pub fn out_line(line: &str) -> Vec<u8> {
     let mut b = to_latin1(line);
     b.truncate(MAX_OUT_TEXT);

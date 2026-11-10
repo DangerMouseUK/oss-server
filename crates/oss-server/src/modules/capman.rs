@@ -25,6 +25,8 @@ pub const CAP_SOUND_MESSAGES: &str = "sendsoundmessages";
 pub const CAP_SEND_MOD_CHAT: &str = "sendmodchat";
 /// Receives staff chat.
 pub const CAP_MOD_CHAT: &str = "seemodchat";
+/// May look into private arenas (`#name`).
+pub const CAP_SEE_PRIV_ARENA: &str = "seeprivarena";
 
 /// Capability checks (ASSS `Icapman`).
 pub trait Capabilities: Send + Sync {

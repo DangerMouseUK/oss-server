@@ -115,7 +115,7 @@ fn c_arena(zone: &mut Zone, inv: &Invocation<'_>) {
     let all = inv.params.contains("-a") || inv.params.contains("all");
     let see_private = zone
         .iface::<dyn super::capman::Capabilities>()
-        .is_some_and(|c| c.has_capability(zone, inv.sender, "seeprivarena"));
+        .is_some_and(|c| c.has_capability(zone, inv.sender, super::capman::CAP_SEE_PRIV_ARENA));
     let mut arenas = Vec::new();
     for a in zone.arenas.iter() {
         if a.status != ArenaStatus::Running {
@@ -149,6 +149,172 @@ fn c_uptime(zone: &mut Zone, inv: &Invocation<'_>) {
         zone,
         inv.sender,
         &format!("uptime: {d} days {h} hours {m} minutes {s} seconds"),
+    );
+}
+
+fn c_zone(zone: &mut Zone, inv: &Invocation<'_>) {
+    let name = zone
+        .cfg
+        .global()
+        .get("Billing", "ServerName")
+        .unwrap_or("(none)")
+        .to_owned();
+    message(zone, inv.sender, &format!("zone: {name}"));
+}
+
+fn c_owner(zone: &mut Zone, inv: &Invocation<'_>) {
+    let owner = inv
+        .arena
+        .and_then(|a| zone.arenas.get(a))
+        .and_then(|a| a.cfg.get("Owner", "Name"))
+        .unwrap_or("(none)")
+        .to_owned();
+    message(zone, inv.sender, &format!("arena owner: {owner}"));
+}
+
+fn c_listarena(zone: &mut Zone, inv: &Invocation<'_>) {
+    let name = inv.params.trim();
+    if name.starts_with('#')
+        && !zone
+            .iface::<dyn super::capman::Capabilities>()
+            .is_some_and(|c| c.has_capability(zone, inv.sender, super::capman::CAP_SEE_PRIV_ARENA))
+    {
+        message(
+            zone,
+            inv.sender,
+            "You don't have permission to view private arenas.",
+        );
+        return;
+    }
+    let arena = if name.is_empty() {
+        inv.arena
+    } else {
+        zone.arenas.iter().find(|a| a.name == name).map(|a| a.id)
+    };
+    let Some(arena) = arena else {
+        message(zone, inv.sender, &format!("Arena '{name}' doesn't exist."));
+        return;
+    };
+    let arena_name = zone
+        .arenas
+        .get(arena)
+        .map(|a| a.name.clone())
+        .unwrap_or_default();
+    let mut names = Vec::new();
+    let mut playing = 0;
+    for p in zone.players.in_arena(arena) {
+        if p.status == PlayerStatus::Playing {
+            if !p.ship.is_spec() {
+                playing += 1;
+            }
+            names.push(p.name.clone());
+        }
+    }
+    message(
+        zone,
+        inv.sender,
+        &format!(
+            "Arena '{arena_name}': {} total, {playing} playing",
+            names.len()
+        ),
+    );
+    for line in wrapped(&names) {
+        message(zone, inv.sender, &line);
+    }
+}
+
+/// ASSS `SendWrappedText`: comma-separated names, at most 80 characters a
+/// line.
+fn wrapped(names: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for n in names {
+        match out.last_mut() {
+            Some(l) if l.len() + n.len() + 2 <= 80 => {
+                l.push_str(", ");
+                l.push_str(n);
+            }
+            _ => out.push(n.clone()),
+        }
+    }
+    out
+}
+
+fn c_modinfo(zone: &mut Zone, inv: &Invocation<'_>) {
+    let name = inv.params.trim();
+    let Some(canon) = zone.modules.catalog().canonical(name) else {
+        message(
+            zone,
+            inv.sender,
+            &format!("No information for module '{name}'"),
+        );
+        return;
+    };
+    let aliases = zone.modules.catalog().aliases(&canon);
+    let loaded = zone.modules.is_loaded(&canon);
+    let owner = zone.modules.owner_of(&canon);
+    let attached: Vec<String> = owner
+        .map(|o| {
+            zone.arenas
+                .iter()
+                .filter(|a| a.attached.contains(&o))
+                .map(|a| a.name.clone())
+                .collect()
+        })
+        .unwrap_or_default();
+    message(zone, inv.sender, &format!("Module: {canon}"));
+    if !aliases.is_empty() {
+        let list = aliases.join(", ");
+        message(zone, inv.sender, &format!("  also known as: {list}"));
+    }
+    message(
+        zone,
+        inv.sender,
+        &format!("  loaded: {}", if loaded { "yes" } else { "no" }),
+    );
+    if !attached.is_empty() {
+        let list = attached.join(", ");
+        message(zone, inv.sender, &format!("  attached to: {list}"));
+    }
+}
+
+fn c_netstats(zone: &mut Zone, inv: &Invocation<'_>) {
+    let Some(m) = zone
+        .res
+        .get::<std::sync::Arc<crate::metrics::Metrics>>()
+        .cloned()
+    else {
+        message(zone, inv.sender, "netstats: no network counters here");
+        return;
+    };
+    use std::sync::atomic::Ordering::Relaxed;
+    let secs = (zone.now().0 / 100).max(1);
+    let (dg_in, dg_out) = (m.datagrams_in.load(Relaxed), m.datagrams_out.load(Relaxed));
+    let (b_in, b_out) = (m.bytes_in.load(Relaxed), m.bytes_out.load(Relaxed));
+    let dropped = m.inbound_dropped.load(Relaxed);
+    message(
+        zone,
+        inv.sender,
+        &format!("netstats: pkts sent={dg_out}  pkts recvd={dg_in}  dropped={dropped}"),
+    );
+    // as in ASSS, 28 bytes of IP and UDP headers count towards bandwidth
+    message(
+        zone,
+        inv.sender,
+        &format!(
+            "netstats: bw out={}  bw in={}",
+            (b_out + dg_out * 28) / secs,
+            (b_in + dg_in * 28) / secs
+        ),
+    );
+    let ticks = m.ticks.load(Relaxed).max(1);
+    message(
+        zone,
+        inv.sender,
+        &format!(
+            "netstats: ticks={ticks}  mean {}us  longest {}us",
+            m.tick_ns.load(Relaxed) / ticks / 1000,
+            m.tick_ns_max.load(Relaxed) / 1000
+        ),
     );
 }
 
@@ -949,6 +1115,27 @@ const COMMANDS: &[(&str, Handler, &str)] = &[
         "reloadconf",
         c_reloadconf,
         "Args: none\nRe-reads changed config files.",
+    ),
+    ("zone", c_zone, "Args: none\nShows the name of this zone."),
+    (
+        "owner",
+        c_owner,
+        "Args: none\nShows the arena owner (`Owner:Name` in its config).",
+    ),
+    (
+        "listarena",
+        c_listarena,
+        "Targets: none\nArgs: [<arena name>]\nLists the players in an arena, or in this one.",
+    ),
+    (
+        "modinfo",
+        c_modinfo,
+        "Targets: none\nArgs: <module name>\nShows what the server knows about a module: its ASSS names, whether it is loaded, and the arenas it is attached to.",
+    ),
+    (
+        "netstats",
+        c_netstats,
+        "Targets: none\nArgs: none\nShows the network and game-loop counters.",
     ),
     (
         "setg",

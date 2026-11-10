@@ -151,6 +151,14 @@ impl ModuleCatalog {
     pub fn names(&self) -> impl Iterator<Item = &str> {
         self.specs.iter().map(|s| s.name.as_str())
     }
+
+    /// The other names `name` answers to (its ASSS names), if it is
+    /// registered.
+    pub fn aliases(&self, name: &str) -> Vec<String> {
+        self.find(name)
+            .map(|s| s.aliases.clone())
+            .unwrap_or_default()
+    }
 }
 
 struct Loaded {

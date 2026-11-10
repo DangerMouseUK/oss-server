@@ -44,7 +44,8 @@ impl H {
                 "[default]\ncmd_version = 1\ncmd_go = 1\ncmd_help = 1\n\
                  privcmd_freqkick\nprivcmd_giveowner\ncmd_takeownership\ncmd_sheep\n\
                  [mod]\ncmd_version = 1\ncmd_go = 1\nseemodchat\nsendmodchat\n\
-                 cmd_arena\nprivcmd_setship\nprivcmd_lock\nprivcmd_prize\nprivcmd_info\n\
+                 cmd_arena\ncmd_zone\ncmd_owner\ncmd_listarena\ncmd_modinfo\ncmd_netstats\n\
+                 privcmd_setship\nprivcmd_lock\nprivcmd_prize\nprivcmd_info\n\
                  privcmd_warpto\ncmd_z\nhigher_than_default\n\
                  privcmd_freqkick\nprivcmd_giveowner\ncmd_takeownership\n"
                     .to_owned(),
@@ -669,6 +670,61 @@ fn texts(pkts: &[Vec<u8>]) -> Vec<String> {
         .iter()
         .map(|c| String::from_utf8_lossy(&c.text).into_owned())
         .collect()
+}
+
+#[test]
+fn information_commands() {
+    let mut h = H::with_conf(
+        &format!("{ARENA_CONF}[Owner]\nName = someone\n"),
+        "[Chat]\nMessageReliable = 1\n[Billing]\nServerName = Test Zone\n",
+    );
+    let (alice, _) = h.login("alice", "x");
+    let (bob, _) = h.login("bob", "secret");
+    h.enter(alice);
+    h.enter(bob);
+    h.take(bob);
+
+    h.chat(bob, chat_type::PUBLIC, 0, "?zone");
+    assert!(texts(&h.take(bob)).contains(&"zone: Test Zone".to_owned()));
+
+    h.chat(bob, chat_type::PUBLIC, 0, "?owner");
+    assert!(texts(&h.take(bob)).contains(&"arena owner: someone".to_owned()));
+
+    h.chat(bob, chat_type::PUBLIC, 0, "?listarena");
+    let out = texts(&h.take(bob));
+    assert!(
+        out.iter().any(|t| t == "Arena '0': 2 total, 0 playing"),
+        "{out:?}"
+    );
+    assert!(
+        out.iter().any(|t| t.contains("alice") && t.contains("bob")),
+        "{out:?}"
+    );
+    h.chat(bob, chat_type::PUBLIC, 0, "?listarena nosucharena");
+    let out = texts(&h.take(bob));
+    assert!(
+        out.iter()
+            .any(|t| t == "Arena 'nosucharena' doesn't exist."),
+        "{out:?}"
+    );
+
+    // ?modinfo resolves an ASSS name and says where the module stands
+    h.chat(bob, chat_type::PUBLIC, 0, "?modinfo auth_ban");
+    let out = texts(&h.take(bob));
+    assert!(out.iter().any(|t| t == "Module: auth_ban"), "{out:?}");
+    assert!(out.iter().any(|t| t == "  loaded: yes"), "{out:?}");
+    h.chat(bob, chat_type::PUBLIC, 0, "?modinfo nosuchmodule");
+    let out = texts(&h.take(bob));
+    assert!(
+        out.iter()
+            .any(|t| t == "No information for module 'nosuchmodule'"),
+        "{out:?}"
+    );
+
+    // ?netstats runs without a metrics registry (a zone built for tests)
+    h.chat(bob, chat_type::PUBLIC, 0, "?netstats");
+    let out = texts(&h.take(bob));
+    assert!(out.iter().any(|t| t.starts_with("netstats:")), "{out:?}");
 }
 
 #[test]

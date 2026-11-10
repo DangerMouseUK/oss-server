@@ -55,7 +55,10 @@ impl H {
             ("conf/staff.conf", "[(global)]\nbob = mod\n".to_owned()),
             ("arenas/(default)/arena.conf", arena_conf.to_owned()),
         ]);
-        let zone = ServerBuilder::with_source(src).build_zone().expect("zone");
+        let mut zone = ServerBuilder::with_source(src).build_zone().expect("zone");
+        // fm_normal picks at random between equally populated teams, so the
+        // tests fix the seed to keep who lands where repeatable
+        zone.res.insert(oss_server::prng::Prng::new(1));
         Self {
             zone,
             lo: Loopback::default(),
@@ -1028,4 +1031,140 @@ fn bot_features() {
     h.chat(bob, chat_type::PUBLIC, 0, "?botfeature +nosuchfeature");
     let out = texts(&h.take(bob));
     assert!(out.iter().any(|t| t == "Unknown bot feature"), "{out:?}");
+}
+
+#[test]
+fn freq_manager_limits() {
+    // two players per team, three desired teams, and only four may play
+    let conf = format!(
+        "{ARENA_CONF}[Team]\nDesiredTeams = 3\nMaxPerTeam = 2\nMaxFrequency = 100\n\
+         PrivFreqStart = 50\nMaxPerPrivateTeam = 1\n[General]\nMaxPlaying = 4\n"
+    );
+    let mut h = H::with_conf(&conf, "[Chat]\nMessageReliable = 1\n");
+    let mut players = Vec::new();
+    for i in 0..6 {
+        let (p, _) = h.login(&format!("p{i}"), "x");
+        h.enter(p);
+        h.send(p, &[c2s::kind::SET_SHIP, 0]);
+        players.push(p);
+    }
+    // General:MaxPlaying stops the fifth and sixth taking a ship
+    let playing = players
+        .iter()
+        .filter(|&&p| h.zone.players.get(p).is_some_and(|x| !x.ship.is_spec()))
+        .count();
+    assert_eq!(playing, 4, "MaxPlaying caps the arena");
+    h.take(players[4]);
+    h.send(players[4], &[c2s::kind::SET_SHIP, 1]);
+    let out = texts(&h.take(players[4]));
+    assert!(
+        out.iter()
+            .any(|t| t == "There are too many people playing in this arena."),
+        "{out:?}"
+    );
+
+    // the four playing are spread over the three desired teams, two at most
+    let mut counts = [0; 3];
+    for &p in &players {
+        if let Some(x) = h.zone.players.get(p)
+            && !x.ship.is_spec()
+        {
+            counts[usize::from(x.freq)] += 1;
+        }
+    }
+    assert!(counts.iter().all(|&c| c <= 2), "{counts:?}");
+    assert_eq!(counts.iter().sum::<i32>(), 4);
+
+    // a private freq takes one player only, so the second is put elsewhere
+    let mut buf = Vec::new();
+    c2s::SetFreq { freq: 60 }.encode(&mut buf);
+    h.send(players[0], &buf);
+    assert_eq!(h.zone.players.get(players[0]).map(|p| p.freq), Some(60));
+    h.send(players[1], &buf);
+    assert_ne!(h.zone.players.get(players[1]).map(|p| p.freq), Some(60));
+}
+
+#[test]
+fn frequency_ship_types_and_even_teams() {
+    let conf = format!("{ARENA_CONF}[Team]\nFrequencyShipTypes = 1\nDesiredTeams = 2\n");
+    let mut h = H::with_conf(&conf, "[Chat]\nMessageReliable = 1\n");
+    let (alice, _) = h.login("alice", "x");
+    h.enter(alice);
+    // whatever ship is asked for, the freq decides it
+    h.send(alice, &[c2s::kind::SET_SHIP, 5]);
+    let (ship, freq) = h
+        .zone
+        .players
+        .get(alice)
+        .map(|p| (p.ship.0, p.freq))
+        .expect("player");
+    assert_eq!(u16::from(ship), freq, "freq 0 flies warbirds, freq 1 javs");
+    // and moving to another freq changes the ship with it
+    let mut buf = Vec::new();
+    c2s::SetFreq { freq: 3 }.encode(&mut buf);
+    h.send(alice, &buf);
+    assert_eq!(
+        h.zone.players.get(alice).map(|p| (p.ship.0, p.freq)),
+        Some((3, 3))
+    );
+}
+
+#[test]
+fn force_even_teams_refuses_the_bigger_team() {
+    let conf = format!("{ARENA_CONF}[Team]\nForceEvenTeams = 1\nDesiredTeams = 2\n");
+    let mut h = H::with_conf(&conf, "[Chat]\nMessageReliable = 1\n");
+    let mut players = Vec::new();
+    for i in 0..3 {
+        let (p, _) = h.login(&format!("p{i}"), "x");
+        h.enter(p);
+        h.send(p, &[c2s::kind::SET_SHIP, 0]);
+        players.push(p);
+    }
+    // the odd player out is alone on their freq; moving to the other one
+    // (two players) would make the teams more uneven
+    let lonely = *players
+        .iter()
+        .find(|&&p| {
+            let f = h.zone.players.get(p).map_or(99, |x| x.freq);
+            players
+                .iter()
+                .filter(|&&q| h.zone.players.get(q).map_or(98, |x| x.freq) == f)
+                .count()
+                == 1
+        })
+        .expect("one player alone");
+    let full_freq = 1 - h.zone.players.get(lonely).map_or(0, |p| p.freq);
+    h.take(lonely);
+    let mut buf = Vec::new();
+    c2s::SetFreq {
+        freq: full_freq as i16,
+    }
+    .encode(&mut buf);
+    h.send(lonely, &buf);
+    let out = texts(&h.take(lonely));
+    assert!(
+        out.iter()
+            .any(|t| t == "Changing frequencies would make the teams uneven."),
+        "{out:?}"
+    );
+    assert_ne!(h.zone.players.get(lonely).map(|p| p.freq), Some(full_freq));
+}
+
+#[test]
+fn screen_resolution_limit() {
+    let conf = format!("{ARENA_CONF}[Misc]\nMaxXres = 800\nMaxYres = 600\n");
+    let mut h = H::with_conf(&conf, "[Chat]\nMessageReliable = 1\n");
+    let (alice, _) = h.login("alice", "x");
+    // the arena request carries 1024x768, over the limit
+    h.enter(alice);
+    assert_eq!(h.zone.players.get(alice).map(|p| p.ship.0), Some(8));
+    h.take(alice);
+    h.send(alice, &[c2s::kind::SET_SHIP, 0]);
+    let out = texts(&h.take(alice));
+    assert!(
+        out.iter()
+            .any(|t| t == "Maximum allowed screen resolution is 800x600 in this arena"),
+        "{out:?}"
+    );
+    assert_eq!(h.zone.players.get(alice).map(|p| p.ship.0), Some(8));
 }

@@ -68,6 +68,14 @@ pub trait SendSettings: Send + Sync {
     fn send_settings(&self, zone: &mut Zone, player: PlayerId);
 }
 
+/// Picks the arena for a player who asked for "any public arena" rather than
+/// a named one (ASSS `Iarenaplace`). With nothing registered, such a player
+/// goes to their listen socket's `Listen:ConnectAs` arena, or to `0`.
+pub trait ArenaPlace: Send + Sync {
+    /// The arena name to use, or `None` to leave it to the default.
+    fn place(&self, zone: &mut Zone, player: PlayerId) -> Option<String>;
+}
+
 /// Marks a player who has been sent the arena response for this arena.
 struct Responded(ArenaId);
 
@@ -654,12 +662,13 @@ fn on_go_arena(zone: &mut Zone, player: PlayerId, pkt: &[u8]) {
             }
             name
         }
-        // a virtual server (Listen:ConnectAs) sends its players to its own
-        // arena, as ASSS's arena placement does
+        // "any public arena": a placement module decides where, and
+        // failing that a virtual server (Listen:ConnectAs) sends its
+        // players to its own arena, as ASSS's placement does
         -2 | -1 => zone
-            .players
-            .get(player)
-            .and_then(|p| p.connect_as.clone())
+            .iface::<dyn ArenaPlace>()
+            .and_then(|p| p.place(zone, player))
+            .or_else(|| zone.players.get(player).and_then(|p| p.connect_as.clone()))
             .unwrap_or_else(|| "0".to_owned()),
         n if n >= 0 => {
             if !has_cap_go(zone, player) {

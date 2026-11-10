@@ -4,6 +4,7 @@
 //! ASSS `conf/modules.conf` loads the equivalent modules unchanged.
 
 pub mod anticheat;
+pub mod ap_multipub;
 pub mod arenaman;
 pub mod arenaperm;
 pub mod auth_file;
@@ -12,6 +13,7 @@ pub mod banners;
 pub mod bans;
 pub mod billing_ssc;
 pub mod bricks;
+pub mod buy;
 pub mod capman;
 pub mod chat;
 pub mod chatnet;
@@ -26,6 +28,7 @@ pub mod flagcore;
 pub mod fm_lockspec;
 pub mod freqowners;
 pub mod game;
+pub mod game_timer;
 pub mod jackpot;
 pub mod koth;
 pub mod lagdata;
@@ -40,6 +43,7 @@ pub mod redirect;
 pub mod security;
 pub mod staffcmd;
 pub mod stats;
+pub mod watchdamage;
 
 use crate::module::ModuleCatalog;
 use crate::net::Transport;
@@ -80,6 +84,8 @@ pub const DEFAULT_MODULES: &[&str] = &[
     "fg_wz",
     "fg_turf",
     "fm_lockspec",
+    "buy",
+    "game_timer",
     "filetrans",
     "sendfile",
     "jackpot",
@@ -141,6 +147,10 @@ pub fn builtin_catalog() -> ModuleCatalog {
     });
     c.register("fg_wz", &["<py> fg_wz"], || fg_wz::FgWzModule);
     c.register("fm_lockspec", &[], || fm_lockspec::FmLockSpecModule);
+    c.register("buy", &[], || buy::BuyModule);
+    c.register("game_timer", &[], || game_timer::GameTimerModule);
+    c.register("watchdamage", &[], || watchdamage::WatchDamageModule);
+    c.register("ap_multipub", &[], || ap_multipub::ApMultiPubModule);
     c.register("filetrans", &[], || filetrans::FileTransModule);
     c.register("sendfile", &[], || filetrans::SendFileModule);
     c.register("arenaperm", &[], || arenaperm::ArenaPermModule);

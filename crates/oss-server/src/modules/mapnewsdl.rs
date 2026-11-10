@@ -143,6 +143,40 @@ pub fn map_path(zone: &Zone, arena: ArenaId, name: Option<&str>) -> Option<PathB
     zone.cfg.source().find(path, &repls)
 }
 
+/// The arena's LVZ files, resolved on the LVZ search path, each with whether
+/// `General:LevelFiles` marked it optional with `+` (ASSS `mapdata.c`'s
+/// `EnumLVZFiles`). Names that can't be found are logged and dropped.
+pub fn lvz_files(zone: &Zone, arena: ArenaId) -> Vec<(PathBuf, bool)> {
+    let lvzs = zone
+        .arenas
+        .get(arena)
+        .and_then(|a| {
+            a.cfg
+                .get("General", "LevelFiles")
+                .or_else(|| a.cfg.get("Misc", "LevelFiles"))
+                .map(str::to_owned)
+        })
+        .unwrap_or_default();
+    let mut out = Vec::new();
+    for item in lvzs
+        .split([',', ':', ' '])
+        .filter(|s| !s.is_empty())
+        .take(MAX_LVZ_FILES)
+    {
+        let (optional, name) = match item.strip_prefix('+') {
+            Some(n) => (true, n),
+            None => (false, item),
+        };
+        match map_path(zone, arena, Some(name)) {
+            Some(p) => out.push((p, optional)),
+            None => {
+                tracing::warn!(target: "mapnewsdl", arena = arena.0, file = name, "can't find LVZ file")
+            }
+        }
+    }
+    out
+}
+
 fn load_arena(zone: &mut Zone, arena: ArenaId) {
     let mut files = Vec::new();
     match map_path(zone, arena, None)
@@ -160,31 +194,11 @@ fn load_arena(zone: &mut Zone, arena: ArenaId) {
             });
         }
     }
-    let lvzs = zone
-        .arenas
-        .get(arena)
-        .and_then(|a| {
-            a.cfg
-                .get("General", "LevelFiles")
-                .or_else(|| a.cfg.get("Misc", "LevelFiles"))
-                .map(str::to_owned)
-        })
-        .unwrap_or_default();
-    for item in lvzs
-        .split([',', ':', ' '])
-        .filter(|s| !s.is_empty())
-        .take(MAX_LVZ_FILES)
-    {
-        let (optional, name) = match item.strip_prefix('+') {
-            Some(n) => (true, n),
-            None => (false, item),
-        };
-        match map_path(zone, arena, Some(name))
-            .and_then(|p| load_download(zone.cfg.source(), &p, false, optional))
-        {
+    for (path, optional) in lvz_files(zone, arena) {
+        match load_download(zone.cfg.source(), &path, false, optional) {
             Some(d) => files.push(d),
             None => {
-                tracing::warn!(target: "mapnewsdl", arena = arena.0, file = name, "can't load LVZ file")
+                tracing::warn!(target: "mapnewsdl", arena = arena.0, file = %path.display(), "can't load LVZ file")
             }
         }
     }

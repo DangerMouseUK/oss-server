@@ -1,0 +1,400 @@
+# Flag core from ASSS 1.4.4 src/core/flagcore.c (compiled unmodified).
+# flagcore owns flag STATE and the packets clients see; the flag GAME that decides
+# where flags go is a separate I_FLAGGAME module, and in ASSS 1.4.4 both shipped
+# games are Python (src/py/fg_wz.py, fg_turf.py), driven by vectors/pyharness.
+# Here the game is a recorder that only logs what flagcore asked of it, so every
+# record below is flagcore's own behaviour.
+#   # <label>   starts a scenario; 'arena' gives the carry mode, how many flags the
+#      game reserved, and the Flag:CarryFlags value flagcore pushed to clientset
+#   seat <triples>   freq digit, 'w' ship or 's' spec, '.' normal or 'z' safe zone
+#   set <fid> <state> <carrier|-> <x> <y> <freq>   called SetFlags with that record
+#   setret <n>       what SetFlags returned (how many records it consumed)
+#   touch <player> <fid>   fed flagcore a C2S 0x13 flag-pickup packet
+#   kill <killer> <killed> ran flagcore's kill handler
+#   reset <freq> <points>  called FlagReset
+#   pkt <hex>        each packet sent to the arena, in order and in wire order
+#   cb <name>        each callback flagcore fired, in order
+#   game <call>      each call flagcore made into the flag game
+#   flags <n> <fid>:<state>/<carrier|->/<x>/<y>/<freq>...   every reserved flag
+#   carried <player>:<n>...   each player's pkt.flagscarried, which is what the
+#      client shows and what the kill packet's flag count is built from
+#   counts freq<N>:<n>... <player>:<n>...   CountFreqFlags and CountPlayerFlags
+#   chatnet <line>   each line sent to plain-text clients
+#   endintervals <n> how many times FlagReset asked persist to end the game interval
+#
+# Rules these records pin:
+#
+# 1. set_flag is a 3x3 table on (old state, new state), and each cell sends a
+#    DIFFERENT packet. none->onmap and onmap->onmap send a flag LOCATION packet;
+#    none->carried and onmap->carried send a flag PICKUP packet; onmap->none sends a
+#    location packet with x, y and freq all 0xffff, which ASSS itself calls 'faking'
+#    the removal and logs a warning about. There is no real 'remove a flag' packet.
+# 2. Taking one flag off a carrier who holds several is the messiest cell. flagcore
+#    cannot drop a single flag, so it sends a DROP for the carrier -- which drops
+#    all of them on the client -- then re-sends a PICKUP for every OTHER flag that
+#    carrier still holds, and logs that it faked it. Watch the packet order.
+# 3. flagscarried is maintained by flagcore, not by the game, and the drop path
+#    zeroes it and then counts back up. A port that decrements it will drift.
+# 4. CARRY_NONE (turf) is a different machine entirely: every flag is always
+#    FI_ONMAP, only freq matters, x and y are FORCED to -1 whatever the game asks
+#    for, and a request to take a turf flag off the map is refused with an error.
+#    How clients are told also changes: during a touch it is a PICKUP packet, during
+#    Init nothing at all, and otherwise a turf-ownership packet on a timer.
+# 5. A carried flag assigned to the SAME carrier again is a no-op: no packet, no
+#    callback, no state change.
+# 6. SetFlags always sets a carried flag's freq from the CARRIER's freq, overwriting
+#    whatever the game passed in. It refuses FI_CARRIED with no carrier and refuses
+#    a non-carried state WITH a carrier, leaving the flag untouched in both cases.
+# 7. CountFreqFlags counts both on-map flags owned by the freq and carried flags
+#    whose CARRIER is on that freq -- the carried flag's own freq field is not
+#    consulted, so the two can disagree and the carrier wins.
+# 8. FlagReset on a turf arena only blanks the freqs; on a carry arena it cleans up
+#    carriers first and sends a flag-victory packet. Only the carry arena asks
+#    persist to end the game interval -- a turf reset does not, so a turf zone's
+#    per-game stats interval never ends on a reset.
+# 9. A hazard found by running this: in a turf arena, make_turf_packet asserts that
+#    EVERY reserved flag is FI_ONMAP. A flag game that reserves more flags than it
+#    puts on the map will abort an assert-enabled ASSS the moment a turf ownership
+#    packet is built, which FlagReset does directly. fg_turf.py always places all of
+#    them, so a stock zone never hits it, but a port is free to be less fragile --
+#    and the scenarios below keep every turf flag on the map so the records are of
+#    behaviour rather than of an abort.
+# CARRY_ALL: every cell of the old-state x new-state table
+arena carrymode=1 reserved=4 clientset_override=1
+game Init
+flags 4 0:none/-/0/0/0 1:none/-/0/0/0 2:none/-/0/0/0 3:none/-/0/0/0
+carried
+seat 0w.0w.1w.
+counts freq0:0 freq1:0 freq2:0 freq3:0 p0:0 p1:0 p2:0
+set 0 onmap - 100 200 -1
+setret 1
+pkt 1200006400c800ffff
+cb flagonmap
+flags 4 0:onmap/-/100/200/-1 1:none/-/0/0/0 2:none/-/0/0/0 3:none/-/0/0/0
+carried 0:0 1:0 2:0
+set 0 onmap - 300 400 1
+setret 1
+pkt 1200002c0190010100
+cb flagonmap
+flags 4 0:onmap/-/300/400/1 1:none/-/0/0/0 2:none/-/0/0/0 3:none/-/0/0/0
+carried 0:0 1:0 2:0
+set 0 carried p0 0 0 9
+setret 1
+pkt 1300000000
+cb flaggain
+flags 4 0:carried/p0/0/0/0 1:none/-/0/0/0 2:none/-/0/0/0 3:none/-/0/0/0
+carried 0:1 1:0 2:0
+counts freq0:1 freq1:0 freq2:0 freq3:0 p0:1 p1:0 p2:0
+set 0 carried p0 0 0 9
+setret 1
+flags 4 0:carried/p0/0/0/0 1:none/-/0/0/0 2:none/-/0/0/0 3:none/-/0/0/0
+carried 0:1 1:0 2:0
+set 1 carried p0 0 0 0
+setret 1
+pkt 1301000000
+cb flaggain
+flags 4 0:carried/p0/0/0/0 1:carried/p0/0/0/0 2:none/-/0/0/0 3:none/-/0/0/0
+carried 0:2 1:0 2:0
+counts freq0:2 freq1:0 freq2:0 freq3:0 p0:2 p1:0 p2:0
+set 0 carried p1 0 0 0
+setret 1
+pkt 160000
+pkt 1301000000
+pkt 1300000100
+cb flaglost
+cb flaggain
+flags 4 0:carried/p1/0/0/0 1:carried/p0/0/0/0 2:none/-/0/0/0 3:none/-/0/0/0
+carried 0:1 1:1 2:0
+counts freq0:2 freq1:0 freq2:0 freq3:0 p0:1 p1:1 p2:0
+set 1 onmap - 500 600 0
+setret 1
+pkt 160000
+pkt 120100f40158020000
+cb flaglost
+cb flagonmap
+flags 4 0:carried/p1/0/0/0 1:onmap/-/500/600/0 2:none/-/0/0/0 3:none/-/0/0/0
+carried 0:0 1:1 2:0
+set 1 none - 0 0 0
+setret 1
+pkt 120100ffffffffffff
+flags 4 0:carried/p1/0/0/0 1:none/-/-1/-1/-1 2:none/-/0/0/0 3:none/-/0/0/0
+carried 0:0 1:1 2:0
+set 1 none - 7 8 9
+setret 1
+flags 4 0:carried/p1/0/0/0 1:none/-/7/8/9 2:none/-/0/0/0 3:none/-/0/0/0
+carried 0:0 1:1 2:0
+counts freq0:1 freq1:0 freq2:0 freq3:0 p0:0 p1:1 p2:0
+# SetFlags refuses an inconsistent record and changes nothing
+arena carrymode=1 reserved=2 clientset_override=1
+game Init
+flags 2 0:none/-/0/0/0 1:none/-/0/0/0
+carried
+seat 0w.1w.
+set 0 onmap - 10 20 0
+setret 1
+pkt 1200000a0014000000
+cb flagonmap
+flags 2 0:onmap/-/10/20/0 1:none/-/0/0/0
+carried 0:0 1:0
+set 0 carried - 0 0 0
+setret 1
+flags 2 0:onmap/-/10/20/0 1:none/-/0/0/0
+carried 0:0 1:0
+set 0 onmap p1 30 40 0
+setret 1
+flags 2 0:onmap/-/10/20/0 1:none/-/0/0/0
+carried 0:0 1:0
+set 0 none p1 0 0 0
+setret 1
+flags 2 0:onmap/-/10/20/0 1:none/-/0/0/0
+carried 0:0 1:0
+# taking one flag off a carrier holding three
+arena carrymode=1 reserved=4 clientset_override=1
+game Init
+flags 4 0:none/-/0/0/0 1:none/-/0/0/0 2:none/-/0/0/0 3:none/-/0/0/0
+carried
+seat 0w.0w.
+set 0 carried p0 0 0 0
+setret 1
+pkt 1300000000
+cb flaggain
+flags 4 0:carried/p0/0/0/0 1:none/-/0/0/0 2:none/-/0/0/0 3:none/-/0/0/0
+carried 0:1 1:0
+set 1 carried p0 0 0 0
+setret 1
+pkt 1301000000
+cb flaggain
+flags 4 0:carried/p0/0/0/0 1:carried/p0/0/0/0 2:none/-/0/0/0 3:none/-/0/0/0
+carried 0:2 1:0
+set 2 carried p0 0 0 0
+setret 1
+pkt 1302000000
+cb flaggain
+flags 4 0:carried/p0/0/0/0 1:carried/p0/0/0/0 2:carried/p0/0/0/0 3:none/-/0/0/0
+carried 0:3 1:0
+counts freq0:3 freq1:0 freq2:0 freq3:0 p0:3 p1:0
+set 1 onmap - 64 64 0
+setret 1
+pkt 160000
+pkt 1300000000
+pkt 1302000000
+pkt 120100400040000000
+cb flaglost
+cb flagonmap
+flags 4 0:carried/p0/0/0/0 1:onmap/-/64/64/0 2:carried/p0/0/0/0 3:none/-/0/0/0
+carried 0:2 1:0
+counts freq0:3 freq1:0 freq2:0 freq3:0 p0:2 p1:0
+# a carried flag's freq follows the carrier, not the record
+arena carrymode=1 reserved=3 clientset_override=1
+game Init
+flags 3 0:none/-/0/0/0 1:none/-/0/0/0 2:none/-/0/0/0
+carried
+seat 0w.1w.2w.
+set 0 carried p2 0 0 0
+setret 1
+pkt 1300000200
+cb flaggain
+flags 3 0:carried/p2/0/0/2 1:none/-/0/0/0 2:none/-/0/0/0
+carried 0:0 1:0 2:1
+counts freq0:0 freq1:0 freq2:1 freq3:0 p0:0 p1:0 p2:1
+set 1 onmap - 10 10 2
+setret 1
+pkt 1201000a000a000200
+cb flagonmap
+flags 3 0:carried/p2/0/0/2 1:onmap/-/10/10/2 2:none/-/0/0/0
+carried 0:0 1:0 2:1
+counts freq0:0 freq1:0 freq2:2 freq3:0 p0:0 p1:0 p2:1
+# CARRY_NONE: turf flags are always on the map at (-1,-1)
+arena carrymode=0 reserved=4 clientset_override=0
+game Init
+flags 4 0:none/-/0/0/0 1:none/-/0/0/0 2:none/-/0/0/0 3:none/-/0/0/0
+carried
+seat 0w.1w.
+set 0 onmap - 123 456 0
+setret 1
+cb flagonmap
+flags 4 0:onmap/-/-1/-1/0 1:none/-/0/0/0 2:none/-/0/0/0 3:none/-/0/0/0
+carried 0:0 1:0
+set 1 onmap - 0 0 1
+setret 1
+cb flagonmap
+flags 4 0:onmap/-/-1/-1/0 1:onmap/-/-1/-1/1 2:none/-/0/0/0 3:none/-/0/0/0
+carried 0:0 1:0
+counts freq0:1 freq1:1 freq2:0 freq3:0 p0:0 p1:0
+set 0 onmap - 0 0 1
+setret 1
+cb flagonmap
+flags 4 0:onmap/-/-1/-1/1 1:onmap/-/-1/-1/1 2:none/-/0/0/0 3:none/-/0/0/0
+carried 0:0 1:0
+counts freq0:0 freq1:2 freq2:0 freq3:0 p0:0 p1:0
+set 0 none - 0 0 -1
+setret 1
+flags 4 0:onmap/-/-1/-1/1 1:onmap/-/-1/-1/1 2:none/-/0/0/0 3:none/-/0/0/0
+carried 0:0 1:0
+set 0 carried p0 0 0 0
+setret 1
+flags 4 0:onmap/-/-1/-1/1 1:onmap/-/-1/-1/1 2:none/-/0/0/0 3:none/-/0/0/0
+carried 0:0 1:0
+counts freq0:0 freq1:2 freq2:0 freq3:0 p0:0 p1:0
+# a turf touch goes through the game and out as a pickup packet
+arena carrymode=0 reserved=3 clientset_override=0
+game Init
+flags 3 0:none/-/0/0/0 1:none/-/0/0/0 2:none/-/0/0/0
+carried
+seat 0w.1w.
+set 0 onmap - 0 0 -1
+setret 1
+cb flagonmap
+flags 3 0:onmap/-/-1/-1/-1 1:none/-/0/0/0 2:none/-/0/0/0
+carried 0:0 1:0
+set 1 onmap - 0 0 -1
+setret 1
+cb flagonmap
+flags 3 0:onmap/-/-1/-1/-1 1:onmap/-/-1/-1/-1 2:none/-/0/0/0
+carried 0:0 1:0
+set 2 onmap - 0 0 -1
+setret 1
+cb flagonmap
+flags 3 0:onmap/-/-1/-1/-1 1:onmap/-/-1/-1/-1 2:onmap/-/-1/-1/-1
+carried 0:0 1:0
+touch 1 2
+game FlagTouch p1 2
+flags 3 0:onmap/-/-1/-1/-1 1:onmap/-/-1/-1/-1 2:onmap/-/-1/-1/-1
+carried 0:0 1:0
+touch 1 99
+flags 3 0:onmap/-/-1/-1/-1 1:onmap/-/-1/-1/-1 2:onmap/-/-1/-1/-1
+carried 0:0 1:0
+# a kill moves every flag the victim carried
+arena carrymode=1 reserved=4 clientset_override=1
+game Init
+flags 4 0:none/-/0/0/0 1:none/-/0/0/0 2:none/-/0/0/0 3:none/-/0/0/0
+carried
+seat 0w.1w.
+set 0 carried p1 0 0 0
+setret 1
+pkt 1300000100
+cb flaggain
+flags 4 0:carried/p1/0/0/1 1:none/-/0/0/0 2:none/-/0/0/0 3:none/-/0/0/0
+carried 0:0 1:1
+set 1 carried p1 0 0 0
+setret 1
+pkt 1301000100
+cb flaggain
+flags 4 0:carried/p1/0/0/1 1:carried/p1/0/0/1 2:none/-/0/0/0 3:none/-/0/0/0
+carried 0:0 1:2
+counts freq0:0 freq1:2 freq2:0 freq3:0 p0:0 p1:2
+kill 0 1
+cb flaglost
+cb flaggain
+cb flaglost
+cb flaggain
+game Cleanup 0 reason=5 carrier=p1 freq=1
+game Cleanup 1 reason=5 carrier=p1 freq=1
+flags 4 0:carried/p0/0/0/0 1:carried/p0/0/0/0 2:none/-/0/0/0 3:none/-/0/0/0
+carried 0:2 1:0
+counts freq0:2 freq1:0 freq2:0 freq3:0 p0:2 p1:0
+# a team kill: killer and victim on the same freq
+arena carrymode=1 reserved=3 clientset_override=1
+game Init
+flags 3 0:none/-/0/0/0 1:none/-/0/0/0 2:none/-/0/0/0
+carried
+seat 0w.0w.
+set 0 carried p1 0 0 0
+setret 1
+pkt 1300000100
+cb flaggain
+flags 3 0:carried/p1/0/0/0 1:none/-/0/0/0 2:none/-/0/0/0
+carried 0:0 1:1
+counts freq0:1 freq1:0 freq2:0 freq3:0 p0:0 p1:1
+kill 0 1
+cb flaglost
+cb flaggain
+game Cleanup 0 reason=6 carrier=p1 freq=0
+flags 3 0:carried/p0/0/0/0 1:none/-/0/0/0 2:none/-/0/0/0
+carried 0:1 1:0
+counts freq0:1 freq1:0 freq2:0 freq3:0 p0:1 p1:0
+# the victim carried nothing
+arena carrymode=1 reserved=2 clientset_override=1
+game Init
+flags 2 0:none/-/0/0/0 1:none/-/0/0/0
+carried
+seat 0w.1w.
+kill 0 1
+flags 2 0:none/-/0/0/0 1:none/-/0/0/0
+carried 0:0 1:0
+# FlagReset on a carry arena
+arena carrymode=1 reserved=3 clientset_override=1
+game Init
+flags 3 0:none/-/0/0/0 1:none/-/0/0/0 2:none/-/0/0/0
+carried
+seat 0w.1w.
+set 0 carried p0 0 0 0
+setret 1
+pkt 1300000000
+cb flaggain
+flags 3 0:carried/p0/0/0/0 1:none/-/0/0/0 2:none/-/0/0/0
+carried 0:1 1:0
+set 1 onmap - 50 60 1
+setret 1
+pkt 12010032003c000100
+cb flagonmap
+flags 3 0:carried/p0/0/0/0 1:onmap/-/50/60/1 2:none/-/0/0/0
+carried 0:1 1:0
+counts freq0:1 freq1:1 freq2:0 freq3:0 p0:1 p1:0
+reset 0 1000
+endintervals 1
+pkt 140000e8030000
+cb flagreset
+flags 3 0:none/-/0/0/-1 1:none/-/50/60/-1 2:none/-/0/0/-1
+carried 0:0 1:0
+chatnet MSG:ARENA:Flag victory: freq 0 won 1000 points.
+counts freq0:0 freq1:0 freq2:0 freq3:0 p0:0 p1:0
+# FlagReset on a turf arena only blanks the freqs
+arena carrymode=0 reserved=3 clientset_override=0
+game Init
+flags 3 0:none/-/0/0/0 1:none/-/0/0/0 2:none/-/0/0/0
+carried
+seat 0w.1w.
+set 0 onmap - 0 0 0
+setret 1
+cb flagonmap
+flags 3 0:onmap/-/-1/-1/0 1:none/-/0/0/0 2:none/-/0/0/0
+carried 0:0 1:0
+set 1 onmap - 0 0 1
+setret 1
+cb flagonmap
+flags 3 0:onmap/-/-1/-1/0 1:onmap/-/-1/-1/1 2:none/-/0/0/0
+carried 0:0 1:0
+set 2 onmap - 0 0 0
+setret 1
+cb flagonmap
+flags 3 0:onmap/-/-1/-1/0 1:onmap/-/-1/-1/1 2:onmap/-/-1/-1/0
+carried 0:0 1:0
+counts freq0:2 freq1:1 freq2:0 freq3:0 p0:0 p1:0
+reset 0 500
+endintervals 0
+pkt 22ffffffffffff
+cb flagreset
+flags 3 0:onmap/-/-1/-1/-1 1:onmap/-/-1/-1/-1 2:onmap/-/-1/-1/-1
+carried 0:0 1:0
+chatnet MSG:ARENA:Turf game reset.
+counts freq0:0 freq1:0 freq2:0 freq3:0 p0:0 p1:0
+# FlagReset with freq -1 (no winner)
+arena carrymode=1 reserved=2 clientset_override=1
+game Init
+flags 2 0:none/-/0/0/0 1:none/-/0/0/0
+carried
+seat 0w.1w.
+set 0 onmap - 10 10 0
+setret 1
+pkt 1200000a000a000000
+cb flagonmap
+flags 2 0:onmap/-/10/10/0 1:none/-/0/0/0
+carried 0:0 1:0
+reset -1 0
+endintervals 1
+pkt 14ffff00000000
+cb flagreset
+flags 2 0:none/-/10/10/-1 1:none/-/0/0/-1
+carried 0:0 1:0
+chatnet MSG:ARENA:Flag game reset.

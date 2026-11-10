@@ -114,7 +114,10 @@ impl FlagInfo {
         Self {
             state: FlagState::Carried,
             carrier: Some(player),
-            ..Self::default()
+            // zeros, not the neutral -1: a carried flag has no position,
+            // and this is what the flag games pass, so a module reading one
+            // back sees what it does under ASSS
+            ..Self::blank()
         }
     }
 }

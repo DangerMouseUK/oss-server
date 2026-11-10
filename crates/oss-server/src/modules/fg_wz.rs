@@ -7,7 +7,7 @@
 //! they were dropped (`Drop*`, `Neut*`, `TK*`, `Safe*` settings). When every
 //! flag on the map belongs to one team for `Flag:WinDelay` ticks, that team
 //! wins: [`WarzoneWin`] handlers add points (1000 if none do) and the game
-//! resets. Not yet ported: no-flag regions.
+//! resets.
 
 use std::cell::Cell;
 use std::sync::Arc;
@@ -42,24 +42,41 @@ impl Event for WarzoneWin {
 }
 
 #[derive(Clone)]
-struct Settings {
-    spawn_x: i32,
-    spawn_y: i32,
-    spawn_r: i32,
-    drop_r: i32,
-    friendly_transfer: bool,
-    carry_flags: i32,
-    drop_owned: bool,
-    drop_center: bool,
-    neut_owned: bool,
-    neut_center: bool,
-    tk_owned: bool,
-    tk_center: bool,
-    safe_owned: bool,
-    safe_center: bool,
-    win_delay: u64,
-    min: usize,
-    max: usize,
+pub struct Settings {
+    /// `Flag:SpawnX`.
+    pub spawn_x: i32,
+    /// Parsed from `[Flag]`.
+    pub spawn_y: i32,
+    /// Parsed from `[Flag]`.
+    pub spawn_r: i32,
+    /// Parsed from `[Flag]`.
+    pub drop_r: i32,
+    /// Parsed from `[Flag]`.
+    pub friendly_transfer: bool,
+    /// Parsed from `[Flag]`.
+    pub carry_flags: i32,
+    /// Parsed from `[Flag]`.
+    pub drop_owned: bool,
+    /// Parsed from `[Flag]`.
+    pub drop_center: bool,
+    /// Parsed from `[Flag]`.
+    pub neut_owned: bool,
+    /// Parsed from `[Flag]`.
+    pub neut_center: bool,
+    /// Parsed from `[Flag]`.
+    pub tk_owned: bool,
+    /// Parsed from `[Flag]`.
+    pub tk_center: bool,
+    /// Parsed from `[Flag]`.
+    pub safe_owned: bool,
+    /// Parsed from `[Flag]`.
+    pub safe_center: bool,
+    /// Parsed from `[Flag]`.
+    pub win_delay: u64,
+    /// Parsed from `[Flag]`.
+    pub min: usize,
+    /// Parsed from `[Flag]`.
+    pub max: usize,
 }
 
 impl Settings {
@@ -101,6 +118,45 @@ struct Wz {
     current: usize,
     neuts: Vec<usize>,
     win_timer: Option<TimerId>,
+}
+
+/// The arena's parsed `[Flag]` settings.
+pub fn settings(zone: &Zone, a: ArenaId) -> Option<Settings> {
+    zone.arenas.get(a)?.ext.get::<Wz>().map(|w| w.sets.clone())
+}
+
+/// How many flags the game is currently trying to keep out.
+pub fn current(zone: &Zone, a: ArenaId) -> usize {
+    zone.arenas
+        .get(a)
+        .and_then(|x| x.ext.get::<Wz>())
+        .map_or(0, |w| w.current)
+}
+
+/// Sets that count, standing in for whatever the spawn timer had done.
+pub fn set_current(zone: &mut Zone, a: ArenaId, n: usize) {
+    if let Some(w) = wz(zone, a) {
+        w.current = n;
+    }
+}
+
+/// Flags neuted and waiting to respawn where they were lost.
+pub fn neuts(zone: &Zone, a: ArenaId) -> Vec<usize> {
+    zone.arenas
+        .get(a)
+        .and_then(|x| x.ext.get::<Wz>())
+        .map(|w| w.neuts.clone())
+        .unwrap_or_default()
+}
+
+/// Runs the spawn timer now (ASSS `fg_wz.py`'s own timer).
+pub fn run_spawn_timer(zone: &mut Zone, a: ArenaId) {
+    spawn_timer(zone, a);
+}
+
+/// Runs the win check now.
+pub fn run_check_win(zone: &mut Zone, a: ArenaId) {
+    check_win(zone, a);
 }
 
 fn wz(zone: &mut Zone, a: ArenaId) -> Option<&mut Wz> {
@@ -159,7 +215,13 @@ fn spawn_flag(
                     f.state == FlagState::OnMap && i32::from(f.x) == x && i32::from(f.y) == y
                 })
         });
-        if !clash {
+        // a region with a NOFLAGS chunk refuses flags as firmly as another
+        // flag already standing there does
+        let no_flags = map.as_ref().is_some_and(|m| {
+            m.regions_at(x, y)
+                .any(|i| m.regions.get(i).is_some_and(|r| r.no_flag_drops))
+        });
+        if !clash && !no_flags {
             placed = Some((x, y));
             break;
         }

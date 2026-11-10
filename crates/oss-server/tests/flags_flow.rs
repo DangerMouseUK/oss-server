@@ -36,7 +36,10 @@ impl H {
         let mut src = MemSource::new([
             ("conf/global.conf", ""),
             ("conf/passwd.conf", "[General]\nAllowUnknown = yes\n"),
-            ("conf/groupdef.conf", "[default]\n"),
+            (
+                "conf/groupdef.conf",
+                "[default]\ncmd_flaginfo = 1\ncmd_neutflag = 1\ncmd_moveflag = 1\n",
+            ),
             ("conf/staff.conf", ""),
             ("arenas/(default)/arena.conf", arena_conf),
         ]);
@@ -136,6 +139,26 @@ impl H {
 
     fn carried(&self, p: PlayerId) -> i16 {
         self.zone.players.get(p).map_or(-1, |p| p.flags_carried)
+    }
+
+    /// Types a command in public chat and returns what came back.
+    fn cmd(&mut self, p: PlayerId, text: &str) -> Vec<String> {
+        self.take(p);
+        let mut buf = Vec::new();
+        c2s::C2SChat(s2c::ChatBody {
+            kind: oss_proto::common::chat_type::PUBLIC,
+            sound: 0,
+            pid: 0,
+            text: text.as_bytes().to_vec(),
+        })
+        .encode(&mut buf);
+        self.send(p, &buf);
+        of(&self.take(p), s2c::kind::CHAT)
+            .iter()
+            .map(|c| {
+                String::from_utf8_lossy(&s2c::S2CChat::decode(c).expect("chat").0.text).into_owned()
+            })
+            .collect()
     }
 }
 
@@ -638,4 +661,64 @@ fn regions() {
     h.tick(60);
     h.at(a, 50, 50);
     assert_eq!(*seen.lock().expect("lock"), vec![(0, true), (0, false)]);
+}
+
+#[test]
+fn flag_commands() {
+    let conf = "[Modules]\nAttachModules = fg_wz\n\
+        [Flag]\nFlagCount = 2\nSpawnX = 512\nSpawnY = 512\nSpawnRadius = 5\nDropRadius = 1\n\
+        [Team]\nDesiredTeams = 2\n";
+    let mut h = H::new(conf, None);
+    let a = h.player("alpha", 0);
+    let arena = h.arena(a);
+    h.tick(500);
+
+    // ?flaginfo: both flags are on the map near the spawn
+    let out = h.cmd(a, "?flaginfo");
+    assert_eq!(out.len(), 2, "{out:?}");
+    for (i, line) in out.iter().enumerate() {
+        // the spawn is random within its radius, so only the shape is fixed
+        assert!(
+            line.starts_with(&format!("flag {i}: on the map at ")),
+            "{line}"
+        );
+        assert!(line.contains("(5"), "{line}");
+        assert!(line.ends_with("owned by freq -1"), "{line}");
+    }
+
+    // ?moveflag puts flag 1 somewhere else and gives it to a freq
+    h.cmd(a, "?moveflag 1 3 200 300");
+    let f = flagcore::get_flag(&h.zone, arena, 1).expect("flag");
+    assert_eq!((f.x, f.y, f.freq), (200, 300, 3));
+    let out = h.cmd(a, "?flaginfo");
+    assert!(
+        out[1].starts_with("flag 1: on the map at D6 (200,300), owned by freq 3"),
+        "{out:?}"
+    );
+    // a bad freq changes nothing
+    h.cmd(a, "?moveflag 1 99999 100 100");
+    let f = flagcore::get_flag(&h.zone, arena, 1).expect("flag");
+    assert_eq!((f.x, f.y, f.freq), (200, 300, 3));
+
+    // ?neutflag takes it off the map
+    h.cmd(a, "?neutflag 1");
+    assert_eq!(
+        flagcore::get_flag(&h.zone, arena, 1).map(|f| f.state),
+        Some(FlagState::None)
+    );
+    // ...and a carried flag needs "force"
+    h.at(a, 300, 300);
+    h.touch(a, 0);
+    assert_eq!(h.carried(a), 1);
+    let out = h.cmd(a, "?neutflag 0");
+    assert!(
+        out.iter()
+            .any(|t| t == "neutflag: that flag isn't currently on the map"),
+        "{out:?}"
+    );
+    h.cmd(a, "?neutflag 0 force");
+    assert_eq!(h.carried(a), 0);
+
+    let out = h.cmd(a, "?neutflag 7");
+    assert!(out.iter().any(|t| t == "neutflag: bad flag id"), "{out:?}");
 }

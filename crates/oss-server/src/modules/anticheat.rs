@@ -32,7 +32,8 @@
 //!   spawns with (each item's maximum when `InitialBounty` hands out random
 //!   prizes the server can't replay), plus prizes it saw (greens, `?prize`;
 //!   a multiprize makes every item unknown again), less the uses it saw.
-//!   Rockets and portals are never seen in use, so they aren't counted.
+//!   Rockets are never seen in use, so they aren't counted; a portal is
+//!   spent by a flash jump that nothing else explains (below).
 //!
 //! **Physics checks** (`MotionChecks`, on when the module is enabled), using
 //! `oss-sim`'s validation (the same physics the client runs): between two
@@ -49,11 +50,22 @@
 //! at least three seconds. Teleport, speed and rotation
 //! count only `MotionMargin` percent past their bound, energy `EnergyMargin`
 //! percent of maximum energy past it. Jumps the server caused or can't see
-//! are excused: respawns, ship changes, `?warpto`, warp prizes, turrets, and
-//! flash-bit jumps backed by evidence (a portal the ship may hold, or a
-//! warp's energy signature: the client sets the flash bit itself, so on its
-//! own it explains nothing); refills after deaths, prizes and ship resets;
-//! enemy repels nearby; free shots under Super.
+//! are excused: respawns, ship changes, `?warpto`, warp prizes and turrets;
+//! refills after deaths, prizes and ship resets; enemy repels nearby; free
+//! shots under Super.
+//!
+//! **The flash bit buys one portal, not a free pass.** The client sets it
+//! itself, so the motion is judged with it cleared and the bit can only
+//! excuse a jump that would otherwise count. Such a jump is excused when the
+//! energy matches a warp (oss-sim's signature) *and* the ship came out in a
+//! spawn area (`Spawn:TeamN-X/Y/Radius`, else what `Radar:RadarMode` implies,
+//! else the middle of the map within `Misc:WarpRadiusLimit`); failing that it
+//! spends one of the portals the server's own item bound says the ship may
+//! hold, and counts once the ship is out of portals until it picks up more.
+//! A ship can therefore make at most `PortalMax` unexplained flash jumps
+//! between prize pickups, rather than unlimited ones. Every excused jump is
+//! logged (`target: "anticheat"`, info) even though it costs no trust, so a
+//! wall hack that spends a portal a hop still leaves a trail.
 //!
 //! **Trust.** Each finding lowers the player's trust (100 = clean) by its
 //! check's weight and raises [`CheatSuspected`]. Trust recovers by
@@ -273,10 +285,84 @@ struct ShipLimits {
     repel_distance: u32,
     settings: oss_sim::ShipSettings,
     motion: Limits,
+    /// where a warp to spawn may land
+    spawns: SpawnAreas,
     /// spawning hands out random prizes the server can't replay
     random_spawn: bool,
     items_max: oss_sim::Items,
 }
+
+/// Where a ship warped to spawn may come out: the arena's spawn areas, in
+/// tiles, as the client works them out (`Spawn:TeamN-X/Y/Radius`, else the
+/// halves or quarters `Radar:RadarMode` implies, else the middle of the map
+/// within `Misc:WarpRadiusLimit`).
+///
+/// Any team's area counts, not just the player's: which freq spawns where
+/// depends on the radar mode and on how many areas the zone set, and being
+/// generous about *which* spawn only matters when the energy already looks
+/// like a warp.
+#[derive(Debug, Clone, Copy)]
+struct SpawnAreas {
+    /// centre x, centre y, radius, in tiles
+    areas: [(i32, i32, i32); 4],
+    n: usize,
+}
+
+impl SpawnAreas {
+    fn new(cs: &oss_proto::ClientSettings, s: &oss_sim::ArenaSettings) -> Self {
+        let mut areas = [(0, 0, 0); 4];
+        let mut n = 0;
+        let middle = |v: u16| if v == 0 { 512 } else { i32::from(v) };
+        for sp in &cs.spawns {
+            if sp.x() != 0 || sp.y() != 0 || sp.radius() != 0 {
+                areas[n] = (middle(sp.x()), middle(sp.y()), i32::from(sp.radius()));
+                n += 1;
+            }
+        }
+        if n > 0 {
+            return Self { areas, n };
+        }
+        // No spawn area set: the client puts each team at the edge of its
+        // half or quarter of the map, by radar mode.
+        let side = |bit: i32| (bit & 1) * 0x300 + 0x80;
+        match cs.radar_mode() {
+            1 | 3 => {
+                areas[0] = (side(0), 0x180, 0x80);
+                areas[1] = (side(1), 0x180, 0x80);
+                n = 2;
+            }
+            2 | 4 => {
+                for (i, a) in areas.iter_mut().enumerate() {
+                    let f = i as i32;
+                    *a = (side(f), side(f / 2), 0x80);
+                }
+                n = 4;
+            }
+            _ => {
+                let r = s.warp_radius_limit.clamp(3, 512) as i32;
+                areas[0] = (512, 512, r);
+                n = 1;
+            }
+        }
+        Self { areas, n }
+    }
+
+    /// Whether a point (in pixels) is inside a spawn area, with `slack` tiles
+    /// of room for the client's search for a free tile near the spawn.
+    fn contains(&self, x: i32, y: i32, slack: i32) -> bool {
+        let (tx, ty) = (x.div_euclid(16), y.div_euclid(16));
+        self.areas[..self.n].iter().any(|&(cx, cy, r)| {
+            let (dx, dy) = (i64::from(tx - cx), i64::from(ty - cy));
+            let reach = i64::from(r + slack);
+            dx * dx + dy * dy <= reach * reach
+        })
+    }
+}
+
+/// Tiles of room allowed around a spawn area when judging a warp to spawn:
+/// the client looks for a free tile near the spawn point and takes the first
+/// one it finds, so landing a little outside is normal.
+const SPAWN_SLACK: i32 = 16;
 
 /// Something the server did (or can't see) that excuses the next sample.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -398,6 +484,7 @@ fn limits_for(zone: &Zone, p: PlayerId, arena: ArenaId, ship: Ship) -> Option<Sh
         repel_distance: s.repel_distance,
         settings: ss,
         motion: Limits::new(&ss, &s),
+        spawns: SpawnAreas::new(&cs, &s),
         random_spawn: ss.initial_bounty > 0 && s.prize_weight_total() > 0,
         items_max: oss_sim::Items {
             repels: ss.repel_max,
@@ -859,6 +946,48 @@ fn shot_cost(lim: &ShipLimits, fired: Fired, flagger: bool) -> i32 {
 /// sample, so the shots fired in between can be counted.
 const ENERGY_SPAN: u32 = 300;
 
+/// Spends one of the portals the server believes the ship may still hold.
+/// `None` when it can hold none; `Some(left)` when it could, with what is
+/// left after (`Some(None)` when the server has lost count of the ship's
+/// items — a multiprize — where every other item check is permissive too).
+fn spend_portal(zone: &mut Zone, p: PlayerId) -> Option<Option<u8>> {
+    let a = state(zone, p)?;
+    match a.bound.as_mut() {
+        None => Some(None),
+        Some(b) if b.items.portals > 0 => {
+            b.items.portals -= 1;
+            Some(Some(b.items.portals))
+        }
+        Some(_) => None,
+    }
+}
+
+/// Evidence for a flash-bit jump that the motion check would otherwise
+/// count. The client sets the bit itself, so it buys nothing on its own:
+/// either the energy matches a warp *and* the ship came out in a spawn area,
+/// or the jump costs one of the portals the ship may hold. `None` when
+/// nothing backs the claim, and the jump counts.
+fn flash_excuse(
+    zone: &mut Zone,
+    p: PlayerId,
+    lim: &ShipLimits,
+    map: &MotionMap<'_>,
+    prev: &Sample,
+    next: &Sample,
+    context: &Context,
+) -> Option<String> {
+    // the same pair as the motion check, but with the client's flash bit:
+    // `flash_explained` is then oss-sim's warp-energy signature
+    let v = oss_sim::check_motion(&lim.motion, map, prev, next, context, &Tolerance::default());
+    if v.flash_explained && lim.spawns.contains(next.x, next.y, SPAWN_SLACK) {
+        return Some("a warp to spawn".to_owned());
+    }
+    Some(match spend_portal(zone, p)? {
+        Some(left) => format!("a portal, {left} left"),
+        None => "items the server has lost count of".to_owned(),
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 fn motion_checks(
     zone: &mut Zone,
@@ -916,8 +1045,6 @@ fn motion_checks(
     });
     a.clock.observe(next.time, server_now);
     let (jumped, refilled) = (a.jumped, a.refilled);
-    // the server's own record of what the ship may hold, never the client's
-    let portal_held = a.bound.is_some_and(|b| b.items.portals > 0);
     let anchor = a.anchor;
     let (anchor_spent, anchor_refilled) = (a.anchor_spent, a.anchor_refilled || refilled);
     if !reordered {
@@ -937,25 +1064,66 @@ fn motion_checks(
         // their energy readings, so none count between consecutive samples
         spent: 0,
         max_ticks,
-        portal_held,
+        // the flash bit is judged here, not by oss-sim: the server has to
+        // spend a portal for it (see `flash_excuse`)
+        portal_held: false,
+    };
+    // The client sets the flash bit itself, so the motion is judged with it
+    // cleared first; it can then only excuse a jump that needs excusing.
+    let flashed = next.status & oss_proto::position::status::FLASH != 0;
+    let honest = Sample {
+        status: next.status & !oss_proto::position::status::FLASH,
+        ..next
     };
     let verdict = oss_sim::check_motion(
         &lim.motion,
         &map,
         &prev,
-        &next,
+        &honest,
         &context,
         &Tolerance::default(),
     );
-    let mut findings: Vec<(Check, String)> = Vec::new();
     let over = 100 + cfg.motion_margin;
+    // A jump worth excusing: one that would otherwise count against the
+    // player. A shorter one costs nothing, so it costs no portal either.
+    let jump_counts = |f: &Finding| match *f {
+        Finding::Teleport { percent, .. } => percent > over,
+        Finding::ThroughWall | Finding::InsideWall => true,
+        _ => false,
+    };
+    let excuse = if flashed && verdict.findings().any(|f| jump_counts(&f)) {
+        flash_excuse(zone, p, lim, &map, &prev, &next, &context)
+    } else {
+        None
+    };
+    if let Some(e) = &excuse {
+        let name = zone
+            .players
+            .get(p)
+            .map(|x| x.name.clone())
+            .unwrap_or_default();
+        // Excused, but never silent: a wall hack that spends portals for
+        // every hop is still a pattern, and this is where it shows.
+        tracing::info!(
+            target: "anticheat",
+            pid = p.0,
+            %name,
+            x = next.x,
+            y = next.y,
+            "flash jump excused: {e}",
+        );
+    }
+    let mut findings: Vec<(Check, String)> = Vec::new();
     for f in verdict.findings() {
+        // An excused jump explains the distance, the wall it crossed and
+        // the heading it came out on, and nothing else.
+        if excuse.is_some() && (jump_counts(&f) || matches!(f, Finding::Rotation { .. })) {
+            continue;
+        }
         let found = match f {
-            // with the flash bit only when no evidence backed it (oss-sim
-            // accepts a portal the ship may hold, or a warp's energy)
-            Finding::Teleport { percent, flash } if percent > over || flash => Some((
+            Finding::Teleport { percent, .. } if percent > over => Some((
                 Check::Teleport,
-                if flash {
+                if flashed {
                     format!(
                         "jumped {percent}% of the ship's reach with the flash bit but no portal or warp"
                     )
@@ -1004,7 +1172,9 @@ fn motion_checks(
                 refilled: anchor_refilled,
                 spent: anchor_spent,
                 max_ticks: span_cap,
-                portal_held,
+                // only energy is judged here, and `jumped` already waives
+                // everything the flash bit could
+                portal_held: false,
             };
             let v = oss_sim::check_motion(
                 &lim.motion,

@@ -1,0 +1,128 @@
+# Banners from ASSS 1.4.4 src/core/banners.c (compiled unmodified).
+#   seat <pairs>   one pair per player: 'w' in a ship or 's' in spec, then where
+#      they are -- 'p' playing in this arena, 'c' connected but not yet playing,
+#      'o' playing in a different arena, 'n' with no arena at all
+#   c2s <player> fill=<byte> len=<n>   fed the module a C2S 0x19 of that length,
+#      carrying a 96-byte banner of that one repeated byte
+#   setbanner <player> fill=<byte> frombiller=<0|1>   called Ibanners::SetBanner
+#      directly, which is how the billing module installs a banner
+#   enter <player>   ran the PA_ENTERARENA player action
+#   pkt arena|one [<player>] <type> pid=<n> len=<n> banner=<first>..<last>
+#      each packet sent, in order; 'arena' is a broadcast and 'one' names the
+#      single recipient. The banner is 96 identical bytes, so its first and last
+#      byte identify whose it is without printing all 96.
+#   cb <name>      each callback fired, in order
+#   chat <text>    each chat line
+#   state <player>:<status>/<first banner byte>...   the module's per-player data
+#      afterwards. status is 0 no banner, 1 held but not shown, 2 shown.
+#
+# Rules these records pin:
+#
+# 1. The status is a THREE-state value, not a boolean. A banner set before the
+#    player reaches S_PLAYING is stored at status 1 and nothing is sent; it is only
+#    promoted to 2 and broadcast when the player enters an arena. A port with a
+#    simple has-banner flag loses the held-but-not-shown state and will either send
+#    too early or drop a biller banner entirely.
+# 2. SetBanner's `frombiller` argument does not change what is SENT, only whether
+#    the CB_SET_BANNER callback fires: a banner from the biller is broadcast but
+#    announced to nobody (callothers = !frombiller). PA_ENTERARENA likewise passes
+#    callothers = 0, so entering an arena re-broadcasts a banner without firing the
+#    callback again.
+# 3. The C2S path refuses a banner from a player who is NOT in spectator mode, with
+#    a chat message, and refuses one from a player with no arena, silently. Both
+#    checks come BEFORE the banner is stored, so a refused packet leaves the
+#    previous banner and status untouched.
+# 4. The length check is exact equality with sizeof(struct C2SBanner) = 97, so a
+#    packet one byte short or one byte long is dropped, not truncated or padded.
+# 5. On arena entry the player's own banner is broadcast to the whole arena FIRST,
+#    and then every other showing player's banner is sent to that one player
+#    individually -- so the entering player receives N-1 unicast packets and the
+#    arena receives one broadcast. Players in another arena, not yet playing, or at
+#    status 1 are skipped, and the entering player is skipped in his own loop.
+# 6. ASSS 1.4.4's CheckBanner is a stub that returns TRUE for everyone, so status 1
+#    always becomes 2. The denial path exists and is never taken; a port that makes
+#    banners conditional is adding behaviour, not matching it.
+seat spwpscsn
+state 0:0/00 1:0/00 2:0/00 3:0/00
+c2s 0 fill=a1 len=97
+state 0:2/a1 1:0/00 2:0/00 3:0/00
+pkt arena 1f pid=0 len=99 banner=a1..a1
+cb setbanner
+c2s 1 fill=b2 len=97
+state 0:2/a1 1:0/00 2:0/00 3:0/00
+chat You must be in spectator mode to set a banner.
+c2s 3 fill=c3 len=97
+state 0:2/a1 1:0/00 2:0/00 3:0/00
+c2s 0 fill=d4 len=96
+state 0:2/a1 1:0/00 2:0/00 3:0/00
+c2s 0 fill=d4 len=98
+state 0:2/a1 1:0/00 2:0/00 3:0/00
+c2s 0 fill=e5 len=97
+state 0:2/e5 1:0/00 2:0/00 3:0/00
+pkt arena 1f pid=0 len=99 banner=e5..e5
+cb setbanner
+seat spspsc
+state 0:0/00 1:0/00 2:0/00
+setbanner 0 fill=11 frombiller=1
+state 0:2/11 1:0/00 2:0/00
+pkt arena 1f pid=0 len=99 banner=11..11
+setbanner 1 fill=22 frombiller=0
+state 0:2/11 1:2/22 2:0/00
+pkt arena 1f pid=1 len=99 banner=22..22
+cb setbanner
+setbanner 2 fill=33 frombiller=1
+state 0:2/11 1:2/22 2:1/33
+enter 2
+state 0:2/11 1:2/22 2:2/33
+pkt arena 1f pid=2 len=99 banner=33..33
+pkt one 2 1f pid=0 len=99 banner=11..11
+pkt one 2 1f pid=1 len=99 banner=22..22
+seat spspspsp
+state 0:0/00 1:0/00 2:0/00 3:0/00
+setbanner 0 fill=41 frombiller=0
+state 0:2/41 1:0/00 2:0/00 3:0/00
+pkt arena 1f pid=0 len=99 banner=41..41
+cb setbanner
+setbanner 1 fill=42 frombiller=0
+state 0:2/41 1:2/42 2:0/00 3:0/00
+pkt arena 1f pid=1 len=99 banner=42..42
+cb setbanner
+setbanner 3 fill=43 frombiller=1
+state 0:2/41 1:2/42 2:0/00 3:2/43
+pkt arena 1f pid=3 len=99 banner=43..43
+# p2 has no banner at all, so entering sends him three, not four
+enter 2
+state 0:2/41 1:2/42 2:0/00 3:2/43
+pkt one 2 1f pid=0 len=99 banner=41..41
+pkt one 2 1f pid=1 len=99 banner=42..42
+pkt one 2 1f pid=3 len=99 banner=43..43
+seat spscsosp
+state 0:0/00 1:0/00 2:0/00 3:0/00
+setbanner 0 fill=51 frombiller=0
+state 0:2/51 1:0/00 2:0/00 3:0/00
+pkt arena 1f pid=0 len=99 banner=51..51
+cb setbanner
+setbanner 1 fill=52 frombiller=0
+state 0:2/51 1:1/52 2:0/00 3:0/00
+setbanner 2 fill=53 frombiller=0
+state 0:2/51 1:1/52 2:2/53 3:0/00
+pkt arena 1f pid=2 len=99 banner=53..53
+cb setbanner
+# only p0's banner reaches the entering player: p1 is still at status 1
+# and p2 is in a different arena
+enter 3
+state 0:2/51 1:1/52 2:2/53 3:0/00
+pkt one 3 1f pid=0 len=99 banner=51..51
+seat spsp
+state 0:0/00 1:0/00
+setbanner 0 fill=61 frombiller=0
+state 0:2/61 1:0/00
+pkt arena 1f pid=0 len=99 banner=61..61
+cb setbanner
+# re-entering rebroadcasts the same banner, without the callback
+enter 0
+state 0:2/61 1:0/00
+pkt arena 1f pid=0 len=99 banner=61..61
+enter 0
+state 0:2/61 1:0/00
+pkt arena 1f pid=0 len=99 banner=61..61

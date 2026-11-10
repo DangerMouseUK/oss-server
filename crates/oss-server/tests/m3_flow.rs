@@ -37,7 +37,10 @@ impl H {
         let src = MemSource::new([
             ("conf/global.conf", "[Security]\nSecurityKickoff = 1\n"),
             ("conf/passwd.conf", "[General]\nAllowUnknown = yes\n"),
-            ("conf/groupdef.conf", "[default]\ncmd_go = 1\n"),
+            (
+                "conf/groupdef.conf",
+                "[default]\ncmd_go = 1\ncmd_endinterval = 1\ncmd_recyclearena = 1\n",
+            ),
             ("conf/staff.conf", ""),
             ("arenas/(default)/arena.conf", arena),
         ]);
@@ -464,4 +467,65 @@ fn ship_change_limit() {
     h.tick(3000);
     h.send(a, &[c2s::kind::SET_SHIP, 3]);
     assert_eq!(h.zone.players.get(a).map(|p| p.ship.0), Some(3));
+}
+
+/// Types a command in public chat.
+fn cmd(h: &mut H, p: PlayerId, text: &str) {
+    let mut buf = Vec::new();
+    c2s::C2SChat(s2c::ChatBody {
+        kind: oss_proto::common::chat_type::PUBLIC,
+        sound: 0,
+        pid: 0,
+        text: text.as_bytes().to_vec(),
+    })
+    .encode(&mut buf);
+    h.send(p, &buf);
+}
+
+/// `?endinterval reset` starts the scores again; the forever interval keeps
+/// its own total.
+#[test]
+fn endinterval_resets_scores() {
+    let mut h = H::new();
+    let (a, _) = h.player("alpha");
+    let (b, _) = h.player("bravo");
+    h.send(a, &[c2s::kind::SET_SHIP, 0]);
+    h.send(b, &[c2s::kind::SET_SHIP, 1]);
+    h.position(a, 500, weapon_type::BULLET);
+    h.die(b, a, 7);
+    assert_eq!(h.zone.players.get(a).map(|p| p.score.kill_points), Some(7));
+
+    cmd(&mut h, a, "?endinterval reset");
+    h.tick(20);
+    assert_eq!(h.zone.players.get(a).map(|p| p.score.kill_points), Some(0));
+
+    // a bad argument changes nothing
+    h.die(b, a, 3);
+    cmd(&mut h, a, "?endinterval nosuchinterval");
+    h.tick(20);
+    assert_eq!(h.zone.players.get(a).map(|p| p.score.kill_points), Some(3));
+    cmd(&mut h, a, "?endinterval");
+    h.tick(20);
+    assert_eq!(h.zone.players.get(a).map(|p| p.score.kill_points), Some(3));
+}
+
+/// `?recyclearena` takes the arena down and puts everyone back in it.
+#[test]
+fn recyclearena_puts_everyone_back() {
+    let mut h = H::new();
+    let (a, _) = h.player("alpha");
+    let (b, _) = h.player("bravo");
+    let arena = h.zone.players.get(a).and_then(|p| p.arena).expect("arena");
+    cmd(&mut h, a, "?recyclearena");
+    // the arena reaper runs every 170 ticks, so give it a couple of rounds
+    h.tick(400);
+    // and back in an arena of the same name, both of them
+    for p in [a, b] {
+        let in_arena = h.zone.players.get(p).and_then(|x| x.arena).expect("arena");
+        assert_eq!(
+            h.zone.arenas.get(in_arena).map(|x| x.name.clone()),
+            Some("0".to_owned())
+        );
+        assert_eq!(in_arena, arena, "the same arena id, built again");
+    }
 }

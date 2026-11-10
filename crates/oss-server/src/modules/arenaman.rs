@@ -293,6 +293,57 @@ pub fn reload_config(zone: &mut Zone) -> usize {
     n
 }
 
+/// ASSS `RecycleArena`: sends everyone out of the arena and straight back
+/// in, so the arena is destroyed and built again with its config re-read.
+/// Returns false if the arena isn't running or holds a fake player, which
+/// has nowhere to go back to.
+pub fn recycle_arena(zone: &mut Zone, arena: ArenaId) -> bool {
+    if zone.arenas.get(arena).map(|a| a.status) != Some(ArenaStatus::Running) {
+        return false;
+    }
+    let here: Vec<(PlayerId, bool)> = zone
+        .players
+        .in_arena(arena)
+        .map(|p| {
+            (
+                p.id,
+                matches!(p.kind, ClientKind::Vie | ClientKind::Continuum),
+            )
+        })
+        .collect();
+    if here.iter().any(|&(p, standard)| {
+        !standard
+            && zone
+                .players
+                .get(p)
+                .is_none_or(|x| x.kind != ClientKind::Chat)
+    }) {
+        tracing::warn!(target: "arenaman", arena = arena.0, "can't recycle an arena with fake players");
+        return false;
+    }
+    for (p, standard) in here {
+        if standard {
+            // the "you are" packet makes the client leave the arena
+            let mut buf = Vec::with_capacity(4);
+            oss_proto::s2c::PlayerId {
+                pid: p.0 as i16,
+                arena: None,
+            }
+            .encode(&mut buf);
+            zone.send(p, &buf, SendFlags::RELIABLE);
+        }
+        leave_arena(zone, p);
+        if let Some(x) = zone.players.get_mut(p) {
+            x.new_arena = Some(arena);
+        }
+    }
+    if let Some(a) = zone.arenas.get_mut(arena) {
+        a.status = ArenaStatus::Closing;
+        a.ext.get_or_default::<ArenaData>().resurrect = true;
+    }
+    true
+}
+
 /// One config file was changed in place (`?setg`, `?seta`): point the arenas
 /// that were using it at the new one and tell them, as a reload would.
 pub fn config_updated(

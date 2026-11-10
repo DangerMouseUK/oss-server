@@ -152,6 +152,64 @@ fn c_uptime(zone: &mut Zone, inv: &Invocation<'_>) {
     );
 }
 
+fn c_recyclearena(zone: &mut Zone, inv: &Invocation<'_>) {
+    let ok = inv
+        .arena
+        .is_some_and(|a| super::arenaman::recycle_arena(zone, a));
+    if !ok {
+        message(
+            zone,
+            inv.sender,
+            "Arena recycle failed; check the log for details.",
+        );
+    }
+}
+
+fn c_endinterval(zone: &mut Zone, inv: &Invocation<'_>) {
+    use super::persist::Interval;
+    let (mut interval, mut group, mut want_group) = (None, None, false);
+    for word in inv.params.split_whitespace() {
+        if want_group {
+            group = Some(word.to_owned());
+            want_group = false;
+            continue;
+        }
+        match word {
+            "-g" => group = Some(String::new()),
+            "-a" => want_group = true,
+            "game" => interval = Some(Interval::Game),
+            "reset" => interval = Some(Interval::Reset),
+            "maprotation" => interval = Some(Interval::MapRotation),
+            _ => {
+                message(zone, inv.sender, &format!("Bad argument: {word}"));
+                return;
+            }
+        }
+    }
+    if want_group {
+        message(
+            zone,
+            inv.sender,
+            "You must specify an arena group name after -a.",
+        );
+        return;
+    }
+    let Some(interval) = interval else {
+        message(zone, inv.sender, "You must specify an interval to reset.");
+        return;
+    };
+    match group {
+        // -g: the global scope, every group at once
+        Some(g) if g.is_empty() => super::persist::end_interval(zone, None, interval),
+        Some(g) => super::persist::end_named_interval(zone, &g, interval),
+        None => {
+            if let Some(a) = inv.arena {
+                super::persist::end_interval(zone, Some(a), interval);
+            }
+        }
+    }
+}
+
 fn c_zone(zone: &mut Zone, inv: &Invocation<'_>) {
     let name = zone
         .cfg
@@ -1227,6 +1285,16 @@ const COMMANDS: &[(&str, Handler, &str)] = &[
         "Args: none\nRe-reads changed config files.",
     ),
     ("zone", c_zone, "Args: none\nShows the name of this zone."),
+    (
+        "recyclearena",
+        c_recyclearena,
+        "Targets: none\nArgs: none\nRecycles the arena: everyone is sent out and straight back in, so the arena is destroyed and built again with its modules reattached. Nobody is kicked off the server.",
+    ),
+    (
+        "endinterval",
+        c_endinterval,
+        "Targets: none\nArgs: [-g] [-a <arena group>] <game|reset|maprotation>\nEnds a scoring interval, so those scores start again. -g does it everywhere, -a for one arena group, otherwise this arena's.",
+    ),
     (
         "owner",
         c_owner,

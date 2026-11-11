@@ -533,7 +533,9 @@ pub fn player_data(p: &Player) -> PlayerData {
     PlayerData {
         ship: p.ship.0 as i8,
         accept_audio: u8::from(p.accept_audio),
-        name: FixedStr::new(&to_latin1(&p.name)),
+        // the name other clients see, which auth_prefix may have put a
+        // prefix character back on; p.name stays the name of record
+        name: FixedStr::new(&to_latin1(&p.send_name)),
         squad: FixedStr::new(&to_latin1(&p.squad)),
         kill_points: p.score.kill_points,
         flag_points: p.score.flag_points,

@@ -291,6 +291,14 @@ pub fn auth_done(zone: &mut Zone, player: PlayerId, auth: AuthData) {
     let ok = auth_code::is_ok(auth.code);
     let name = auth.name.clone();
     let squad = auth.squad.clone();
+    // ASSS copies `sendname` into the player-data packet and `name` into the
+    // player; an auth module that leaves `sendname` empty means the two are
+    // the same
+    let send_name = if auth.send_name.is_empty() {
+        name.clone()
+    } else {
+        auth.send_name.clone()
+    };
     if let Some(d) = data(zone, player) {
         d.auth = Some(auth);
     }
@@ -302,6 +310,7 @@ pub fn auth_done(zone: &mut Zone, player: PlayerId, auth: AuthData) {
             .filter(|&o| o != player);
         if let Some(p) = zone.players.get_mut(player) {
             p.name = truncate(&name, 20);
+            p.send_name = truncate(&send_name, 20);
             p.squad = truncate(&squad, 20);
         }
         match old {

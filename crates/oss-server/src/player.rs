@@ -129,8 +129,17 @@ pub struct Player {
     pub status: PlayerStatus,
     /// Client type.
     pub kind: ClientKind,
-    /// Display name (Latin-1 decoded).
+    /// The player's name (Latin-1 decoded). This is the name of record:
+    /// scores, bans, groups and every staff command use it.
     pub name: String,
+    /// The name other clients are shown, which is normally [`Player::name`]
+    /// (ASSS `AuthData::sendname`, copied into the player-data packet).
+    ///
+    /// An auth module may make the two differ -- `auth_prefix` puts a staff
+    /// member's prefix character back on the front of this one only -- so
+    /// anything a client sees a name in takes this, and anything that
+    /// identifies the player takes [`Player::name`].
+    pub send_name: String,
     /// Squad name.
     pub squad: String,
     /// Remote address, for network players.
@@ -199,6 +208,7 @@ impl Player {
             status: PlayerStatus::Uninitialized,
             kind,
             name: String::new(),
+            send_name: String::new(),
             squad: String::new(),
             addr: None,
             connect_as: None,

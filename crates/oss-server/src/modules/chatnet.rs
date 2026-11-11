@@ -589,11 +589,14 @@ fn on_login(zone: &mut Zone, p: PlayerId, rest: &[u8]) {
 /// everything after it, colons included, is the rest. A line with no colon
 /// has no rest at all -- ASSS passes a null there and turns it into an
 /// empty string before any handler sees it, so the two are the same from
-/// outside.
+/// outside. The command is matched without regard to case.
 pub fn split_command(line: &[u8]) -> (String, Vec<u8>) {
     match line.iter().position(|&b| b == b':') {
-        Some(i) => (latin1(&line[..i]), line[i + 1..].to_vec()),
-        None => (latin1(line), Vec::new()),
+        Some(i) => (
+            latin1(&line[..i]).to_ascii_uppercase(),
+            line[i + 1..].to_vec(),
+        ),
+        None => (latin1(line).to_ascii_uppercase(), Vec::new()),
     }
 }
 

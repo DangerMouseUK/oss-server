@@ -19,6 +19,10 @@
 //! The output is deterministic — fixed pixels, a zero file time — so
 //! re-running it produces the committed file byte for byte, and a reviewer
 //! can check that rather than taking the binary on trust.
+//!
+//! The objects sit at the middle of the map because that is where a
+//! spectator's camera starts: anywhere else and a live run can only count
+//! them, not see them.
 
 use std::path::PathBuf;
 
@@ -27,6 +31,11 @@ use oss_proto::objects::{ObjectData, layer, mode};
 
 /// Tile size in pixels, which is what a map object's coordinates are in.
 const TILE: i16 = 16;
+
+/// Middle tile of a standard 1024x1024 SubSpace map, which is where a
+/// spectator's camera starts. The objects go here so that a live run can
+/// see them drawn rather than only count them.
+const CENTRE: i16 = 512;
 
 /// A 24-bit uncompressed BMP, `w` by `h`, from a pixel function returning
 /// `(r, g, b)`. Rows are stored bottom-up and padded to four bytes, which
@@ -80,12 +89,12 @@ fn main() {
 
     // one object shown the moment the arena's LVZ loads, and one the
     // server drives with ?objon / ?objoff, so the file exercises both
-    let mut always = ObjectData::map(1, 32 * TILE, 32 * TILE);
+    let mut always = ObjectData::map(1, CENTRE * TILE, CENTRE * TILE);
     always.image = 0;
     always.layer = layer::AFTER_TILES;
     always.set_mode(mode::SHOW_ALWAYS);
 
-    let mut driven = ObjectData::map(2, 34 * TILE, 32 * TILE);
+    let mut driven = ObjectData::map(2, (CENTRE + 2) * TILE, CENTRE * TILE);
     driven.image = 1;
     driven.layer = layer::AFTER_TILES;
     driven.set_mode(mode::SERVER_CONTROLLED);

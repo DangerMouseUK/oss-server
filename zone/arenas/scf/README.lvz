@@ -10,7 +10,9 @@ material in it.
 - **Contents:** two 16x16 hollow-square BMPs drawn by that program (a
   green outline and a blue one, black inside, which Continuum treats as
   transparent), and two map objects — id 1 shown always, id 2 left for
-  `?objon` / `?objoff` to drive.
+  `?objon` / `?objoff` to drive. Both sit at the middle of the map, pixel
+  (8192, 8192), because that is where a spectator's camera starts: put
+  anywhere else they can be counted but not seen.
 - **Licence:** GPL-2.0-or-later, like the rest of this repository.
 - **Why it is generated and not borrowed.** The arena-change path needs a
   zone that serves LVZ in one arena and not another. ASSS's sample zone

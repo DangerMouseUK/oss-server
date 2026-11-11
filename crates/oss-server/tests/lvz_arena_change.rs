@@ -394,5 +394,179 @@ mod bundled {
                 .all(oss_proto::objects::ObjectData::is_map_object),
             "both are map objects, so no screen-layout question arises"
         );
+        // they sit at the middle of a 1024x1024 map, where a spectator's
+        // camera starts, so a live run can see them and not only count them
+        for o in &objs.objects {
+            assert!(
+                (o.map_x() - 8192).abs() <= 64 && (o.map_y() - 8192).abs() <= 64,
+                "an object drifted away from the map centre: ({}, {})",
+                o.map_x(),
+                o.map_y()
+            );
+        }
+    }
+}
+
+/// The late-joiner replay, driven against the zone's own LVZ rather than a
+/// synthetic one: the arena remembers what staff changed, and tells the
+/// next player to arrive.
+///
+/// `tests/objects.rs` already covers the mechanism on a fixture. What is
+/// new here is that it runs on the file the zone actually ships, through
+/// the module list the zone actually loads — which is the pair that was
+/// out of step until `scf-demo.lvz` and `modules.conf` were brought
+/// together.
+mod replay {
+    use oss_proto::Packet;
+    use oss_proto::c2s::{self, GoArena, Login};
+    use oss_proto::common::chat_type;
+    use oss_proto::s2c::{self, ChatBody, S2CChat, ToggleObjects};
+    use oss_proto::wire::FixedStr;
+    use oss_server::config::MemSource;
+    use oss_server::modules::auth_file::hash_password;
+    use oss_server::modules::core as core_mod;
+    use oss_server::net::Loopback;
+    use oss_server::player::{ClientKind, PlayerId};
+    use oss_server::runtime::ServerBuilder;
+    use oss_server::time::Ticks;
+    use oss_server::zone::{Zone, ZoneStarted};
+
+    /// The bundled zone with one sysop added. Both files patched here are
+    /// this project's own (ASSS ships an empty staff list too), so nothing
+    /// ASSS-derived is altered to make the test work.
+    fn staffed_default_zone() -> MemSource {
+        let mut src = oss_server::default_zone::source();
+        src.insert(
+            "conf/passwd.conf",
+            format!(
+                "[General]\nAllowUnknown = yes\n[Users]\nalice = {}\n",
+                hash_password("alice", "secret")
+            ),
+        );
+        src.insert("conf/staff.conf", "[(global)]\nalice = sysop\n");
+        src
+    }
+
+    struct R {
+        zone: Zone,
+        lo: Loopback,
+        t: u64,
+    }
+
+    impl R {
+        fn new() -> Self {
+            let mut zone = ServerBuilder::with_source(staffed_default_zone())
+                .build_zone()
+                .expect("zone");
+            zone.res.insert(oss_server::prng::Prng::new(1));
+            zone.fire(&ZoneStarted);
+            Self {
+                zone,
+                lo: Loopback::default(),
+                t: 0,
+            }
+        }
+
+        fn tick(&mut self, n: u64) {
+            for _ in 0..n {
+                self.t += 1;
+                self.zone.set_now(Ticks(self.t));
+                oss_server::timers::run_due(&mut self.zone);
+                self.lo.collect(&mut self.zone);
+            }
+        }
+
+        /// Logs in and enters `scf`.
+        fn join(&mut self, name: &str, pw: &str) -> PlayerId {
+            let p = core_mod::new_connection(&mut self.zone, ClientKind::Vie, None).expect("slot");
+            let mut buf = Vec::new();
+            Login {
+                kind: c2s::kind::LOGIN,
+                flags: 0,
+                name: FixedStr::new(name.as_bytes()),
+                password: FixedStr::new(pw.as_bytes()),
+                machine_id: 1,
+                connect_type: 4,
+                timezone_bias: 0,
+                unknown1: 0,
+                client_version: 134,
+                field444: 444,
+                field555: 555,
+                permission_id: 1,
+                reserved: [0; 12],
+                cont_id: None,
+            }
+            .encode(&mut buf);
+            self.zone.handle_packet(p, &buf);
+            self.tick(10);
+            buf.clear();
+            GoArena {
+                ship: 8,
+                allow_audio: 1,
+                obscenity_filter: 0,
+                x_res: 1024,
+                y_res: 768,
+                arena_type: -3,
+                arena: FixedStr::new(b"scf"),
+                optional_graphics: Some(1),
+            }
+            .encode(&mut buf);
+            self.zone.handle_packet(p, &buf);
+            self.tick(20);
+            p
+        }
+
+        fn cmd(&mut self, p: PlayerId, text: &str) {
+            let mut buf = Vec::new();
+            S2CChat(ChatBody {
+                kind: chat_type::PUBLIC,
+                sound: 0,
+                pid: 0,
+                text: text.as_bytes().to_vec(),
+            })
+            .encode(&mut buf);
+            buf[0] = c2s::kind::CHAT;
+            self.zone.handle_packet(p, &buf);
+            self.tick(5);
+        }
+
+        /// Every object toggle this player was sent.
+        fn toggles(&mut self, p: PlayerId) -> Vec<(u16, bool)> {
+            self.lo
+                .take(p)
+                .into_iter()
+                .map(|(d, _)| d)
+                .filter(|d| d[0] == s2c::kind::TOGGLE_OBJECTS)
+                .flat_map(|d| ToggleObjects::decode(&d).expect("0x35").toggles)
+                .map(|t| (t.id(), t.on()))
+                .collect()
+        }
+    }
+
+    #[test]
+    fn a_late_joiner_is_told_what_staff_turned_on_in_the_bundled_zone() {
+        let mut r = R::new();
+        let alice = r.join("alice", "secret");
+        assert_eq!(
+            r.zone.players.get(alice).map(|p| p.authenticated),
+            Some(true),
+            "alice must be authenticated for her sysop group to apply"
+        );
+        let _ = r.lo.take(alice);
+
+        // object 2 of scf-demo.lvz is the SERVER_CONTROLLED one
+        r.cmd(alice, "?objon 2");
+        assert_eq!(
+            r.toggles(alice),
+            vec![(2, true)],
+            "the arena should have been told to show object 2"
+        );
+
+        // a player arriving afterwards is told the same
+        let bob = r.join("bob", "x");
+        assert!(
+            r.toggles(bob).contains(&(2, true)),
+            "a late joiner was not sent the arena's object state"
+        );
     }
 }

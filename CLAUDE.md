@@ -14,4 +14,12 @@ Rust zone server for SubSpace/Continuum. Licence **GPL-2.0-or-later**. Behaviour
 - Performance budget (PRD): 500 players in one arena at under 20% of one core. Avoid per-packet allocations on hot paths; measure with benches before optimising.
 - Tests use synthetic zones/maps or small hand-made fixtures. The project's default content under `zone/` (the GPL ASSS sample zone: configs and `.lvl` maps) is committed on purpose. Never commit `Continuum.exe` or its DLLs, `scrty*` files, third-party zone downloads, captures, personal data or machine paths.
 - Continuum's security handshake is not implemented here; expose the hooks a private module needs.
-- Before committing: `cargo fmt --all`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`.
+- Before committing: `cargo fmt`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`.
+  **Not `cargo fmt --all` in this repo.** `--all` takes its package list from `cargo metadata`,
+  which includes path dependencies outside this workspace. Here that hands rustfmt 31 source
+  roots in the sibling `../oss-core` checkout and **rewrites oss-core in place**, across a repo
+  boundary and without saying so. It is a silent no-op only while oss-core happens to be
+  rustfmt-clean — it bites exactly when someone is mid-edit there. Plain `cargo fmt` at the
+  workspace root covers this repo's own crates, which is what is wanted. Measured in this repo
+  on 2026-11-11 with `cargo fmt --all --verbose --check`: 31 oss-core roots under `--all`, none
+  under plain `cargo fmt`. Inside oss-core itself `--all` is correct and should stay.

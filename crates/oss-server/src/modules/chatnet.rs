@@ -70,8 +70,17 @@ pub fn send_arena_line(zone: &mut Zone, arena: crate::arena::ArenaId, line: &str
 }
 
 /// Queues a text line for a chat-protocol player, in order with the
-/// translated game packets. Does nothing useful for other players.
+/// translated game packets.
+///
+/// Like ASSS's `SendToOne` this checks the client type and nothing else:
+/// a chat client that has not finished entering, or is in another arena,
+/// is still sent the line. A game client is skipped -- it speaks the
+/// binary protocol, and handing it a line would put a packet on the wire
+/// that means nothing to it.
 pub fn send_line(zone: &mut Zone, p: PlayerId, line: &str) {
+    if zone.players.get(p).map(|pl| pl.kind) != Some(ClientKind::Chat) {
+        return;
+    }
     let mut b = Vec::with_capacity(line.len() + 1);
     // no game packet starts with 0: it marks a ready-made line
     b.push(0);

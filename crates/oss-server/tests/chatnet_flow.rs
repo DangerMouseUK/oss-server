@@ -255,6 +255,24 @@ fn chat_protocol() {
     drop(b);
     expect(&mut h, &mut a, "LEAVING:bob2");
 
+    // a line sent to the whole arena reaches the chat client and nobody
+    // else: a game client speaks the binary protocol, and ASSS's
+    // SendToArena skips it rather than putting a line on its wire
+    let arena = h
+        .zone
+        .players
+        .get(chatter)
+        .and_then(|p| p.arena)
+        .expect("arena");
+    h.lo.take(alice);
+    oss_server::modules::chatnet::send_arena_line(&mut h.zone, arena, "MSG:ARENA:everyone");
+    settle(&mut h, &mut [&mut a]);
+    expect(&mut h, &mut a, "MSG:ARENA:everyone");
+    assert!(
+        h.lo.take(alice).iter().all(|(d, _)| d[0] != 0),
+        "a game client was handed a chat line"
+    );
+
     // a bad login
     let mut c = Client::connect(&h);
     c.send("LOGIN:1:%%%");

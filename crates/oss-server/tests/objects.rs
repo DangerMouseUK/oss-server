@@ -54,6 +54,10 @@ struct H {
 
 impl H {
     fn new(caps: &str) -> Self {
+        Self::new_with(caps, fixture())
+    }
+
+    fn new_with(caps: &str, lvz: Vec<u8>) -> Self {
         let mut src = MemSource::new([
             ("conf/global.conf", "[General]\n".to_owned()),
             (
@@ -64,7 +68,7 @@ impl H {
             ("conf/staff.conf", String::new()),
             ("arenas/(default)/arena.conf", ARENA.to_owned()),
         ]);
-        src.insert("maps/objs.lvz", fixture());
+        src.insert("maps/objs.lvz", lvz);
         let mut modules: Vec<String> = oss_server::modules::DEFAULT_MODULES
             .iter()
             .map(|s| (*s).to_owned())
@@ -84,12 +88,18 @@ impl H {
 
     /// Everything the ten object commands need, plus relaying.
     fn staffed() -> Self {
-        Self::new(
+        Self::staffed_with(fixture())
+    }
+
+    /// [`H::staffed`] over a different LVZ file.
+    fn staffed_with(lvz: Vec<u8>) -> Self {
+        Self::new_with(
             "cmd_objon = 1\nprivcmd_objon = 1\ncmd_objoff = 1\nprivcmd_objoff = 1\n\
              cmd_objset = 1\nprivcmd_objset = 1\ncmd_objmove = 1\nprivcmd_objmove = 1\n\
              cmd_objimage = 1\nprivcmd_objimage = 1\ncmd_objlayer = 1\nprivcmd_objlayer = 1\n\
              cmd_objtimer = 1\nprivcmd_objtimer = 1\ncmd_objmode = 1\nprivcmd_objmode = 1\n\
              cmd_objinfo = 1\ncmd_objlist = 1\ncmd_go = 1\n",
+            lvz,
         )
     }
 
@@ -541,4 +551,50 @@ fn an_arena_with_no_lvz_files_still_works() {
     );
     // and a toggle for an object the arena doesn't have is still relayed on
     assert_eq!(toggles(&h.cmd(p, "?objon 1")), vec![(1, true)]);
+}
+
+/// A `CLV1` section holding a screen object, which the strict LVZ reader
+/// refuses: object 9 sits 100 pixels down from the top-left of the view.
+fn clv1_fixture() -> Vec<u8> {
+    let mut nine = ObjectData::map(9, 0, 0);
+    // a screen object under the CLV1 layout: the reference comes from the
+    // whole word and the offset from its low twelve bits
+    nine.id_word = 9 << 1;
+    nine.x_word = 40;
+    nine.y_word = 100;
+    nine.image = 2;
+    nine.set_mode(mode::SERVER_CONTROLLED);
+    let section = ObjectSection {
+        version: oss_formats::lvz::CLV1,
+        objects: vec![nine],
+        images: Vec::new(),
+    };
+    Lvz {
+        sections: vec![Section::objects(&section)],
+    }
+    .to_bytes()
+}
+
+#[test]
+fn a_clv1_screen_object_is_loaded_and_can_be_driven() {
+    // The strict reader refuses these, because placing one with the CLV2
+    // accessors would put it in the wrong place. The server places nothing
+    // -- it relays ten bytes the client interprets -- so refusing the file
+    // meant a whole zone's objects could not be driven at all. Trench Wars'
+    // entermsg.lvz is the one such file in the corpus.
+    let mut h = H::staffed_with(clv1_fixture());
+    let p = h.player("alice");
+    let lines = texts(&h.cmd(p, "?objlist"));
+    assert!(
+        lines.iter().any(|l| l.contains('9')),
+        "the CLV1 object was skipped: {lines:?}"
+    );
+    let on = toggles(&h.cmd(p, "?objon 9"));
+    assert_eq!(on, vec![(9, true)], "it can be toggled");
+    // and ?objinfo reads it with the CLV1 accessors, not the CLV2 ones
+    let info = texts(&h.cmd(p, "?objinfo 9"));
+    assert!(
+        info[1].starts_with("lvz: screen object coords (40, 100)."),
+        "CLV2 accessors would say (2, 6): {info:?}"
+    );
 }

@@ -45,7 +45,7 @@
 
 use std::sync::Arc;
 
-use oss_formats::lvz::{Lvz, ObjectSection};
+use oss_formats::lvz::{Lvz, ObjectLayout, ObjectSection};
 use oss_proto::Packet;
 use oss_proto::c2s::{self, Rebroadcast};
 use oss_proto::common::{ObjectChange, ObjectToggle, object_change};
@@ -122,6 +122,11 @@ struct LvzObject {
     defaults: ObjectData,
     /// As the arena has it now.
     current: ObjectData,
+    /// Whether the section it came from used the `CLV1` layout, whose
+    /// screen words mean something different (see [`Lvz`]'s module docs).
+    /// The server never places an object, so this only decides which
+    /// accessors `?objinfo` reads to print one.
+    clv1: bool,
 }
 
 /// Per-arena: every object, in file order (ASSS `aodata.list`).
@@ -197,8 +202,18 @@ fn load_objects(zone: &mut Zone, arena: ArenaId) {
             }
         };
         for section in lvz.sections.iter().filter(|s| s.is_object_section()) {
-            let objects = match section.data().map(|raw| ObjectSection::parse(&raw)) {
-                Ok(Ok(s)) => s.objects,
+            // `parse_with_clv1` rather than `parse`: the strict reader
+            // refuses a CLV1 screen object, because reading its position
+            // with the CLV2 accessors would place it wrongly. The server
+            // does not place anything -- it relays the ten bytes a client
+            // interprets -- so refusing the file would only mean a zone's
+            // objects could not be driven at all. Trench Wars' entermsg.lvz
+            // is the one such file in the corpus, and it was being skipped.
+            let objects = match section
+                .data()
+                .map(|raw| ObjectSection::parse_with_clv1(&raw))
+            {
+                Ok(Ok(s)) => (s.layout() == ObjectLayout::Clv1, s.objects),
                 Ok(Err(e)) => {
                     tracing::warn!(target: "objects", arena = arena.0, file = %path.display(), error = %e, "bad LVZ object section");
                     continue;
@@ -208,6 +223,7 @@ fn load_objects(zone: &mut Zone, arena: ArenaId) {
                     continue;
                 }
             };
+            let (clv1, objects) = objects;
             for o in objects {
                 if list.len() >= MAX_OBJECTS {
                     tracing::warn!(target: "objects", arena = arena.0, max = MAX_OBJECTS, "too many LVZ objects, ignoring the rest");
@@ -217,6 +233,7 @@ fn load_objects(zone: &mut Zone, arena: ArenaId) {
                     off: true,
                     defaults: o,
                     current: o,
+                    clv1,
                 });
             }
         }
@@ -784,13 +801,25 @@ fn c_objinfo(zone: &mut Zone, inv: &Invocation<'_>) {
             o.current.map_y()
         )
     } else {
-        format!(
-            "lvz: screen object coords ({}, {}). X-offset: {}. Y-offset: {}",
-            o.current.screen_x(),
-            o.current.screen_y(),
-            name_of(&REFERENCE_NAMES, o.current.x_ref()),
-            name_of(&REFERENCE_NAMES, o.current.y_ref()),
-        )
+        // the two layouts split the screen words differently, so a CLV1
+        // object read with the CLV2 accessors prints the wrong numbers
+        if o.clv1 {
+            format!(
+                "lvz: screen object coords ({}, {}). X-offset: {:?}. Y-offset: {:?}",
+                o.current.clv1_screen_x(),
+                o.current.clv1_screen_y(),
+                o.current.clv1_x_ref(),
+                o.current.clv1_y_ref(),
+            )
+        } else {
+            format!(
+                "lvz: screen object coords ({}, {}). X-offset: {}. Y-offset: {}",
+                o.current.screen_x(),
+                o.current.screen_y(),
+                name_of(&REFERENCE_NAMES, o.current.x_ref()),
+                name_of(&REFERENCE_NAMES, o.current.y_ref()),
+            )
+        }
     };
     message(zone, inv.sender, &detail);
 }

@@ -13,10 +13,15 @@
 //! stub in ASSS 1.4.4 (`Claghist` is an empty function with a FIXME), so
 //! there is nothing to port and a command that did nothing would only
 //! mislead. `?enablecmdgroup` and `?disablecmdgroup` load and unload the
-//! command tables inside ASSS's own `playercmd.c`, which exist because every
-//! one of those commands lives in one module there; here each group of
-//! commands belongs to the module that implements it, so `?insmod` and
-//! `?rmmod` already do that job.
+//! command tables inside ASSS's own `playercmd.c`, and its help text says
+//! what for: `playercmd` holds an interface reference for every module whose
+//! commands it aggregates, so those modules cannot be unloaded or upgraded
+//! until the group holding them is disabled. This file aggregates in the
+//! same way — `?jackpot`, `?flaginfo`, `?ballcount`, `?points` and others
+//! are registered here rather than by the module that does the work — but
+//! each of those handlers looks its interface up at the moment it runs and
+//! does nothing gracefully when it is absent. Nothing is held, so there is
+//! nothing to release and the two commands would have no work to do.
 
 use oss_proto::Packet;
 use oss_proto::s2c::{ArenaEntry, ArenaList, PrizeReceive, ShipReset, WarpTo};

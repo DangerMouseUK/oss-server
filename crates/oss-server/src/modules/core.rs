@@ -481,6 +481,17 @@ fn on_login(zone: &mut Zone, player: PlayerId, pkt: &[u8]) {
         );
         return;
     }
+    // ASSS `core.c` refuses the login here rather than repairing the name,
+    // and this is what makes its `auth_prefix` module unreachable: that
+    // module exists to take a leading `+ - > @ # $` off a staff member's
+    // name before authentication and put it back on the name other players
+    // see, but no such name ever reaches an auth module. A game client is
+    // refused right here, and a chat client's leading punctuation has
+    // already been rewritten to `_` on its own login path (`chatnet.rs`),
+    // which is also what ASSS does. 1.4.4 ships `auth_prefix` commented out
+    // in `modules.conf`; it is not ported here, and porting it would mean
+    // relaxing this refusal, which is a zone-visible change to who may log
+    // in rather than a parity fix.
     if !name[0].is_ascii_alphanumeric() {
         fail_login(
             zone,

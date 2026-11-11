@@ -1194,6 +1194,14 @@ pub struct GreenPickup {
     pub y: i16,
     /// Prize number (negative = bad prize).
     pub prize: i16,
+    /// Whether the green was relayed to the rest of the arena.
+    ///
+    /// Not part of ASSS's `CB_GREEN`, which has no equivalent: it matters
+    /// because `Prize:DontShareThor`, `DontShareBurst` and `DontShareBrick`
+    /// hold the broadcast back, and a green nobody hears about is a green
+    /// no teammate's client shares (`Ship:PrizeShareLimit`). A listener that
+    /// tracks what a player may be holding needs to know which it was.
+    pub broadcast: bool,
 }
 
 impl Event for GreenPickup {
@@ -1343,6 +1351,7 @@ fn on_green(zone: &mut Zone, pid: PlayerId, pkt: &[u8]) {
         x: g.x,
         y: g.y,
         prize: g.prize,
+        broadcast: !private,
     });
 }
 

@@ -207,6 +207,18 @@ fn chat_protocol() {
         chatter.0 as i16,
         "hi there".to_owned()
     )));
+
+    // ASSS looks the command up in a case-insensitive hash table, so a bot
+    // that sends in lower case is understood rather than ignored
+    h.lo.take(alice);
+    a.send("send:PUB:lower case");
+    settle(&mut h, &mut [&mut a]);
+    assert!(h.game_chats(alice).contains(&(
+        chat_type::PUBLIC,
+        chatter.0 as i16,
+        "lower case".to_owned()
+    )));
+
     let mut buf = Vec::new();
     c2s::C2SChat(ChatBody {
         kind: chat_type::PUBLIC,

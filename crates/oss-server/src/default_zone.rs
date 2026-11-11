@@ -23,9 +23,19 @@ pub const FILES: &[(&str, &[u8])] = &[
         "arenas/(public)/README.public",
         include_bytes!("../../../zone/arenas/(public)/README.public"),
     ),
+    // the LVZ's source and licence travel with it, so a zone written out
+    // with --init-zone carries the attribution too
+    (
+        "arenas/scf/README.lvz",
+        include_bytes!("../../../zone/arenas/scf/README.lvz"),
+    ),
     (
         "arenas/scf/arena.conf",
         include_bytes!("../../../zone/arenas/scf/arena.conf"),
+    ),
+    (
+        "arenas/scf/scf-demo.lvz",
+        include_bytes!("../../../zone/arenas/scf/scf-demo.lvz"),
     ),
     (
         "arenas/scf/scf.lvl",

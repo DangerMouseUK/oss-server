@@ -700,3 +700,149 @@ fn a_server_spec_and_the_ship_after_it_are_not_a_teleport() {
         h.seen()
     );
 }
+
+/// Puts `p` on frequency `freq`.
+fn set_freq(h: &mut H, p: PlayerId, freq: i16) {
+    let mut buf = vec![c2s::kind::SET_FREQ];
+    buf.extend_from_slice(&freq.to_le_bytes());
+    h.zone.handle_packet(p, &buf);
+    h.tick(1);
+}
+
+/// `p` reports standing still with `bounty`.
+fn pos_with_bounty(h: &mut H, p: PlayerId, time: u32, bounty: u16) {
+    let mut buf = Vec::new();
+    C2SPosition {
+        time,
+        x: 8000,
+        y: 8000,
+        energy: 1000,
+        bounty,
+        ..Default::default()
+    }
+    .encode(&mut buf);
+    h.zone.handle_packet(p, &buf);
+    h.lo.collect(&mut h.zone);
+}
+
+/// `p` tells the server it took the green at (8000, 8000).
+fn take_green(h: &mut H, p: PlayerId, time: u32, prize: i16) {
+    let mut buf = Vec::new();
+    c2s::TakeGreen {
+        time,
+        x: 8000,
+        y: 8000,
+        prize,
+    }
+    .encode(&mut buf);
+    h.zone.handle_packet(p, &buf);
+    h.tick(1);
+}
+
+/// Two players on one frequency, both flying, ready to share a green.
+fn two_on_a_freq(items: &str) -> (H, PlayerId, PlayerId) {
+    let mut h = H::with("Enabled = 1\nCooldown = 0\n", items);
+    let taker = h.player("alice");
+    let mate = h.player("bob");
+    set_freq(&mut h, taker, 1);
+    set_freq(&mut h, mate, 1);
+    (h, taker, mate)
+}
+
+#[test]
+fn a_teammates_share_of_a_green_is_not_a_finding() {
+    // `Ship:PrizeShareLimit` is 100 on every ship in the bundled zone. The
+    // taker's client broadcasts the green, and every teammate's own client
+    // then hands the same prize to their ship if its bounty is under the
+    // limit -- so a teammate legitimately holds a repel the server never
+    // saw them pick up. The bound has to move for them too, or honest play
+    // is a finding, and under the weights an impossible check carries that
+    // is two findings from a kick.
+    let items = "[Warbird]\nInitialRepel = 0\nRepelMax = 3\nPrizeShareLimit = 100\n";
+    let (mut h, taker, mate) = two_on_a_freq(items);
+    pos_with_bounty(&mut h, mate, 1000, 10);
+    take_green(&mut h, taker, 1100, 21);
+    h.pos(mate, 1200, weapon_type::REPEL, 0);
+    assert!(
+        h.seen().is_empty(),
+        "a shared repel was treated as impossible: {:?}",
+        h.seen()
+    );
+}
+
+#[test]
+fn a_green_is_not_shared_across_frequencies() {
+    let items = "[Warbird]\nInitialRepel = 0\nRepelMax = 3\nPrizeShareLimit = 100\n";
+    let (mut h, taker, other) = two_on_a_freq(items);
+    set_freq(&mut h, other, 2);
+    pos_with_bounty(&mut h, other, 1000, 10);
+    take_green(&mut h, taker, 1100, 21);
+    h.pos(other, 1200, weapon_type::REPEL, 0);
+    assert_eq!(
+        h.seen(),
+        vec![Check::Item],
+        "only the taker's frequency shares a green"
+    );
+}
+
+#[test]
+fn a_teammate_at_the_share_limit_gets_nothing() {
+    // the limit is a strict one: `bounty >= PrizeShareLimit` is no share
+    let items = "[Warbird]\nInitialRepel = 0\nRepelMax = 3\nPrizeShareLimit = 100\n";
+    let (mut h, taker, mate) = two_on_a_freq(items);
+    pos_with_bounty(&mut h, mate, 1000, 100);
+    take_green(&mut h, taker, 1100, 21);
+    h.pos(mate, 1200, weapon_type::REPEL, 0);
+    assert_eq!(h.seen(), vec![Check::Item]);
+}
+
+#[test]
+fn a_green_the_server_kept_private_is_not_shared() {
+    // Prize:DontShareThor and friends stop the server relaying the green at
+    // all, so no other client ever hears of it and nobody shares it
+    let items = "[Warbird]\nInitialThor = 0\nThorMax = 3\nPrizeShareLimit = 100\n\
+                 [Prize]\nDontShareThor = 1\n";
+    let (mut h, taker, mate) = two_on_a_freq(items);
+    pos_with_bounty(&mut h, mate, 1000, 10);
+    take_green(&mut h, taker, 1100, 13);
+    h.pos(mate, 1200, weapon_type::THOR, 0);
+    assert_eq!(h.seen(), vec![Check::Item]);
+}
+
+#[test]
+fn a_teammates_share_of_a_portal_green_pays_for_a_wall_hop() {
+    // the same defect on the other side of the module: a shared portal the
+    // server never recorded leaves a legitimate flash jump with nothing
+    // behind it, and the motion checks call it a wall hack or a teleport
+    let mut map = Vec::new();
+    for y in 295..=305u32 {
+        map.extend_from_slice(&(300u32 | (y << 12) | (1u32 << 24)).to_le_bytes());
+    }
+    let mut h = H::with_map(
+        "Enabled = 1\nCooldown = 0\n",
+        "[General]\nMap = test.lvl\n\
+         [Warbird]\nPortalMax = 2\nInitialPortal = 0\nPrizeShareLimit = 100\n",
+        Some(map),
+    );
+    let taker = h.player("alice");
+    let mate = h.player("bob");
+    set_freq(&mut h, taker, 1);
+    set_freq(&mut h, mate, 1);
+    // bob's reported bounty is 0, which is under the share limit
+    // with no portal, the hop is a finding
+    let t0 = h.t as u32;
+    flash_hop(&mut h, mate, t0);
+    assert_eq!(h.seen(), vec![Check::Wall]);
+    // a teammate takes a portal green (28), which bob's client gives him too
+    take_green(&mut h, taker, t0 + 50, 28);
+    flash_hop(&mut h, mate, t0 + 100);
+    assert_eq!(
+        h.seen().len(),
+        1,
+        "the shared portal paid for it: {:?}",
+        h.seen()
+    );
+    // and only one
+    flash_hop(&mut h, mate, t0 + 200);
+    assert_eq!(h.seen().len(), 2, "{:?}", h.seen());
+}

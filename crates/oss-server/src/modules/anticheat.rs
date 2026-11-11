@@ -94,6 +94,19 @@
 //!   counts. Their weight is not a tolerance: whatever they cost short of
 //!   the whole score is a **concession**.
 //!
+//! **"Impossible" is a claim about the server's bookkeeping, not about
+//! physics, and it is only as good as that bookkeeping.** The item and
+//! portal bounds are the fragile part: they are the server's running guess
+//! at what a ship may be holding, and anything that hands a player an item
+//! without the server seeing it makes an honest use look impossible.
+//! `Ship:PrizeShareLimit` did exactly that — a green one player takes is
+//! given to every teammate under the limit by their own clients, and the
+//! server was raising only the taker's bound, so a teammate's first repel
+//! or portal was a finding (`share_green` is what now mirrors it). A reviewer adding
+//! an impossible check, or raising one's weight, should ask what else can
+//! put an item in a ship's hold, and treat an unanswered "I don't think
+//! anything can" as a reason to keep the weight where it is.
+//!
 //! **Trust.** Each finding lowers the player's trust (100 = clean) by its
 //! check's weight and raises [`CheatSuspected`]. Trust recovers by
 //! `RecoverPerMinute` (default 10).
@@ -1412,6 +1425,50 @@ pub fn prize_taken(zone: &mut Zone, p: PlayerId, prize: i32) {
     }
 }
 
+/// `Ship:PrizeShareLimit`: a green one player takes is handed to their
+/// teammates' ships by those teammates' own clients, so the server must
+/// move their bounds too or it will accuse them of holding what they
+/// legitimately hold.
+///
+/// This mirrors `oss_sim::World::share_prize`, which is what Continuum
+/// does and what our client runs: every prize except Warp goes to each
+/// ship on the taker's frequency whose bounty is still under that ship's
+/// `PrizeShareLimit`, never to the taker. A green the server held back
+/// (`Prize:DontShareThor` and friends) reaches no other client at all, so
+/// it shares with nobody.
+///
+/// Two places where this is deliberately more generous than the client,
+/// because the server cannot know and the cost of guessing wrong is an
+/// accusation: a teammate the client would skip for being dead still gets
+/// their bound raised, and the bounty used is the last one they reported,
+/// which may be a few ticks stale. Both can only hide a real cheat, never
+/// invent one.
+fn share_green(zone: &mut Zone, ev: &super::game::GreenPickup) {
+    let prize = i32::from(ev.prize);
+    if !ev.broadcast || prize.abs() == PRIZE_WARP {
+        return;
+    }
+    let Some(freq) = zone.players.get(ev.player).map(|p| p.freq) else {
+        return;
+    };
+    let mates: Vec<PlayerId> = zone
+        .players
+        .in_arena(ev.arena)
+        .filter(|p| p.id != ev.player && p.freq == freq && !p.ship.is_spec())
+        .map(|p| p.id)
+        .collect();
+    for m in mates {
+        let Some(lim) = ensure_limits(zone, m) else {
+            continue;
+        };
+        let bounty = zone.players.get(m).map_or(0, |p| u32::from(p.pos.bounty));
+        if bounty >= lim.settings.prize_share_limit {
+            continue;
+        }
+        prize_taken(zone, m, prize);
+    }
+}
+
 /// The `anticheat` module.
 pub struct AntiCheatModule;
 
@@ -1476,6 +1533,7 @@ impl Module for AntiCheatModule {
         // prizes: warp moves, full charge refills, super makes shots free
         zone.on::<super::game::GreenPickup>(me, Scope::Global, |z, ev| {
             prize_taken(z, ev.player, i32::from(ev.prize));
+            share_green(z, ev);
         });
         zone.on::<super::game::Attach>(me, Scope::Global, |z, ev| {
             excuse(z, ev.player, Excuse::Jump);

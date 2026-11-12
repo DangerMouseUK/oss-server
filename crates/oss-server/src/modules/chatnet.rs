@@ -246,7 +246,9 @@ fn accept(zone: &mut Zone) {
         };
         let (stream, addr) = match l.accept() {
             Ok(x) => x,
-            Err(e) if e.kind() == ErrorKind::WouldBlock => return,
+            // No one waiting. Windows' "still in progress" belongs here too,
+            // or it is logged as a failure the next tick quietly retries.
+            Err(e) if oss_net::would_block(&e) => return,
             Err(e) => {
                 tracing::warn!(target: "chatnet", "accept failed: {e}");
                 return;
@@ -298,7 +300,10 @@ fn read(c: &mut Conn, now: Ticks) -> bool {
                 c.lines.feed(&buf[..n]);
                 c.last_recv = now;
             }
-            Err(e) if e.kind() == ErrorKind::WouldBlock => return true,
+            // Nothing more to read. On Windows that includes OS error 997, a
+            // read still in progress, which carries no `ErrorKind` of its own,
+            // so the catch-all below would drop a chat client that is fine.
+            Err(e) if oss_net::would_block(&e) => return true,
             Err(e) if e.kind() == ErrorKind::Interrupted => {}
             Err(_) => return false,
         }
@@ -313,7 +318,9 @@ fn write(c: &mut Conn) -> bool {
             Ok(n) => {
                 c.out.drain(..n);
             }
-            Err(e) if e.kind() == ErrorKind::WouldBlock => return true,
+            // As in `read`: the socket is full for now, including Windows' OS
+            // error 997 for a send still in progress. Not a dead connection.
+            Err(e) if oss_net::would_block(&e) => return true,
             Err(e) if e.kind() == ErrorKind::Interrupted => {}
             Err(_) => return false,
         }

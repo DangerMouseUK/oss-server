@@ -9,9 +9,9 @@ servers that host the arenas.
 **`oss-server` is a zone.** It is a from-scratch Rust implementation of a SubSpace/Continuum
 server that follows ASSS — the server most zones have run for twenty years — closely enough
 to take an existing zone directory and run it unchanged: the same `.conf` files, the same
-`.lvl` maps, the same module names, the same `?commands`. Point your players' existing
-clients at it and they should not be able to tell, except that it is one process, it tells
-you what it is doing, and it has a metrics endpoint.
+`.lvl` maps, the same module names, the same `?commands`. A player who connects should not
+be able to tell the difference, except that it is one process, it tells you what it is
+doing, and it has a metrics endpoint.
 
 ![The bundled zone, seen from oss-client: eight players in arena scf](docs/images/bundled-zone.png)
 
@@ -135,8 +135,9 @@ and rebuilds the whole packet byte-for-byte when an ASSS zone directory is avail
 `crates/oss-server/tests/fixtures/asss-vectors/` are transcripts from ASSS 1.4.4 modules
 compiled unmodified — kill points, flag rewards, KOTH, turf reward, prize weights, soccer
 goals, bricks, banners, the chat flood limiter, lag aggregation, the game timer, `?buy`,
-arena placement, billing and directory traffic. Each file's header names the ASSS source file
-it came from.
+arena placement, billing and directory traffic. Each file's header names the ASSS source
+file it came from; `flag-games.txt` is a transcript of ASSS's own Python flag games, run
+unmodified.
 
 **The performance budget is measured and the result is partly negative.**
 [docs/performance.md](docs/performance.md) reports 500 players in one arena: the zone's game
@@ -160,10 +161,10 @@ server-side plausibility checks, kills and scoring, flags (warzone and turf), ba
 soccer, KOTH, bricks, prizes and `?buy`, banners, chat with the ASSS flood rules and the
 obscene filter, private and channel chat, chatnet, the `?command` set with capability groups,
 bans and `?passwd`, persistence, LVZ objects, map and news download, lag data and `?lag`,
-periodic and turf rewards, the game timer, zone registration with
-directory servers, SSC billing, hot config reload, module load/unload at run time, the admin
-API and metrics. 43 modules in the tree — the bundled zone loads 34 of them — and the ones
-ASSS has that this does not are named in `conf/modules.conf`.
+periodic and turf rewards, the game timer, zone registration with directory servers, SSC
+billing, hot config reload, module load/unload at run time, the admin API and metrics. 43
+modules in the tree — the bundled zone loads 34 of them — and the ones ASSS has that this
+does not are named in `conf/modules.conf`.
 
 **Not here, and not coming here: Continuum's own encryption.** Continuum's key expansion is
 not public, and this project does not reverse-engineer it or carry it — a deliberate

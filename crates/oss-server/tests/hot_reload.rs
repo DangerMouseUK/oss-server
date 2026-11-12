@@ -93,9 +93,13 @@ impl H {
             unknown1: 0,
             client_version: 134,
             field444: 444,
-            field555: 555,
+            bound_ip: 0,
             permission_id: 1,
-            reserved: [0; 12],
+            server_ip: 0,
+            bound_port: 0,
+            redirect_id: 0,
+            using_proxy: 0,
+            unused: 0,
             cont_id: None,
         }
         .encode(&mut buf);

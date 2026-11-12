@@ -62,6 +62,32 @@ jobs:
         env:
           RUSTDOCFLAGS: -D warnings
 
+  # The game-logic half of the PRD budget: 500 players in one arena must fit
+  # in 20% of a core, zone plus transport. This gates the zone's share only;
+  # oss-core's own soak job gates the transport's. --max-playing 500 is what
+  # makes it the PRD scenario: ASSS caps General:MaxPlaying at 100 per arena
+  # by default, and without it 400 of the 500 sit in spectator mode and never
+  # relay a position. See docs/performance.md.
+  soak:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: oss-server
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: oss-server
+      - uses: actions/checkout@v4
+        with:
+          repository: DangerMouseUK/oss-core
+          path: oss-core
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: oss-server
+      - run: cargo run --release -p oss-server --example soak -- --peers 500 --seconds 30 --max-playing 500 --max-cpu 15
+
   deny:
     runs-on: ubuntu-latest
     steps:

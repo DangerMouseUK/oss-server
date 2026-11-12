@@ -40,6 +40,8 @@ Game-logic load harness for oss-server (no network transport).
   --death-interval MS  each player dies this often (default 30000)
   --churn-ms MS        one player leaves and a new one joins this often (default 1000)
   --spread PX          players move within a square this wide (default 16384)
+  --max-playing N      raise General:MaxPlaying for the arena (default: the
+                       zone's own value, which is ASSS's default of 100)
   --seed N             random seed (default 1)
   --json               print one JSON line instead of the table
   --max-cpu PCT        exit with status 1 if the zone needs more than PCT % of a core";
@@ -58,6 +60,7 @@ struct Opts {
     seed: u64,
     json: bool,
     max_cpu: Option<f64>,
+    max_playing: Option<i32>,
 }
 
 fn parse() -> Result<Opts, String> {
@@ -74,6 +77,7 @@ fn parse() -> Result<Opts, String> {
         seed: 1,
         json: false,
         max_cpu: None,
+        max_playing: None,
     };
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
@@ -95,6 +99,7 @@ fn parse() -> Result<Opts, String> {
                 let v = val()?;
                 o.max_cpu = Some(v.parse().map_err(|e| format!("{v}: {e}"))?);
             }
+            "--max-playing" => o.max_playing = Some(num(val()?)? as i32),
             "-h" | "--help" => return Err(HELP.into()),
             other => return Err(format!("unknown option {other}\n\n{HELP}")),
         }
@@ -273,9 +278,23 @@ fn main() -> std::process::ExitCode {
         s.vy = rng.below(401) as i32 - 200;
     };
 
+    let mut capped = false;
     while h.t < end {
         let t = h.t + 1;
         h.measuring = t > warm_end;
+        // The arena exists once the first player has entered it. Raising
+        // General:MaxPlaying then, before the rest take ships, is what lets
+        // every peer be in a ship: ASSS's default cap is 100 per arena.
+        if let Some(n) = o.max_playing
+            && !capped
+            && let Some(id) = h.zone.arenas.find("soak")
+            && let Some(a) = h.zone.arenas.get_mut(id)
+        {
+            let mut c = (*a.cfg).clone();
+            c.set("General", "MaxPlaying", &n.to_string());
+            a.cfg = std::sync::Arc::new(c);
+            capped = true;
+        }
         // staggered joins
         while joined < o.peers && (joined as u64) * join_ticks / (o.peers as u64).max(1) <= t {
             if let Some(mut s) = h.join() {
@@ -395,9 +414,15 @@ fn main() -> std::process::ExitCode {
         .iter()
         .filter(|p| p.status == PlayerStatus::Playing)
         .count();
+    let in_ships = h
+        .zone
+        .players
+        .iter()
+        .filter(|p| p.status == PlayerStatus::Playing && !p.ship.is_spec())
+        .count();
     if o.json {
         println!(
-            "{{\"peers\":{},\"seconds\":{},\"zone_cpu_percent\":{cpu:.3},\"ns_per_packet\":{:.1},\"packets_in_per_s\":{:.0},\"packets_out_per_s\":{:.0},\"bytes_out_per_s\":{:.0},\"tick_max_ms\":{:.3},\"slow_ticks\":{},\"playing_at_end\":{in_arena}}}",
+            "{{\"peers\":{},\"seconds\":{},\"zone_cpu_percent\":{cpu:.3},\"ns_per_packet\":{:.1},\"packets_in_per_s\":{:.0},\"packets_out_per_s\":{:.0},\"bytes_out_per_s\":{:.0},\"tick_max_ms\":{:.3},\"slow_ticks\":{},\"playing_at_end\":{in_arena},\"in_ships_at_end\":{in_ships}}}",
             o.peers,
             o.seconds,
             h.tot.zone_ns as f64 / pkts as f64,
@@ -433,6 +458,7 @@ fn main() -> std::process::ExitCode {
             h.tot.slow_ticks
         );
         println!("playing at the end    {in_arena:>10}");
+        println!("in a ship at the end  {in_ships:>10}");
     }
     match o.max_cpu {
         Some(max) if cpu > max => {

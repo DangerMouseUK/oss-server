@@ -68,44 +68,58 @@ Measured on 2026-11-08: Intel Core i9-7980XE at 2.6 GHz, Windows 11, Rust 1.99.1
 
 Every player was still playing at the end, apart from the one in the middle of churn, and no tick came near 10 ms.
 
-**These rows need `--max-playing` to reproduce today.** They were taken before `General:MaxPlaying` was implemented (`Complete the freq manager against fm_normal.c`), when every player got a ship whatever the cap said. Re-measured on 2026-11-12 on the same machine with `--max-playing 500`, the traffic matches to within a handful of packets — 412,514 against 412,516 packets out per second at 500 players — which is what confirms the two runs describe the same scenario. CPU came out a little higher, 7.4–8.3% against 6.8%, from the modules added since and from other load on the machine. A plain `--peers 500` today gives 1.6% and 105,125 packets out: 100 in ships, 400 in spectator mode.
+**These rows need `--max-playing` to reproduce today.** They were taken before `General:MaxPlaying` was implemented (`Complete the freq manager against fm_normal.c`), when every player got a ship whatever the cap said. Re-measured on 2026-11-12 on the same machine with `--max-playing 500`, the traffic matches to within a handful of packets — 412,514 against 412,516 packets out per second at 500 players — which is what confirms the two runs describe the same scenario. CPU came out at 7.0% against 6.8%, i.e. unchanged within the run-to-run spread, once the measurement was paired with a control (see [Measuring under load](#measuring-under-load)). Earlier unpaired runs in this session read 7.4–8.3%; that was the machine, not the zone. A plain `--peers 500` today gives 1.6% and 105,125 packets out: 100 in ships, 400 in spectator mode.
 
 **Crowding** (500 players), 2026-11-08 figures with the 2026-11-12 `--max-playing 500` re-measurement beside them:
 
-| Area | Zone CPU (2026-11-08) | Zone CPU (2026-11-12) | Packets out per s | Recipients per position |
-|---|---|---|---|---|
-| whole map (16384 px) | 6.8% | 7.4–8.3% | 412,514 | about 82 |
-| half the map (8192 px) | 6.6% | 7.3% | 1,062,924 | about 210 |
-| a quarter (4096 px) | 8.1% | 9.0% | 1,776,405 | about 350 |
+| Area | Zone CPU (2026-11-08) | Zone CPU (2026-11-12) | spread | Packets out per s | Recipients per position |
+|---|---|---|---|---|---|
+| whole map (16384 px) | 6.8% | 7.0% | 6.96–7.27 | 412,514 | about 82 |
+| half the map (8192 px) | 6.6% | 6.9% | 6.39–7.53 | 1,061,253 | about 210 |
+| a quarter (4096 px) | 8.1% | 8.1% | 7.96–8.21 | 1,776,405 | about 350 |
 
-The zone's own cost hardly changes with crowding. The number of packets it hands the transport does. The longest tick does grow: 9.9 ms in the quarter-map run, against a 10 ms tick, and one whole-map run recorded a single 10.9 ms tick. There is no margin left there at 500 players in ships.
+Each 2026-11-12 figure is the median of three runs, each paired with a control (see [Measuring under load](#measuring-under-load)). They reproduce the 2026-11-08 figures within the run-to-run spread: **the zone has not got more expensive** since, despite the modules added in between.
+
+The zone's own cost hardly changes with crowding. The number of packets it hands the transport does.
 
 ## Against the 20% budget
 
-Measured, not computed, on 2026-11-12. The transport half comes from oss-core's harness run at the fan-outs this harness produces (`--fanout 82`, `210`, `350`), the zone half from this one at the matching `--spread` with `--max-playing 500`. Both halves on the same machine, VIE, 500 players.
+Measured, not computed, on 2026-11-12. The transport half comes from oss-core's harness run at the fan-outs this harness produces (`--fanout 82`, `210`, `350`), the zone half from this one at the matching `--spread` with `--max-playing 500`. Both halves on the same machine, VIE, 500 players, each figure the median of three runs paired with a control (see [Measuring under load](#measuring-under-load)).
 
 | Arena | Zone | Transport (VIE) | **Whole server** | Fits 20%? |
 |---|---|---|---|---|
-| whole map, fan-out 82 | 7.4–8.3% | 5.1% | **about 13%** | yes |
-| half the map, fan-out 210 | 7.3% | 11.5% | **about 19%** | only just |
-| a quarter, fan-out 350 | 9.0% | 19.9–21.3% | **about 30%** | **no** |
+| whole map, fan-out 82 | 7.0% | 5.3% | **about 12%** | yes |
+| half the map, fan-out 210 | 6.9% | 11.7% | **about 19%** | only just |
+| a quarter, fan-out 350 | 8.1% | 20.0% | **about 28%** | **no** |
 
-With OpenSec rather than VIE the transport costs 8.4%, 15.8% and 27.8%, giving about 16%, 23% and 37% for the whole server: the budget then fails from half a map onward.
+With OpenSec rather than VIE the transport costs 8.6%, 16.0% and 28.9%, giving about 16%, 23% and 37% for the whole server: the budget then fails from half a map onward.
+
+The measuring windows inflate a figure by roughly 5% (the controls averaged 2.94% against a clean 2.8%), so these totals are if anything slightly high. Correcting for it moves the quarter-map case to about 27%, which does not change the verdict.
 
 **The earlier estimate of ~32% for the transport alone was pessimistic.** It multiplied 1.8M packets/s by the fan-out-30 cost of 178 ns per packet. Measured, per-packet cost *falls* with volume — about 180 ns at fan-out 30, 125 ns at 82, 110 ns at 210 — because clustering packs more packets into each datagram: from fan-out 30 to 82 the packet rate rises 2.7 times while the datagram rate rises 4%. Clustering saturates near 20 packets per datagram, so beyond fan-out 210 the cost per packet stops falling. The real transport figure for a quarter-map arena is 19.9–21.3%, not 32%.
 
-**The budget still does not close.** Being wrong about the magnitude does not change the verdict: a crowded arena of 500 players in ships needs about 30% of a core with VIE and about 37% with OpenSec. Half a map sits at about 19%, which is inside 20% only by less than the run-to-run spread. Only the uncrowded whole-map case has real margin.
+**The budget still does not close.** Being wrong about the magnitude does not change the verdict: a crowded arena of 500 players in ships needs about 28% of a core with VIE and about 37% with OpenSec. Half a map sits at about 19%, which is inside 20% only by less than the run-to-run spread. Only the uncrowded whole-map case has real margin.
 
 These volumes are what the ASSS relay rules produce. ASSS would send the same packets, so reducing them would mean changing relay behaviour, for example a smaller radar share in crowded arenas. That is a design decision, not an optimisation.
 
 Two things that would move the number before any such decision, both located but not acted on here:
 
 - **The transport allocates on the hot path at these volumes**: 5,913 allocations/s at fan-out 210 and 28,348/s at 350, against 145/s at fan-out 30. oss-core's buffer pool is sized at 8 buffers per connection, while one tick at fan-out 350 queues roughly 17,000 packets. This is the same shape as the pool limit that harness already caught once. Part of the 20% is that allocation traffic.
-- **Tick headroom is gone before CPU is.** The quarter-map zone run reached a 9.9 ms tick against a 10 ms budget, with the transport's share still to be added.
+- **Tick headroom is thinner than the CPU figure suggests, but not gone.** Unpaired runs earlier in this session recorded a 9.9 ms tick and a single 10.9 ms one against a 10 ms budget, which looked alarming. Re-measured with paired controls, the same configurations peak at 1.5–4.9 ms: those long ticks were the loaded machine descheduling the harness, not zone work. The honest statement is that the longest tick is roughly half the budget at 500 players in ships, with the transport's share still to be added, and that it needs a clean-machine or CI measurement to pin down.
+
+## Measuring under load
+
+The 2026-11-12 figures were taken on a shared desktop running an unrelated six-thread job (about 5.85 of 8 logical cores) plus two other build-and-test sessions, with the machine reporting 99% busy. That is disclosed rather than hidden because it changes how to read them.
+
+Each measurement was paired with an immediately preceding `oss-net` soak run at its default `--fanout 30`, used as a load probe: that harness is deterministic, so its traffic is fixed and only its timing moves, and its clean value (2.8%) is recorded in oss-core's `docs/performance.md`. Runs whose control came back clean were kept; the medians above are of three such runs each.
+
+This mattered. In one interleaved sequence a control returned 5.55% against neighbours at 2.92–2.96%, a burst landing inside a single 60-second run — and the two claims this session had to withdraw (a zone cost of 7.4–8.3% and a near-overrunning tick) both came from unpaired runs. A single control at the start of a session does not protect a measurement taken twenty minutes later.
+
+**Figures to rely on should come from CI**, where the runner is clean; that is what the `soak` jobs in both repos now produce on every push. The numbers here are good to about 5%, which is enough to locate the cliff and set a gate, and not enough to argue about a point either way.
 
 ## What is gated
 
-CI runs `--peers 500 --seconds 30 --max-playing 500 --max-cpu 15` as the `soak` job: the PRD scenario, with the threshold set from the measured 7.4–8.3% plus headroom for a shared CI runner, and still comfortably under the 20% whole-server budget. oss-core gates its half at `--fanout 30` (the old smoke test) and `--fanout 82 --max-cpu 12` (the whole-map case). The crowded case is deliberately left ungated in both repos, because it does not pass; see the table above.
+CI runs `--peers 500 --seconds 30 --max-playing 500 --max-cpu 15` as the `soak` job: the PRD scenario, with the threshold set from the measured 7.0% (8.3% worst observed under load) plus headroom for a shared CI runner, and still comfortably under the 20% whole-server budget. oss-core gates its half at `--fanout 30` (the old smoke test) and `--fanout 82 --max-cpu 12` (the whole-map case). The crowded case is deliberately left ungated in both repos, because it does not pass; see the table above.
 
 ## Reporting, not fixed here
 

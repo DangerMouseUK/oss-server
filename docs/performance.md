@@ -12,7 +12,9 @@ cargo run --release -p oss-server --example soak -- --peers 500 --seconds 60 --j
 cargo run --release -p oss-server --example soak -- --help
 ```
 
-Always build with `--release`. With `--max-cpu PCT` the harness exits with status 1 if the zone needs more than that share of a core.
+Always build with `--release`. With `--max-cpu PCT` the harness exits with status 1 if the zone needs more than that share of a core. CI's `soak` job runs `--peers 500 --seconds 30 --max-playing 500 --max-cpu 15`.
+
+**`--max-playing` is needed for the budget scenario, and this is the trap.** ASSS's `fm_normal` caps a single arena at `General:MaxPlaying` players, default **100**, and the bundled sample zone does not raise it. A spectator's position is never relayed (`relay()` runs only for players in a ship), so a plain `--peers 500` run measures 100 players relaying and 400 spectators who send positions that go nowhere: 105,125 packets out per second and 1.6% of a core, about a quarter of the real load. `--max-playing 500` raises the cap for the soak arena so all 500 are in ships, which is what the PRD's "500 players in one arena" means. The zone's own `[Misc] MaxPlaying=75` is not that setting; `fm_normal` reads `General:MaxPlaying`, and ASSS ignores the `[Misc]` line too.
 
 ## The scenario
 
@@ -29,6 +31,7 @@ Everything runs in one thread on a simulated clock (100 ticks a second, as in th
 | `--churn-ms` | 1000 | every interval one player is kicked and a new one joins |
 | `--spread` | 16384 | players move within a square this many pixels wide (16384 is the whole map) |
 | `--seed` | 1 | random seed for the simulated players |
+| `--max-playing` | unset | raises `General:MaxPlaying` for the soak arena; unset leaves ASSS's default of 100 |
 
 Unlike the transport harness, relay fan-out is not a parameter. The zone decides who receives each position, as ASSS does:
 - players within the recipient's screen size;
@@ -65,27 +68,49 @@ Measured on 2026-11-08: Intel Core i9-7980XE at 2.6 GHz, Windows 11, Rust 1.99.1
 
 Every player was still playing at the end, apart from the one in the middle of churn, and no tick came near 10 ms.
 
-**Crowding** (500 players):
+**These rows need `--max-playing` to reproduce today.** They were taken before `General:MaxPlaying` was implemented (`Complete the freq manager against fm_normal.c`), when every player got a ship whatever the cap said. Re-measured on 2026-11-12 on the same machine with `--max-playing 500`, the traffic matches to within a handful of packets — 412,514 against 412,516 packets out per second at 500 players — which is what confirms the two runs describe the same scenario. CPU came out a little higher, 7.4–8.3% against 6.8%, from the modules added since and from other load on the machine. A plain `--peers 500` today gives 1.6% and 105,125 packets out: 100 in ships, 400 in spectator mode.
 
-| Area | Zone CPU | Packets out per s | Recipients per position |
-|---|---|---|---|
-| whole map (16384 px) | 6.8% | 412,516 | about 82 |
-| half the map (8192 px) | 6.6% | 1,061,973 | about 210 |
-| a quarter (4096 px) | 8.1% | 1,777,532 | about 350 |
+**Crowding** (500 players), 2026-11-08 figures with the 2026-11-12 `--max-playing 500` re-measurement beside them:
 
-The zone's own cost hardly changes with crowding. The number of packets it hands the transport does.
+| Area | Zone CPU (2026-11-08) | Zone CPU (2026-11-12) | Packets out per s | Recipients per position |
+|---|---|---|---|---|
+| whole map (16384 px) | 6.8% | 7.4–8.3% | 412,514 | about 82 |
+| half the map (8192 px) | 6.6% | 7.3% | 1,062,924 | about 210 |
+| a quarter (4096 px) | 8.1% | 9.0% | 1,776,405 | about 350 |
+
+The zone's own cost hardly changes with crowding. The number of packets it hands the transport does. The longest tick does grow: 9.9 ms in the quarter-map run, against a 10 ms tick, and one whole-map run recorded a single 10.9 ms tick. There is no margin left there at 500 players in ships.
 
 ## Against the 20% budget
 
-The zone alone takes **about 7% of a core at 500 players**, so game logic fits.
+Measured, not computed, on 2026-11-12. The transport half comes from oss-core's harness run at the fan-outs this harness produces (`--fanout 82`, `210`, `350`), the zone half from this one at the matching `--spread` with `--max-playing 500`. Both halves on the same machine, VIE, 500 players.
 
-The open question is the transport. oss-core measured 2.8% for VIE at 500 players (178 ns per game packet), with a fan-out of 30, which is about 151,000 packets out per second. With ASSS's real relay rules the server hands the transport far more:
-- **Whole map:** about 412,000 packets per second. At oss-core's per-packet cost that is roughly 7% of a core, so about 14% for the whole server.
-- **Quarter of the map:** about 1.8 million packets per second. That would be roughly 32% for the transport alone, well over the budget.
+| Arena | Zone | Transport (VIE) | **Whole server** | Fits 20%? |
+|---|---|---|---|---|
+| whole map, fan-out 82 | 7.4–8.3% | 5.1% | **about 13%** | yes |
+| half the map, fan-out 210 | 7.3% | 11.5% | **about 19%** | only just |
+| a quarter, fan-out 350 | 9.0% | 19.9–21.3% | **about 30%** | **no** |
 
-How the per-packet cost scales at those volumes is untested, since clustering many small packets into fewer datagrams should help. The next measurement is oss-core's harness with `--fanout 82` and `--fanout 350`, or a full-stack run of this harness through the real transport.
+With OpenSec rather than VIE the transport costs 8.4%, 15.8% and 27.8%, giving about 16%, 23% and 37% for the whole server: the budget then fails from half a map onward.
+
+**The earlier estimate of ~32% for the transport alone was pessimistic.** It multiplied 1.8M packets/s by the fan-out-30 cost of 178 ns per packet. Measured, per-packet cost *falls* with volume — about 180 ns at fan-out 30, 125 ns at 82, 110 ns at 210 — because clustering packs more packets into each datagram: from fan-out 30 to 82 the packet rate rises 2.7 times while the datagram rate rises 4%. Clustering saturates near 20 packets per datagram, so beyond fan-out 210 the cost per packet stops falling. The real transport figure for a quarter-map arena is 19.9–21.3%, not 32%.
+
+**The budget still does not close.** Being wrong about the magnitude does not change the verdict: a crowded arena of 500 players in ships needs about 30% of a core with VIE and about 37% with OpenSec. Half a map sits at about 19%, which is inside 20% only by less than the run-to-run spread. Only the uncrowded whole-map case has real margin.
 
 These volumes are what the ASSS relay rules produce. ASSS would send the same packets, so reducing them would mean changing relay behaviour, for example a smaller radar share in crowded arenas. That is a design decision, not an optimisation.
+
+Two things that would move the number before any such decision, both located but not acted on here:
+
+- **The transport allocates on the hot path at these volumes**: 5,913 allocations/s at fan-out 210 and 28,348/s at 350, against 145/s at fan-out 30. oss-core's buffer pool is sized at 8 buffers per connection, while one tick at fan-out 350 queues roughly 17,000 packets. This is the same shape as the pool limit that harness already caught once. Part of the 20% is that allocation traffic.
+- **Tick headroom is gone before CPU is.** The quarter-map zone run reached a 9.9 ms tick against a 10 ms budget, with the transport's share still to be added.
+
+## What is gated
+
+CI runs `--peers 500 --seconds 30 --max-playing 500 --max-cpu 15` as the `soak` job: the PRD scenario, with the threshold set from the measured 7.4–8.3% plus headroom for a shared CI runner, and still comfortably under the 20% whole-server budget. oss-core gates its half at `--fanout 30` (the old smoke test) and `--fanout 82 --max-cpu 12` (the whole-map case). The crowded case is deliberately left ungated in both repos, because it does not pass; see the table above.
+
+## Reporting, not fixed here
+
+- **The PRD states the budget at 60 Hz** (`PRD.md` line 108). The server ticks at **100 Hz** (`crates/oss-server/src/runtime.rs:190`), which all three repos' `CLAUDE.md` give as SubSpace's timebase. Every figure here is measured at 100 Hz, so they answer the harder reading. If the PRD line is meant literally, the budget is 1.67 times easier than what is measured here; if it is stale, the numbers above stand as they are. That line is the lead's to settle.
+- **The requirement has no row in `notes/parity.md` and no entry in `notes/verification-plan.md`.** Suggested wording for the parity row: *"500 players in one arena under 20% of one core (PRD line 108) — zone and transport measured separately by the two soak harnesses; gated in CI by `oss-server` `soak` (`--max-playing 500 --max-cpu 15`) and `oss-core` `soak` (`--fanout 82 --max-cpu 12`). Open: a crowded arena (fan-out 350) measures about 30% and does not meet the budget."*
 
 ## Change found by the harness
 

@@ -7,7 +7,7 @@ not a unit test; the detail underneath says what was observed and, as importantl
 
 | Client | Encryption | Result | Date |
 |---|---|---|---|
-| **Continuum 0.40**, the genuine client | Continuum (private module — see below) | Logged in, entered an arena, rendered the zone, flew ~96 s. Five sessions, no kick | 2026-11-12 |
+| **Continuum 0.40**, the genuine client | Continuum (cipher from a private module — see below) | Logged in, entered an arena, rendered the zone, flew ~96 s. Five sessions, no kick | 2026-11-12 |
 | **MERVBot 4.6**, prebuilt and unmodified | VIE | Logged in, entered an arena, downloaded news and map, answered the security challenge, exchanged position packets | 2026-11-12 |
 | **oss-client** (Open SubSpace) | VIE and OpenSec | Plays: arena, map, LVZ, chat, kills | continuously |
 | **oss-bot** (headless, Open SubSpace) | VIE and OpenSec | Logs in, flies, chats; used for load swarms | continuously |
@@ -15,7 +15,8 @@ not a unit test; the detail underneath says what was observed and, as importantl
 
 ## Continuum 0.40
 
-A genuine `Continuum.exe` (version 0.40) completed five live sessions against `oss-server`.
+A genuine `Continuum.exe` (version 0.40) completed five live sessions against a server built
+from this repository's library with a private Continuum cipher module registered on top.
 It sent the real 165-byte `0x24` login packet, was authenticated, entered an arena, drew the
 map, flags and radar, and stayed in for about 96 seconds sending one position packet a
 second. It answered the `0x1A` security challenge, and the server logged no settings, map or

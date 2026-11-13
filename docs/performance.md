@@ -53,6 +53,8 @@ The simulated clients are not timed.
 
 **Longest tick.** The slowest single tick's timers plus drain, and how many ticks went over the 10 ms tick length.
 
+**Allocations and heap.** How many allocations the zone makes per second, and how much heap it is holding at the end, per player. See [Allocations](#allocations).
+
 Packet counts vary by a few hundred per second between runs because the zone's own random number generator (radar sampling, prizes) isn't seeded by the harness.
 
 ## Results
@@ -104,8 +106,37 @@ These volumes are what the ASSS relay rules produce. ASSS would send the same pa
 
 Two things that would move the number before any such decision, both located but not acted on here:
 
-- **The transport allocates on the hot path at these volumes**: 5,913 allocations/s at fan-out 210 and 28,348/s at 350, against 145/s at fan-out 30. oss-core's buffer pool is sized at 8 buffers per connection, while one tick at fan-out 350 queues roughly 17,000 packets. This is the same shape as the pool limit that harness already caught once. Part of the 20% is that allocation traffic.
+- ~~**The transport allocates on the hot path at these volumes**~~ — **both halves have since been measured and fixed, and the "part of the 20% is that allocation traffic" guess was wrong.** oss-core cut the transport from 28,348 allocations/s at fan-out 350 to 189/s (`CONN_REFILL`, not the shared pool everyone suspected) and measured no CPU change outside the noise. The zone half is below under [Allocations](#allocations): 75,045/s to 2,071/s, again with the CPU change inside the run-to-run spread. **The 20% budget verdict above is unchanged by either fix.**
 - **Tick headroom is fine; an earlier claim here that it was not was wrong.** Unpaired runs recorded a 9.9 ms tick and a single 10.9 ms one against a 10 ms budget. On the quieter machine, nine paired runs across all three crowding levels peaked at 1.5–1.7 ms with no tick over 10 ms at all. Those long ticks were the loaded machine descheduling the harness, not zone work. The longest tick is about a sixth of the budget at 500 players in ships, with the transport's share still to be added.
+
+## Allocations
+
+The harness counts every allocation made while the zone is running: a thread-local flag is set around `Zone::handle_packet` and around the timer-and-drain part of each tick, and the global allocator counts only what happens inside it. The simulated clients and the harness's own bookkeeping are outside it. `--json` reports `zone_allocs_per_s`, `zone_heap_bytes` and `heap_per_peer`; the table prints the same. This is the same shape as oss-core's transport harness, so the two sets of figures mean the same thing and can be added.
+
+Unlike oss-core's, these counts are **not** exactly deterministic — the zone's own RNG is unseeded, so repeated runs differ by about 0.1% (57,264 / 57,224 / 57,211 for the same arguments). That is far below any difference worth reporting, but a 1% claim would need repeats.
+
+Measured 2026-11-13, 500 players, `--max-playing 500`, 10 s:
+
+| Arena | before | after |
+|---|---|---|
+| whole map (16384 px) | 57,211 /s | 2,071 /s |
+| half the map (8192 px) | 67,443 /s | 2,071 /s |
+| a quarter (4096 px) | 75,045 /s | 2,071 /s |
+| an eighth (2048 px) | 79,281 /s | 2,071 /s |
+| a sixteenth (1024 px) | 80,173 /s | 2,071 /s |
+
+**The zone did not have the transport's defect.** oss-core's was a per-tick demand that scales with fan-out met from a constant-sized reserve, so its rate rose 190-fold from fan-out 30 to 350. The zone's rate rose 1.4-fold across the same crowding while the packets it relayed rose six-fold: it was flat in fan-out and linear in **inbound** packets — about 12 to 15 allocations for every position that arrived, whoever it was relayed to. Halving `--position-ms` doubled it (40,134 / 75,053 / 144,853 at 200, 100 and 50 ms); crowding barely moved it.
+
+Sampled stacks (one allocation in 997) put 92.5% of it in two places, both in `game::relay`, which runs once per position or weapon packet:
+
+- **66.2%** — the three recipient lists, one per position tail, built from nothing for every packet and dropped again. The size histogram is the giveaway: a doubling series 8, 16, 32 ... 512 bytes with monotonically falling counts, which is one `Vec` growing by `push` from empty.
+- **26.3%** — `net_cfg` reading four `Net:` settings per packet through a `ConfigFile::get` that built its `Section:Key` lookup string on the heap. `Net:PositionExtraPixels` is 23 characters, and 23-byte allocations were 13.6% of the total on their own.
+
+Both are fixed: the lists and the packet buffer live in a `RelayScratch` taken from the registry for the call and put back emptied, so each keeps the capacity its arena's fan-out has needed, and `ConfigFile::get` builds the key in a stack buffer, falling back to the heap only for keys over 96 bytes. `tests/alloc_free_relay.rs` guards it, and it separates the two: for 4,000 relayed positions through 40 players it counts **47,600** allocations on the parent, **31,600** with only the config fix, **16,000** with only the scratch fix, and **0** with both. The 4.0 per packet the config fix removes is exactly the four `Net:` lookups.
+
+CPU, three interleaved pairs at a quarter-map spread, since allocation counts need no control but CPU does: 7.81 / 7.68 / 7.65% before against 7.69 / 7.08 / 7.14% after. The medians differ by about 5% but the ranges overlap, so **the honest reading is that removing 73,000 allocations a second changed CPU by less than this machine's run-to-run spread** — the same result oss-core got. Heap per player went from 8,908 to 8,910 bytes, so the reuse costs nothing to hold.
+
+What is left, 2,071/s, is almost all the arena-entry path: `send_arena_response` builds a latin1 copy of every name for the player list, so a join into a 500-player arena costs about 500 allocations. The default `--churn-ms 1000` makes one join a second. It scales with joins, not with traffic, which is why the figure is identical at every crowding and every position rate — and it is the reason the number is 2,071 rather than nearly zero.
 
 ## Measuring under load
 

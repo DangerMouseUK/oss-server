@@ -163,6 +163,20 @@ fn rand(zone: &mut Zone) -> &mut Prng {
     zone.res.get_or_default::<Prng>()
 }
 
+/// Buffers [`relay`] reuses between packets: one recipient list per position
+/// tail, and the packet it builds for them.
+///
+/// These used to be built from nothing for every position packet, which at
+/// 500 players was about two thirds of the zone's allocation traffic -- each
+/// list grew 8, 16, 32 ... bytes by doubling, every packet, and was then
+/// dropped. They are taken out of the registry for the call and put back
+/// emptied, so each keeps the capacity the arena's fan-out has needed.
+#[derive(Default)]
+struct RelayScratch {
+    groups: [Vec<PlayerId>; 3],
+    buf: Vec<u8>,
+}
+
 /// Which variant of the outgoing packet a recipient gets.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Tail {
@@ -416,7 +430,8 @@ fn relay(
         .get(pid)
         .and_then(|p| p.ext.get::<BotFeatures>())
         .is_some_and(|b| b.see_own_posn);
-    let mut groups: [Vec<PlayerId>; 3] = Default::default();
+    let mut scratch = std::mem::take(zone.res.get_or_default::<RelayScratch>());
+    let groups = &mut scratch.groups;
     for i in zone.players.iter() {
         if i.status != PlayerStatus::Playing
             || i.arena != Some(arena)
@@ -470,9 +485,8 @@ fn relay(
     let energy = pos.energy as u16;
     let mut extra = pos.extra.unwrap_or_default();
     extra.energy = energy;
-    let mut buf = Vec::with_capacity(32);
-    for (idx, to) in groups.iter().enumerate() {
-        if to.is_empty() {
+    for idx in 0..scratch.groups.len() {
+        if scratch.groups[idx].is_empty() {
             continue;
         }
         let tail = match idx {
@@ -480,7 +494,7 @@ fn relay(
             1 => PositionTail::Energy(energy),
             _ => PositionTail::Extra(extra),
         };
-        buf.clear();
+        scratch.buf.clear();
         if send_wpn {
             S2CWeapon {
                 rotation: pos.rotation,
@@ -497,7 +511,7 @@ fn relay(
                 weapon: pos.weapon,
                 tail,
             }
-            .encode(&mut buf);
+            .encode(&mut scratch.buf);
         } else {
             S2CPosition {
                 rotation: pos.rotation,
@@ -512,18 +526,26 @@ fn relay(
                 x_speed: pos.x_speed,
                 tail,
             }
-            .encode(&mut buf);
+            .encode(&mut scratch.buf);
         }
-        zone.send_many(to.iter().copied(), &buf, flags);
+        zone.send_many(scratch.groups[idx].iter().copied(), &scratch.buf, flags);
     }
     // weapon packets each recipient was sent, for weapon loss
     if wtype != weapon_type::NONE {
-        for id in groups.iter().flatten() {
-            if let Some(d) = gd(zone, *id) {
-                d.wpn_sent += 1;
+        for i in 0..scratch.groups.len() {
+            for j in 0..scratch.groups[i].len() {
+                let id = scratch.groups[i][j];
+                if let Some(d) = gd(zone, id) {
+                    d.wpn_sent += 1;
+                }
             }
         }
     }
+    for g in &mut scratch.groups {
+        g.clear();
+    }
+    scratch.buf.clear();
+    *zone.res.get_or_default::<RelayScratch>() = scratch;
 }
 
 /// ASSS `SetIgnoreWeapons`: drop this share (0 to 1) of a player's weapons.

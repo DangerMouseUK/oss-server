@@ -9,7 +9,15 @@
 //! - logins are checked by the biller (this module is the zone's [`Auth`]);
 //!   while it is down players get in unauthenticated with a `^` before their
 //!   name, unless a [`PasswordCache`] knows them;
-//! - logoffs carry the player's final score;
+//! - logoffs carry the player's final score, but only when it differs from
+//!   the score this module last recorded -- and leaving a public arena
+//!   records it, so logging out of one normally sends the short 15-byte
+//!   logoff with no score at all. ASSS does the same: its `update_score`
+//!   compares against `p->pkt`, which `PA_LEAVEARENA` has just matched, and
+//!   neither server ever sends `S2B_UserScore`. A biller's score realm
+//!   therefore fills from non-public arenas, or when flags carried and flag
+//!   pickups disagree. Run against `oss-biller` on 2026-11-13: a kill in
+//!   arena `0` reached no `scores` row, the same kill in arena `duel` did;
 //! - chat channels (`;channel;text`), remote private messages to players in
 //!   other zones and squad messages, `?commands` the zone doesn't know
 //!   (including `?chat=` with the `Billing:LocalChats`/`StaffChats`
@@ -541,6 +549,15 @@ fn on_player_action(zone: &mut Zone, ev: &PlayerAction) {
                     loss_c2s: 0,
                     score: changed.then_some(score),
                 };
+                tracing::debug!(
+                    target: "billing_ssc",
+                    pid = p.0,
+                    with_score = changed,
+                    kills = score.kills,
+                    deaths = score.deaths,
+                    points = score.points,
+                    "logging a player off at the user database server"
+                );
                 send_s2b(zone, &pkt);
             }
         }
@@ -892,6 +909,17 @@ fn process_user_login(zone: &mut Zone, data: &[u8], pkt: BillerLogin) {
     let ok = matches!(
         pkt.result,
         login_result::OK | login_result::DEMO | login_result::ASK_DEMOGRAPHICS
+    );
+    tracing::debug!(
+        target: "billing_ssc",
+        pid = p.0,
+        result = pkt.result,
+        user_id = pkt.user_id,
+        seconds_played = pkt.seconds_played,
+        kills = pkt.score.map(|s| s.kills),
+        deaths = pkt.score.map(|s| s.deaths),
+        points = pkt.score.map(|s| s.points),
+        "user database server answered a login"
     );
     let ad = if ok {
         let [y, mo, d, h, mi, s] = pkt.first_login;

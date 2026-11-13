@@ -166,11 +166,11 @@ billing, hot config reload, module load/unload at run time, the admin API and me
 modules in the tree — the bundled zone loads 34 of them — and the ones ASSS has that this
 does not are named in `conf/modules.conf`.
 
-**Not here, and not coming here: Continuum's own encryption.** Continuum's key expansion is
-not public, and this project does not reverse-engineer it or carry it — a deliberate
-licensing and community decision. The consequence is plain: a build of these repositories
+**Not in this repository: Continuum's own encryption.** Continuum's key expansion is not
+public and this repository does not carry it, which is deliberate rather than an oversight.
+The consequence is plain: a build of these repositories
 cannot *join* a zone that requires Continuum encryption, and a Continuum client can only play
-*here* if the operator supplies that module themselves. What this repository provides is the
+*here* if the cipher module is supplied separately. What this repository provides is the
 hook — register an `oss_net::Acceptor` and `oss_net::Cipher` from your own module and nothing
 else needs to change. VIE encryption (the one that is public, and in ASSS) and
 [OpenSec](https://github.com/DangerMouseUK/oss-core/blob/main/docs/protocol/opensec.md) both

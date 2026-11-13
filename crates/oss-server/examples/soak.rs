@@ -12,6 +12,14 @@
 //! cargo run --release -p oss-server --example soak -- --peers 500 --seconds 60
 //! ```
 
+// The heap tracker is a global allocator wrapper, which needs `unsafe`; it only
+// forwards to `System` and updates counters. Same shape as oss-core's harness,
+// so the two sets of figures mean the same thing.
+#![allow(unsafe_code)]
+
+use std::alloc::{GlobalAlloc, Layout, System};
+use std::cell::Cell;
+use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::time::Instant;
 
 use oss_proto::Packet;
@@ -27,6 +35,59 @@ use oss_server::prng::Prng;
 use oss_server::runtime::ServerBuilder;
 use oss_server::time::Ticks;
 use oss_server::zone::Zone;
+
+// ---- heap tracking --------------------------------------------------------------
+//
+// Only allocations made while the zone is running are counted: the simulated
+// clients and the harness's own bookkeeping happen with the flag clear, so
+// what comes out is the game logic's own allocation traffic.
+
+thread_local! {
+    static IN_ZONE: Cell<bool> = const { Cell::new(false) };
+}
+static ZONE_ALLOCS: AtomicU64 = AtomicU64::new(0);
+static ZONE_LIVE: AtomicI64 = AtomicI64::new(0);
+
+fn in_zone() -> bool {
+    IN_ZONE.try_with(Cell::get).unwrap_or(false)
+}
+
+fn account(delta: i64, is_alloc: bool) {
+    if in_zone() {
+        ZONE_LIVE.fetch_add(delta, Ordering::Relaxed);
+        if is_alloc {
+            ZONE_ALLOCS.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+}
+
+struct Tracking;
+
+unsafe impl GlobalAlloc for Tracking {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        account(layout.size() as i64, true);
+        unsafe { System.alloc(layout) }
+    }
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        account(-(layout.size() as i64), false);
+        unsafe { System.dealloc(ptr, layout) }
+    }
+    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+        account(new_size as i64 - layout.size() as i64, true);
+        unsafe { System.realloc(ptr, layout, new_size) }
+    }
+}
+
+#[global_allocator]
+static GLOBAL: Tracking = Tracking;
+
+/// Runs zone work with its heap use attributed to the zone.
+fn zone_heap<T>(f: impl FnOnce() -> T) -> T {
+    IN_ZONE.with(|c| c.set(true));
+    let r = f();
+    IN_ZONE.with(|c| c.set(false));
+    r
+}
 
 const HELP: &str = "\
 Game-logic load harness for oss-server (no network transport).
@@ -121,6 +182,8 @@ struct Sim {
 #[derive(Default)]
 struct Totals {
     zone_ns: u64,
+    zone_allocs: u64,
+    zone_heap: i64,
     packets_in: u64,
     packets_out: u64,
     bytes_out: u64,
@@ -142,8 +205,9 @@ struct H {
 impl H {
     /// Runs `f` on the zone, timing it when measuring.
     fn timed(&mut self, f: impl FnOnce(&mut Zone)) {
+        let zone = &mut self.zone;
         let start = Instant::now();
-        f(&mut self.zone);
+        zone_heap(|| f(zone));
         if self.measuring {
             self.tot.zone_ns += start.elapsed().as_nanos() as u64;
         }
@@ -216,15 +280,19 @@ impl H {
     fn tick(&mut self) {
         self.t += 1;
         let t = self.t;
+        let zone = &mut self.zone;
         let start = Instant::now();
-        self.zone.set_now(Ticks(t));
-        oss_server::timers::run_due(&mut self.zone);
-        // what a transport would do with the outbox
-        let out = self.zone.take_outbox();
-        let (n, bytes) = out.items().iter().fold((0u64, 0u64), |(n, b), i| {
-            (n + 1, b + out.bytes(i).len() as u64)
+        let (n, bytes) = zone_heap(|| {
+            zone.set_now(Ticks(t));
+            oss_server::timers::run_due(zone);
+            // what a transport would do with the outbox
+            let out = zone.take_outbox();
+            let counted = out.items().iter().fold((0u64, 0u64), |(n, b), i| {
+                (n + 1, b + out.bytes(i).len() as u64)
+            });
+            zone.return_outbox(out);
+            counted
         });
-        self.zone.return_outbox(out);
         let ns = start.elapsed().as_nanos() as u64;
         if self.measuring {
             self.tot.zone_ns += ns;
@@ -283,9 +351,13 @@ fn main() -> std::process::ExitCode {
     };
 
     let mut capped = false;
+    let mut allocs_at_start = None;
     while h.t < end {
         let t = h.t + 1;
         h.measuring = t > warm_end;
+        if h.measuring && allocs_at_start.is_none() {
+            allocs_at_start = Some(ZONE_ALLOCS.load(Ordering::Relaxed));
+        }
         // The arena exists once the first player has entered it. Raising
         // General:MaxPlaying then, before the rest take ships, is what lets
         // every peer be in a ship: ASSS's default cap is 100 per arena.
@@ -409,8 +481,12 @@ fn main() -> std::process::ExitCode {
         h.tick();
     }
 
+    h.tot.zone_allocs = ZONE_ALLOCS.load(Ordering::Relaxed) - allocs_at_start.unwrap_or(0);
+    h.tot.zone_heap = ZONE_LIVE.load(Ordering::Relaxed);
     let secs = o.seconds as f64;
     let cpu = 100.0 * h.tot.zone_ns as f64 / 1e9 / secs;
+    let allocs_per_s = h.tot.zone_allocs as f64 / secs;
+    let heap_per_peer = h.tot.zone_heap as f64 / o.peers.max(1) as f64;
     let pkts = (h.tot.packets_in + h.tot.packets_out).max(1);
     let in_arena = h
         .zone
@@ -426,13 +502,14 @@ fn main() -> std::process::ExitCode {
         .count();
     if o.json {
         println!(
-            "{{\"peers\":{},\"seconds\":{},\"zone_cpu_percent\":{cpu:.3},\"ns_per_packet\":{:.1},\"packets_in_per_s\":{:.0},\"packets_out_per_s\":{:.0},\"bytes_out_per_s\":{:.0},\"tick_max_ms\":{:.3},\"slow_ticks\":{},\"playing_at_end\":{in_arena},\"in_ships_at_end\":{in_ships}}}",
+            "{{\"peers\":{},\"seconds\":{},\"zone_cpu_percent\":{cpu:.3},\"ns_per_packet\":{:.1},\"packets_in_per_s\":{:.0},\"packets_out_per_s\":{:.0},\"bytes_out_per_s\":{:.0},\"zone_allocs_per_s\":{allocs_per_s:.1},\"zone_heap_bytes\":{},\"heap_per_peer\":{heap_per_peer:.0},\"tick_max_ms\":{:.3},\"slow_ticks\":{},\"playing_at_end\":{in_arena},\"in_ships_at_end\":{in_ships}}}",
             o.peers,
             o.seconds,
             h.tot.zone_ns as f64 / pkts as f64,
             h.tot.packets_in as f64 / secs,
             h.tot.packets_out as f64 / secs,
             h.tot.bytes_out as f64 / secs,
+            h.tot.zone_heap,
             h.tot.tick_max_ns as f64 / 1e6,
             h.tot.slow_ticks,
         );
@@ -455,6 +532,12 @@ fn main() -> std::process::ExitCode {
             "game packets out      {:>10.0} /s ({:.1} Mbit/s before transport framing)",
             h.tot.packets_out as f64 / secs,
             h.tot.bytes_out as f64 * 8.0 / secs / 1e6
+        );
+        println!("zone allocations      {allocs_per_s:>10.1} /s");
+        println!(
+            "zone heap             {:>10.1} KB ({:.1} KB per player)",
+            h.tot.zone_heap as f64 / 1024.0,
+            heap_per_peer / 1024.0
         );
         println!(
             "longest tick          {:>10.3} ms ({} over 10 ms)",

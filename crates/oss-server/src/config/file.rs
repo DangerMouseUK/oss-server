@@ -170,8 +170,27 @@ impl ConfigFile {
     }
 
     /// `GetStr(section, key)`.
+    ///
+    /// This is on the position relay's per-packet path (`game::relay` reads
+    /// four `Net:` settings for every position packet), so the usual
+    /// `Section:Key` is built in a stack buffer rather than a `String`:
+    /// every lookup allocating cost about 20,000 allocations a second at 500
+    /// players. Keys longer than the buffer fall back to the heap.
     pub fn get(&self, section: &str, key: &str) -> Option<&str> {
-        let mut k = String::with_capacity(section.len() + key.len() + 1);
+        let n = section.len() + 1 + key.len();
+        let mut buf = [0u8; 96];
+        if let Some(slot) = buf.get_mut(..n) {
+            slot[..section.len()].copy_from_slice(section.as_bytes());
+            slot[section.len()] = b':';
+            slot[section.len() + 1..].copy_from_slice(key.as_bytes());
+            slot.make_ascii_lowercase();
+            // Both halves came from `&str` and `:` is ASCII, so this always
+            // succeeds; lowercasing ASCII cannot break UTF-8 either.
+            if let Ok(k) = std::str::from_utf8(slot) {
+                return self.table.get(k).map(|e| e.value.as_str());
+            }
+        }
+        let mut k = String::with_capacity(n);
         k.push_str(section);
         k.push(':');
         k.push_str(key);

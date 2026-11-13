@@ -12,9 +12,11 @@
 //!   checksum and lag statistics. Mismatches and missing answers (after 15 s)
 //!   are logged and, with `Security:SecurityKickoff`, kicked (capability
 //!   `bypasssecurity` exempts, `suppresssecurity` silences the log).
-//! * The VIE exe checksum is computed; the Continuum one comes from the zone's
-//!   `scrty` file (key/checksum pairs) when present, otherwise it isn't
-//!   checked. A private build can supply its own by shipping that file.
+//! * The Continuum exe checksum comes from the zone's `scrty` file
+//!   (key/checksum pairs) when present, otherwise it isn't checked; a private
+//!   build can supply its own by shipping that file. The VIE one is computed,
+//!   but a client that reports zero -- which a genuine VIE 1.34 client always
+//!   does -- is not held to it. See `check_exe` below for why.
 
 use std::sync::Arc;
 
@@ -235,6 +237,33 @@ fn check_answers(zone: &mut Zone) -> bool {
     false
 }
 
+/// Whether a VIE client's reported exe checksum is acceptable.
+///
+/// **Zero is accepted on purpose; do not tighten this to a plain equality.**
+/// In the VIE protocol zero means "not applicable", the same convention the
+/// login response follows the other way round (see
+/// [`core::VIE_CODE_CHECKSUM`](super::core::VIE_CODE_CHECKSUM)): a genuine VIE
+/// 1.34 client never computes this field and always leaves it at zero.
+///
+/// Measured 2026-11-13 off the 1998 client in an arena -- four samples, four
+/// keys, three sessions, with the settings and map checksums in the same
+/// packets correct every time. So `reported == expected` alone is
+/// unsatisfiable for a real client, and with `Security:SecurityKickoff` on
+/// (it defaults to off, which is the only reason this was a log line rather
+/// than an ejection) the zone ejects every honest VIE player within a minute.
+///
+/// [`vie_exe_checksum`](oss_proto::checksum::vie_exe_checksum) is not the
+/// problem: all 36 of its constants are words read out of `SUBSPACE.EXE` 1.34
+/// at a uniform `0x1800` stride, and the login-side `0xF142_9CE8` is that
+/// binary's CRC-32. The routine is genuinely VIE's; asking a VIE client for
+/// it is the bug. Clients that do compute it -- MervBot, and this project's
+/// own -- are still held to it, which is as much as the check can be worth
+/// once the one client that matters declines to answer. This mirrors the
+/// Continuum arm, which likewise skips when there is nothing to compare.
+fn check_exe(reported: u32, expected: u32) -> bool {
+    reported == 0 || reported == expected
+}
+
 fn on_response(zone: &mut Zone, pid: PlayerId, pkt: &[u8]) {
     let Some(p) = zone.players.get(pid) else {
         return;
@@ -307,7 +336,7 @@ fn on_response(zone: &mut Zone, pid: PlayerId, pkt: &[u8]) {
         bad = true;
     }
     let exe_ok = match kind {
-        ClientKind::Vie => r.exe_checksum == vie_exe,
+        ClientKind::Vie => check_exe(r.exe_checksum, vie_exe),
         ClientKind::Continuum => {
             if let (Some(crc), Some((_, Some(client_crc)))) = (map_crc, r.continuum)
                 && crc != client_crc

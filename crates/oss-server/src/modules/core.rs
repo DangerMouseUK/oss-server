@@ -78,10 +78,25 @@ pub mod auth_code {
 pub const VIE_CLIENT_VERSION: u16 = 134;
 /// Server version reported in the login response.
 pub const SERVER_VERSION: u32 = 134;
-/// Exe checksum ASSS reports to VIE clients.
+/// Exe checksum reported to VIE clients: the CRC-32 of the 630,784-byte
+/// `SUBSPACE.EXE` 1.34, which is what the original `subgame` sends. The client
+/// checks this one first and offers an update when it disagrees.
 pub const VIE_EXE_CHECKSUM: u32 = 0xF142_9CE8;
-/// Code checksum ASSS reports to VIE clients.
-pub const VIE_CODE_CHECKSUM: u32 = 0x281C_C948;
+/// Code checksum reported to VIE clients. **Zero on purpose; do not restore
+/// ASSS's value.**
+///
+/// In the VIE protocol zero means "not applicable". Decrypting the original
+/// `subgame2.exe` on the wire shows it sending `codechecksum = 0` beside the
+/// real `exechecksum` above, while ASSS `core.c:793` sends `0x281C_C948`; a
+/// genuine 1.34 client answers that value with `SEC_LoginChecksumMismatch`
+/// (`0x17`) and exits. Only staff ever got in, because the staff path below
+/// overwrites both fields with `0xFFFF_FFFF`, which the client skips.
+///
+/// Measured 2026-11-13: with this at zero and nothing else changed, a player
+/// with no capabilities logged in and entered an arena from the 1998 client.
+/// The security response carries the same convention the other way round --
+/// see `modules::security`.
+pub const VIE_CODE_CHECKSUM: u32 = 0;
 
 /// What a player sent to log in, after ASSS's sanitising.
 #[derive(Debug, Clone)]

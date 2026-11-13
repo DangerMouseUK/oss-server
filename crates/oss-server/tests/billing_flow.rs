@@ -17,6 +17,7 @@ use oss_proto::wire::FixedStr;
 use oss_server::config::MemSource;
 use oss_server::modules::billing_ssc::{BillerConnector, BillerLink, LinkEvent, LinkState};
 use oss_server::modules::core as core_mod;
+use oss_server::modules::stats::{Stats, stat};
 use oss_server::net::Loopback;
 use oss_server::player::{ClientKind, PlayerId};
 use oss_server::registry::{Owner, Scope};
@@ -617,4 +618,89 @@ fn two_zones_through_oss_biller() {
         oss_server::modules::billing_ssc::link_state(&hs[0].zone) == LinkState::Retry
     });
     biller.stop();
+}
+
+/// What a logoff actually carries, and when.
+///
+/// `billing_ssc` sends the player's score at logoff only when it differs
+/// from the one it last recorded -- and leaving a **public** arena records
+/// it, so an ordinary public-arena logoff sends the short 15-byte packet and
+/// the biller learns nothing. ASSS 1.4.4 `core/billing_ssc.c` does the same:
+/// `update_score()` compares against `p->pkt.{killpoints,flagpoints,wins,
+/// losses,flagscarried}` and `PA_LEAVEARENA` has just set `saved_score` from
+/// the same stats. These two tests pin both sides of that, because the
+/// difference is invisible from anywhere else.
+fn logged_in_player(h: &mut H, s: &Arc<Mutex<Script>>, name: &str) -> PlayerId {
+    h.tick(10);
+    push(s, LinkEvent::Connected);
+    h.tick(1);
+    push(s, LinkEvent::Packet(vec![0x33, b'i', b'd']));
+    h.tick(1);
+    let p = h.start_login(name, "pw", false);
+    h.tick(1);
+    let mut ok = vector("login_ok");
+    ok[2..6].copy_from_slice(&u32::from(p.0).to_le_bytes());
+    push(s, LinkEvent::Packet(ok));
+    h.tick(10);
+    assert_eq!(h.login_code(p), Some(0));
+    p
+}
+
+fn logoff_of(h: &mut H, s: &Arc<Mutex<Script>>, p: PlayerId) -> ServerToBiller {
+    sent(s);
+    core_mod::kick(&mut h.zone, p);
+    h.tick(50);
+    let mut found: Vec<ServerToBiller> = sent(s)
+        .iter()
+        .filter(|d| d[0] == 0x05)
+        .map(|d| ServerToBiller::decode(d).expect("logoff"))
+        .collect();
+    assert_eq!(found.len(), 1, "exactly one logoff");
+    found.remove(0)
+}
+
+#[test]
+fn a_public_arena_score_does_not_reach_the_biller() {
+    let (mut h, s) = scripted();
+    let p = logged_in_player(&mut h, &s, "player");
+    h.enter(p); // no arena name: a public arena
+    let stats = h.zone.iface::<dyn Stats>().expect("stats");
+    stats.set(&mut h.zone, p, stat::KILLS, 1);
+    stats.set(&mut h.zone, p, stat::KILL_POINTS, 11);
+    assert_eq!(
+        h.zone
+            .players
+            .get(p)
+            .map(|x| (x.score.wins, x.score.kill_points)),
+        Some((1, 11)),
+        "the zone knows the score"
+    );
+    let ServerToBiller::UserLogoff { score, .. } = logoff_of(&mut h, &s, p) else {
+        panic!("not a logoff");
+    };
+    assert_eq!(
+        score, None,
+        "a kill in a public arena is not sent: LeaveArena recorded it first"
+    );
+}
+
+#[test]
+fn a_flag_pickup_is_what_lets_a_public_score_through() {
+    // The two sides of the comparison read `flags` from different places:
+    // the recorded one from `stat::FLAG_PICKUPS`, the current one from the
+    // player's `flags_carried`. Any flag picked up and no longer held makes
+    // them differ, and then the whole score goes after all.
+    let (mut h, s) = scripted();
+    let p = logged_in_player(&mut h, &s, "player");
+    h.enter(p);
+    let stats = h.zone.iface::<dyn Stats>().expect("stats");
+    stats.set(&mut h.zone, p, stat::KILLS, 1);
+    stats.set(&mut h.zone, p, stat::KILL_POINTS, 11);
+    stats.set(&mut h.zone, p, stat::FLAG_PICKUPS, 1);
+    let ServerToBiller::UserLogoff { score, .. } = logoff_of(&mut h, &s, p) else {
+        panic!("not a logoff");
+    };
+    let score = score.expect("the score is sent once the flag counts disagree");
+    assert_eq!((score.kills, score.points), (1, 11));
+    assert_eq!(score.flags, 0, "flags carried, not flags picked up");
 }

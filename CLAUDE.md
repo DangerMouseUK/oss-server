@@ -21,13 +21,18 @@ Rust zone server for SubSpace/Continuum. Licence **GPL-2.0-or-later**. Behaviour
   broken intra-doc link, a bad code fence. oss-core's `main` went red on exactly that on 2026-11-11,
   after fmt, clippy and tests all passed locally.
   **Not `cargo fmt --all` in this repo.** `--all` takes its package list from `cargo metadata`,
-  which includes path dependencies outside this workspace. Here that hands rustfmt 31 source
-  roots in the sibling `../oss-core` checkout and **rewrites oss-core in place**, across a repo
-  boundary and without saying so. It is a silent no-op only while oss-core happens to be
+  which includes path dependencies outside this workspace. Here that hands rustfmt every
+  source root in the sibling `../oss-core` checkout and **rewrites oss-core in place**, across
+  a repo boundary and without saying so. It is a silent no-op only while oss-core happens to be
   rustfmt-clean — it bites exactly when someone is mid-edit there. Plain `cargo fmt` at the
   workspace root covers this repo's own crates, which is what is wanted. Measured in this repo
-  on 2026-11-11 with `cargo fmt --all --verbose --check`: 31 oss-core roots under `--all`, none
-  under plain `cargo fmt`. Inside oss-core itself `--all` is correct and should stay.
+  on 2026-11-13 with `cargo fmt --all --verbose --check` (that form only reads): 81 source
+  roots under `--all`, 34 of them in `../oss-core`; 47 under plain `cargo fmt`, none in
+  oss-core. Those totals climb as either repo gains crates, tests, examples or benches, so
+  re-count rather than trust them — the verbose output names each root on a line beginning
+  `[lib (2024)]`, and no line of it begins `Formatting`. CI's own `fmt` step has run plain
+  `cargo fmt --check` since `09a8341` on 2026-11-12; read `.github/workflows/ci.yml` for what
+  CI does today. Inside oss-core itself `--all` is correct and should stay.
   **And the writing form reformats every file in the workspace, including ones another
   session has uncommitted.** Harmless while one session worked at a time; not harmless now.
   On 2026-11-12 two sessions reformatted each other's in-progress files within one hour, in

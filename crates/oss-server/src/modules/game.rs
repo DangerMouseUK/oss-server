@@ -532,12 +532,9 @@ fn relay(
     }
     // weapon packets each recipient was sent, for weapon loss
     if wtype != weapon_type::NONE {
-        for i in 0..scratch.groups.len() {
-            for j in 0..scratch.groups[i].len() {
-                let id = scratch.groups[i][j];
-                if let Some(d) = gd(zone, id) {
-                    d.wpn_sent += 1;
-                }
+        for id in scratch.groups.iter().flatten().copied() {
+            if let Some(d) = gd(zone, id) {
+                d.wpn_sent += 1;
             }
         }
     }

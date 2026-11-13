@@ -9,15 +9,9 @@
 //! - logins are checked by the biller (this module is the zone's [`Auth`]);
 //!   while it is down players get in unauthenticated with a `^` before their
 //!   name, unless a [`PasswordCache`] knows them;
-//! - logoffs carry the player's final score, but only when it differs from
-//!   the score this module last recorded -- and leaving a public arena
-//!   records it, so logging out of one normally sends the short 15-byte
-//!   logoff with no score at all. ASSS does the same: its `update_score`
-//!   compares against `p->pkt`, which `PA_LEAVEARENA` has just matched, and
-//!   neither server ever sends `S2B_UserScore`. A biller's score realm
-//!   therefore fills from non-public arenas, or when flags carried and flag
-//!   pickups disagree. Run against `oss-biller` on 2026-11-13: a kill in
-//!   arena `0` reached no `scores` row, the same kill in arena `duel` did;
+//! - logoffs carry the player's final score, but usually not from a public
+//!   arena -- see "What a logoff carries" below, which is the one place this
+//!   module's ASSS parity costs a zone owner something real;
 //! - chat channels (`;channel;text`), remote private messages to players in
 //!   other zones and squad messages, `?commands` the zone doesn't know
 //!   (including `?chat=` with the `Billing:LocalChats`/`StaffChats`
@@ -32,6 +26,64 @@
 //! in `?usage` is printed month-day-year rather than ASSS's month-year-day,
 //! and biller packets forwarded to a player (S2C `0x33` login text) are sent
 //! whole, where ASSS drops their last byte.
+//!
+//! # What a logoff carries, and what that costs
+//!
+//! `S2B_UserLogoff` carries the player's final score only when it differs
+//! from the score this module last recorded. Leaving a **public** arena
+//! records it, and that is the last thing to happen before the disconnect,
+//! so the two normally match and the short 15-byte logoff goes instead of
+//! the full 29-byte one: **an ordinary logoff from a public arena tells the
+//! billing server nothing about the score, however many kills it held.**
+//!
+//! ASSS 1.4.4 does exactly this, which is why it is kept. `core/billing_ssc.c`
+//! `update_score()` compares against `p->pkt.{killpoints, flagpoints, wins,
+//! losses, flagscarried}`, and its `PA_LEAVEARENA` arm has just set
+//! `saved_score` from the same statistics; it then sends
+//! `offsetof(struct S2B_UserLogoff, Score)` bytes. Neither server ever sends
+//! `S2B_UserScore` (type 17), the protocol's other way to report a score:
+//! ASSS declares it in `packets/billing.h` and sends it nowhere, and the
+//! packet spreadsheets give it a layout but no description of when a zone
+//! should send one.
+//!
+//! **Which arenas lose the score.** The recording is gated on
+//! [`crate::arena::Arena::is_public`], which is `basename == "(public)"`, and
+//! [`crate::arena::basename`] strips trailing ASCII digits from the first 19
+//! bytes of the name and returns `(public)` if nothing is left. So `0`, `1`,
+//! `42` and any all-digit name lose it; `duel`, `turf`, `duel2` (basename
+//! `duel`) and anything else keep it. Three other things let a score through
+//! from a public arena:
+//!
+//! - **a flag picked up.** The recorded score's `flags` comes from
+//!   `stat::FLAG_PICKUPS`, the current one from the player's `flags_carried`.
+//!   A player who picked up a flag and is not holding it at logoff makes the
+//!   two differ, and then the *whole* score is sent. A flag zone therefore
+//!   keeps its public scores almost by accident.
+//! - **no `scoring:stats` module.** With no [`Stats`] interface the recording
+//!   is skipped entirely, so the score is sent.
+//! - **an arena switch at the end**, since only the last arena left counts.
+//!
+//! `tests/billing_flow.rs` pins the first two of those against the plain
+//! public case.
+//!
+//! **Only the score is lost.** Everything else a billing server keeps reaches
+//! it by another route and is unaffected: play time is measured by the biller
+//! from the session it already timed (it needs the logoff to arrive, not the
+//! score in it), `?find` is answered from its table of who is online, and
+//! squads, `?chat` channel lists, banners and password changes travel as
+//! their own `S2B_UserCommand` and `S2B_UserBanner` packets when they happen.
+//! A run against `oss-biller` on 2026-11-13 showed the accounts, play time,
+//! channel lists and squad all surviving a logout while the `scores` table
+//! stayed empty.
+//!
+//! **What a zone owner sees.** A public zone with no flag game never
+//! accumulates cross-zone scores at all; one with a flag game does. When a
+//! score is sent, its `flags` field is flags *carried* at logoff -- normally
+//! zero -- not flags picked up, and the packet spreadsheets call that field
+//! `goalCount` rather than flags. Every ASSS zone has always behaved this
+//! way. Whether a real SSC biller got public scores by some other means
+//! cannot be answered from this repository: it would need a live SSC, or
+//! subgame, which is closed source.
 
 use std::net::{SocketAddr, UdpSocket};
 use std::sync::Arc;

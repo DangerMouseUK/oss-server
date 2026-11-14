@@ -810,7 +810,6 @@ dependencies = [
  "oss-proto",
  "rusqlite",
  "sha2",
- "thiserror",
  "tracing",
  "tracing-subscriber",
 ]

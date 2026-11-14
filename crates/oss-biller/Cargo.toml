@@ -12,7 +12,6 @@ oss-proto.workspace = true
 oss-net.workspace = true
 rusqlite = { version = "0.41", features = ["bundled"] }
 sha2 = "0.11"
-thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 clap = { version = "4", features = ["derive"] }

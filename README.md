@@ -209,15 +209,24 @@ place. The doc gate is not optional and the other three do not stand in for it.
 
 ## Licence
 
-GPL-2.0-or-later (see [`LICENSE`](LICENSE)), matching ASSS, whose behaviour this server
-follows and whose source may be ported into it. The split across the three repositories is
+GPL-2.0-or-later (see [`LICENSE`](LICENSE)), so that this server and the game it serves stay
+open, and so does anything built from them. The split across the three repositories is
 deliberate: [oss-core](https://github.com/DangerMouseUK/oss-core) is MIT so that anyone's
 bot, tool or alternative client can build on it whatever licence they use, while the server
 and client are GPL.
 
-The bundled zone under `zone/` comes from the ASSS 1.4.4 distribution (GPL-2.0-or-later, like
-this repository) except where a file says otherwise; `zone/README.md` records every change
-and which files are this project's own.
+**No ASSS source is in this repository.** ASSS is a separate GPL implementation of the same
+zone server, written in C. This one is written fresh in Rust and is compatible with ASSS
+rather than derived from it: it reads the same zone directories and puts the same bytes on
+the wire because that behaviour was studied and implemented here, not because any of its
+code came from there.
+
+What is here from ASSS is data, in two places. The bundled zone under `zone/` comes from the
+ASSS 1.4.4 distribution (GPL-2.0-or-later, like this repository) except where a file says
+otherwise; `zone/README.md` records every change and which files are this project's own. The
+28 fixture files under `crates/oss-server/tests/fixtures/asss-vectors/` are transcripts
+recorded from ASSS 1.4.4 modules compiled unmodified, and each one's header names the ASSS
+source file it came from.
 
 SubSpace and Continuum are the names of the original games; this project is an independent,
 compatible implementation and is not affiliated with their authors.

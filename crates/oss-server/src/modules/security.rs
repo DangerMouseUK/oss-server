@@ -293,7 +293,7 @@ fn on_response(zone: &mut Zone, pid: PlayerId, pkt: &[u8]) {
         }
         return;
     }
-    // Continuum 0.40 answers with the timer drift and stops
+    // Continuum 0.38 answers with the timer drift and stops
     // ([`SecurityResponse::CONT_LEN`]); later builds append a map CRC-32
     // ([`SecurityResponse::CONT_CRC_LEN`]). Both are genuine.
     let len_ok = if kind == ClientKind::Continuum {

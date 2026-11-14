@@ -1,7 +1,7 @@
 # Map security checksum vectors from ASSS 1.4.4 src/core/mapdata.c (load_from_file + GetChecksum,
 # compiled unmodified). Tiles counted: 1..160 and 171 (safe); big objects expanded as ASSS does.
 # Keys >= 0x80000000 are negative as int: ASSS then starts x/y at negative offsets and its sparse
-# array wraps coordinates mod 1024. The Continuum client does NOT: its loop
+# array wraps coordinates mod 1024. The Continuum client does NOT: its own loop
 # divides unsigned. Confirmed against the client (64/64 keys, 46 top-bit-set). Such a line
 # therefore carries two sums, `checksum <key> <asss> <client>`; we assert the client's and
 # keep ASSS's as the record. Only top-bit-set keys diverge, and 6 of the 33 agree anyway.

@@ -1,5 +1,10 @@
-//! A plain VIE 1.34 client can log in, enter an arena and survive the periodic
-//! security check on a stock build.
+//! What this server sends a plain VIE 1.34 client, and what it accepts back,
+//! on a stock build.
+//!
+//! **This is a test of our own bytes, not of the client.** A plain account is
+//! still refused at login with `SEC_LoginChecksumMismatch` (`0x17`) by the
+//! real 1998 client, measured three times on 2026-11-13; nothing here
+//! contradicts that, because no client is in the loop.
 //!
 //! In the VIE protocol zero means "not applicable", and it means it in both
 //! directions:
@@ -229,7 +234,11 @@ fn vie_answer(settings: &[u8], key: u32) -> SecurityResponse {
 fn a_plain_vie_player_is_sent_a_zero_code_checksum() {
     let mut h = H::new();
     let (p, lr) = h.login("VieTest134");
-    assert_eq!(lr.code, s2c::login_code::OK, "an ordinary player gets in");
+    assert_eq!(
+        lr.code,
+        s2c::login_code::OK,
+        "the server admits an ordinary player"
+    );
     // Not staff: staff get 0xFFFFFFFF for both, which makes the client skip
     // the comparison entirely and is what masked this for so long.
     assert_eq!(

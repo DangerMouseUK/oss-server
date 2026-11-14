@@ -1,9 +1,9 @@
 //! The security response length gate, and what a Continuum client's missing
 //! map CRC-32 means.
 //!
-//! Continuum 0.40 answers S2C `0x18` with the forty common bytes and a timer
-//! drift and stops there — 42 bytes, read off its own `0x1A` builder. Later
-//! builds append a map CRC-32, for 46. A server that insists on one of the two
+//! Continuum 0.38 answers S2C `0x18` with the forty common bytes and a timer
+//! drift and stops there — 42 bytes. Build 0.40 appends a map CRC-32, for 46,
+//! which is the length of every captured response from a real 0.40 client. A server that insists on one of the two
 //! rejects every client of the other kind, once a minute, for ever; that is
 //! exactly what this server did before `SecurityResponse::is_continuum_len`,
 //! and nothing here covered it.
@@ -191,7 +191,7 @@ fn map_crc() -> u32 {
 /// A response every field of which is right for `key`.
 ///
 /// `crc` is what goes in the Continuum tail: `Some` for a build that reports a
-/// map CRC-32 (46 bytes on the wire), `None` for 0.40 (42). A VIE client has
+/// map CRC-32 (46 bytes on the wire), `None` for 0.38 (42). A VIE client has
 /// no tail at all.
 fn good(kind: ClientKind, settings: &[u8], key: u32, crc: Option<u32>) -> SecurityResponse {
     let block = SettingsBlock::from_bytes(settings.try_into().expect("1428 bytes"));
@@ -265,7 +265,7 @@ fn answer(
 
 #[test]
 fn continuum_42_byte_response_is_accepted() {
-    // What Continuum 0.40 sends: the timer drift, no map CRC-32.
+    // What Continuum 0.38 sends: the timer drift, no map CRC-32.
     assert_eq!(
         answer(ClientKind::Continuum, None, |r, buf| {
             r.encode(buf);
@@ -299,7 +299,7 @@ fn a_42_byte_response_is_still_checked() {
 
 #[test]
 fn a_length_no_client_sends_is_rejected_and_kicked() {
-    // One byte short of the 0.40 form, and three short of it: neither is a
+    // One byte short of the 0.38 form, and three short of it: neither is a
     // length any client is known to send.
     for drop in [1u64, 3] {
         let want = SecurityResponse::CONT_LEN - usize::try_from(drop).expect("small");
@@ -331,7 +331,7 @@ fn a_vie_client_may_not_use_the_continuum_form() {
 #[test]
 fn a_client_that_reports_no_map_crc_is_not_a_crc_mismatch() {
     // The arena's CRC-32 is not zero, so reading "didn't report one" as
-    // "reported zero" would kick every 0.40 client.
+    // "reported zero" would kick every 0.38 client.
     assert_ne!(map_crc(), 0, "the test map must have a CRC worth comparing");
     assert_eq!(
         answer(ClientKind::Continuum, None, |_, _| {}),

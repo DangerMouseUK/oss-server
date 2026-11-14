@@ -40,8 +40,11 @@ cargo run --release
 With no arguments it runs its bundled default zone — the ASSS 1.4.4 sample zone, compiled
 into the binary, so there are no files to put anywhere — on UDP port 5000, with the ping port
 on 5001. You are now a zone. Connect with [oss-client](https://github.com/DangerMouseUK/oss-client)
-or with any VIE client or bot core. (Continuum clients need a cipher module this repository
-does not ship — see [below](#what-works-and-what-does-not).)
+or with a VIE bot core. The original SubSpace 1.34 client is not there yet: an ordinary
+account is refused at login and the client exits (measured 2026-11-13) — see
+[docs/interoperability.md](docs/interoperability.md) for what has actually joined.
+(Continuum clients need a cipher module this repository does not ship — see
+[below](#what-works-and-what-does-not).)
 
 To see it answer without installing a client, run some headless bots at it from an
 `oss-client` checkout:

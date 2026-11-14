@@ -12,6 +12,7 @@ not a unit test; the detail underneath says what was observed and, as importantl
 | **oss-client** (Open SubSpace) | VIE and OpenSec | Plays: arena, map, LVZ, chat, kills | continuously |
 | **oss-bot** (headless, Open SubSpace) | VIE and OpenSec | Logs in, flies, chats; used for load swarms | continuously |
 | **oss-conformance** `server` mode | VIE | 28 live protocol checks pass, 1 skipped | 2026-11-12 |
+| **SubSpace 1.34**, the original 1998 client | VIE | Logged in, downloaded news, entered an arena and was flown. **Staff accounts only on a stock build:** an ordinary account is refused at login (`0x17`) and the client exits | 2026-11-13 |
 
 ## Continuum 0.40
 
@@ -57,6 +58,27 @@ other two exist nowhere in ASSS. The bot carried on past all three.
 **Not covered:** spectator only, so nothing ship-side was exercised by this client; VIE
 transport only; MERVBot 4.8 and TWCore were not run; the second player in the arena was our
 own `oss-bot`.
+
+## SubSpace 1.34
+
+The original 1998 `SUBSPACE.EXE` (630,784 bytes, VIE 1.34 by its version resource)
+connected over VIE, logged in, downloaded `news.txt`, entered an arena and was flown for
+about a minute. It answered the `0x1A` security challenge with the settings and map
+checksums correct and key-dependent, and with `exe_checksum = 0` — it reports no
+executable checksum at all, which is why the server reads a zero there as "not
+applicable" rather than as a mismatch.
+
+**Read this honestly, because it is the row with the most caveats on the page.**
+
+- **Ordinary accounts cannot log in.** On a stock build a player without
+  `CAP_SEE_PRIV_FREQ` answers the login response with `SEC_LoginChecksumMismatch`
+  (`0x17`) and the process exits about two milliseconds later. Three runs, two names,
+  2026-11-13. Staff get in because that path sends `0xFFFF_FFFF` for both login
+  checksums, which the client skips. The cause is the login `codechecksum`, and what
+  value an ordinary player would accept is **not settled**.
+- **What was not covered:** one person flew for about a minute. Arena entry, settings,
+  map download, news and the security exchange are demonstrated. Weapons, kills, flags,
+  chat and a second player are not, and SubSpace 1.35 has never been started.
 
 ## The client settings packet
 

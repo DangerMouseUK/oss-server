@@ -105,7 +105,7 @@ fn init_zone_writes_a_runnable_copy() {
 ///
 /// Not ASSS: on keys with the top bit set ASSS takes its two modulos on a
 /// signed copy of the key and its sparse array then wraps coordinates mod
-/// 1024, which the client's loop does not do. Those rows carry
+/// 1024, which the client's own loop does not do. Those rows carry
 /// both sums and we assert the client's -- a server that matched ASSS here
 /// would kick real clients on about half of all challenge rounds.
 #[test]

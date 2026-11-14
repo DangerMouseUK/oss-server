@@ -89,13 +89,17 @@ pub const VIE_EXE_CHECKSUM: u32 = 0xF142_9CE8;
 /// `subgame2.exe` on the wire shows it sending `codechecksum = 0` beside the
 /// real `exechecksum` above, while ASSS `core.c:793` sends `0x281C_C948`; a
 /// genuine 1.34 client answers that value with `SEC_LoginChecksumMismatch`
-/// (`0x17`) and exits. Only staff ever got in, because the staff path below
-/// overwrites both fields with `0xFFFF_FFFF`, which the client skips.
+/// (`0x17`) and exits. Staff get in because the staff path below overwrites
+/// both fields with `0xFFFF_FFFF`, which the client skips.
 ///
-/// Measured 2026-11-13: with this at zero and nothing else changed, a player
-/// with no capabilities logged in and entered an arena from the 1998 client.
-/// The security response carries the same convention the other way round --
-/// see `modules::security`.
+/// **Zero is not known to be sufficient.** The one decrypted `subgame`
+/// response we have is a new-user reply (`code = 1`), where "not applicable"
+/// is true by definition; it does not establish what the client requires on
+/// the `code = 0` path, which is the path every login here takes. A plain
+/// account was refused with `0x17` three times against a build carrying this
+/// constant (measured 2026-11-13, `04df4d8`), so an ordinary 1.34 player
+/// still cannot log in. The security response carries the same convention the
+/// other way round -- see `modules::security`.
 pub const VIE_CODE_CHECKSUM: u32 = 0;
 
 /// What a player sent to log in, after ASSS's sanitising.

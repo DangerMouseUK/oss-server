@@ -156,8 +156,8 @@ CI runs `--peers 500 --seconds 30 --max-playing 500 --max-cpu 15` as the `soak` 
 
 ## Reporting, not fixed here
 
-- **The PRD states the budget at 60 Hz** (PRD line 108). The server ticks at **100 Hz** (`crates/oss-server/src/runtime.rs:190`), which all three repos' `CLAUDE.md` give as SubSpace's timebase. Every figure here is measured at 100 Hz, so they answer the harder reading. If the PRD line is meant literally, the budget is 1.67 times easier than what is measured here; if it is stale, the numbers above stand as they are. That line is the lead's to settle.
-- **The requirement has no parity row and no entry in the verification plan.** Suggested wording for the parity row: *"500 players in one arena under 20% of one core (PRD line 108) — zone and transport measured separately by the two soak harnesses; gated in CI by `oss-server` `soak` (`--max-playing 500 --max-cpu 15`) and `oss-core` `soak` (`--fanout 82 --max-cpu 12`). Open: a crowded arena (fan-out 350) measures about 27% and does not meet the budget."*
+- **The PRD states the budget at 100 Hz** (`SRV-N2`, with the tick rate in `SRV-N1`, which cites decision `D6`). The server ticks at **100 Hz** (`crates/oss-server/src/runtime.rs:190`), which all three repos' `CLAUDE.md` give as SubSpace's timebase, and every figure here is measured there. An earlier draft of the PRD said 60 Hz, which would have made the budget 1.67 times easier; that reading is gone, so the numbers above answer the requirement as it now stands. **Settled, nothing outstanding.**
+- **The requirement has had a parity row since 2026-11-12** — zone and transport measured separately by the two soak harnesses, gated in CI by `oss-server` `soak` (`--max-playing 500 --max-cpu 15`) and `oss-core` `soak` (`--fanout 82 --max-cpu 12`), and still `partial` because a crowded arena (fan-out 350) measures about 27%. **It has no entry in the verification plan**, which is the gap that remains.
 
 ## Change found by the harness
 

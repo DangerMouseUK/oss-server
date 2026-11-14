@@ -18,9 +18,30 @@ env:
   # so a new lint cannot redden it, and leaving it on floating `stable` is how a
   # genuinely broken release still gets caught here.
   #
-  # To bump: raise this one value and let CI prove it green as its own change.
-  # Note the `uses:` ref stays @stable -- the ref pins the *action*, and this
-  # input overrides the toolchain that branch would otherwise default to.
+  # Note the `uses:` ref stays @stable -- the ref pins the *action*, and the
+  # `toolchain:` input below overrides the toolchain that branch would
+  # otherwise default to. Changing the ref would not pin anything.
+  #
+  # To bump this value. It is a procedure, not a guess:
+  #
+  #   1. Look at the newest run of the "Rust drift" workflow
+  #      (.github/workflows/rust-drift.yml). It runs these same
+  #      warning-denying gates on floating `stable` every week, and its job
+  #      summary names the stable it resolved and whether each gate passed
+  #      on it. If there is no recent run, start one by hand:
+  #      Actions -> Rust drift -> Run workflow.
+  #   2. Bump only when that summary says every gate passed. If one failed,
+  #      that failure is the work: fix it first, as its own change. Bumping
+  #      on top of a failing gate only moves a red run out of a schedule and
+  #      into a pull request, which is the thing the pin exists to stop.
+  #   3. Raise this one value to the version the summary names, in a pull
+  #      request that changes nothing else -- so CI proves it green on its
+  #      own, and so it can be reverted on its own.
+  #   4. oss-core, oss-server and oss-client each carry this value. Bump all
+  #      three, and land oss-core first: the other two check it out as a
+  #      sibling, so they are where a bad oss-core shows up.
+  #
+  # No bot does this. rust-drift.yml says why not, at some length.
   RUST_PINNED: "1.100.0"
 
 # oss-core is consumed as a sibling path dependency (../oss-core), so both repos

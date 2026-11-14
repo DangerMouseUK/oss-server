@@ -1,0 +1,189 @@
+name: Rust drift
+
+# What this is for.
+#
+# The warning-denying jobs in ci.yml run on a pinned toolchain (RUST_PINNED
+# there), so the day a new `stable` ships a new lint it can no longer turn this
+# repository red on code nobody has touched -- which is what happened here on
+# 2026-11-13. The price of that pin is that nobody finds out a new stable broke
+# something until somebody bumps it. This workflow pays that price back: it
+# runs the same warning-denying gates on floating `stable`, weekly, and reports
+# what it found.
+#
+# The one property that matters: this can never be the reason a change fails to
+# merge. Three separate things make that true, and all three would have to be
+# undone before this could gate anything.
+#
+#   1. It has no `push` trigger and no `pull_request` trigger. A workflow that
+#      does not run on a pull request cannot appear among the checks of that
+#      pull request, so no merge can ever be waiting on it. That is the one
+#      that really does the work; the other two are belt and braces.
+#   2. Every step that can fail carries `continue-on-error: true`, so a gate
+#      that fails does not fail its step.
+#   3. The job carries `continue-on-error: true`, so anything unexpected -- a
+#      runner fault, a failed checkout, an apt mirror having a bad morning --
+#      still concludes as success.
+#
+# Points 2 and 3 mean this workflow is always green on purpose. The verdict is
+# in the job summary of the run, not in its colour. So:
+#
+#   * Do not add this job to the required status checks of the repository.
+#   * Do not give it a `push:` or `pull_request:` trigger to make it more
+#     visible -- that is exactly the arrangement the pin exists to remove.
+#
+# Why no bot opens the bump pull request:
+#
+#   * Dependabot updates `uses:` action refs and dependency manifests. The
+#     toolchain here lives in a workflow `env:` string, which it has no updater
+#     for, and the `uses:` ref is deliberately left at `@stable` because the
+#     ref pins the action while the `toolchain:` input pins the toolchain. So
+#     there is nothing in this arrangement for Dependabot to see.
+#   * The custom regex manager of Renovate could bump a marked string, but
+#     Renovate is a GitHub App that has to be installed on the account. A
+#     config file for a bot that is not installed is the same as having no
+#     mechanism at all, only harder to notice.
+#   * A scheduled workflow opening the pull request itself needs a token worth
+#     having: a pull request opened with the default `GITHUB_TOKEN` does not
+#     trigger `pull_request` workflows, so the bump would arrive with CI never
+#     having run on it -- which is the single thing a bump needs. Making that
+#     work means keeping a personal access token, or GitHub App credentials,
+#     with write access in three public repositories, to save one line of
+#     typing.
+#
+# The bump procedure itself is in ci.yml, next to the value it bumps.
+
+on:
+  schedule:
+    # Mondays, 06:37 UTC, twenty minutes after oss-core so the two do not
+    # contend for runners. Rust ships a stable every six weeks, so weekly gives
+    # several looks per release with room for a missed week.
+    - cron: "37 6 * * 1"
+  # GitHub disables scheduled workflows in a repository with no activity for 60
+  # days, and this is also how you run the check by hand before bumping.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+# oss-core is consumed as a sibling path dependency (../oss-core), so both
+# repositories are checked out side by side, exactly as in ci.yml. Note that
+# this takes oss-core's default branch, so a drift report here is about this
+# repository against the current oss-core, not against a pinned one.
+jobs:
+  drift:
+    name: Gates on floating stable
+    runs-on: ubuntu-latest
+    # Belt and braces; see the header. The `on:` block above is what actually
+    # keeps this out of the checks of every pull request.
+    continue-on-error: true
+    # The `test` job in ci.yml runs on three operating systems. One is enough
+    # here: a new lint or a new rustdoc diagnostic fires the same way on all of
+    # them, and this job is looking for the toolchain changing, not the
+    # platform.
+    defaults:
+      run:
+        working-directory: oss-server
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: oss-server
+        continue-on-error: true
+      - uses: actions/checkout@v4
+        with:
+          repository: DangerMouseUK/oss-core
+          path: oss-core
+        continue-on-error: true
+
+      # No `toolchain:` input, deliberately: that absence is what makes this
+      # floating where ci.yml is pinned.
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+        continue-on-error: true
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: oss-server
+        continue-on-error: true
+
+      - name: Versions
+        id: versions
+        continue-on-error: true
+        run: |
+          # Read the pin out of ci.yml rather than repeating it here, so there
+          # stays exactly one place the pinned version lives.
+          pinned="$(sed -n 's/^  RUST_PINNED: "\(.*\)"$/\1/p' .github/workflows/ci.yml)"
+          floating="$(rustc --version | cut -d' ' -f2)"
+          echo "pinned=${pinned}" >> "$GITHUB_OUTPUT"
+          echo "floating=${floating}" >> "$GITHUB_OUTPUT"
+
+      # Plain `cargo fmt`, never `--all`, for the reason ci.yml gives: `--all`
+      # takes its package list from `cargo metadata`, which here reaches the
+      # ../oss-core checkout above.
+      - name: cargo fmt
+        id: fmt
+        continue-on-error: true
+        run: cargo fmt --check
+
+      - name: cargo clippy
+        id: clippy
+        continue-on-error: true
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: cargo test
+        id: test
+        continue-on-error: true
+        run: cargo test --workspace
+
+      - name: cargo doc
+        id: docs
+        continue-on-error: true
+        run: cargo doc --workspace --no-deps --all-features
+        env:
+          RUSTDOCFLAGS: -D warnings
+
+      - name: Report
+        if: always()
+        continue-on-error: true
+        env:
+          PINNED: ${{ steps.versions.outputs.pinned }}
+          FLOATING: ${{ steps.versions.outputs.floating }}
+          FMT: ${{ steps.fmt.outcome }}
+          CLIPPY: ${{ steps.clippy.outcome }}
+          TEST: ${{ steps.test.outcome }}
+          DOCS: ${{ steps.docs.outcome }}
+        run: |
+          {
+            echo "# Rust drift"
+            echo
+            echo "| | |"
+            echo "|---|---|"
+            echo "| CI pin (RUST_PINNED) | ${PINNED:-unknown} |"
+            echo "| Floating stable today | ${FLOATING:-unknown} |"
+            echo
+            echo "| Gate | On floating stable |"
+            echo "|---|---|"
+            echo "| cargo fmt --check | ${FMT} |"
+            echo "| cargo clippy --workspace --all-targets -- -D warnings | ${CLIPPY} |"
+            echo "| cargo test --workspace | ${TEST} |"
+            echo "| cargo doc with RUSTDOCFLAGS=-D warnings | ${DOCS} |"
+            echo
+          } >> "$GITHUB_STEP_SUMMARY"
+          failed=0
+          for outcome in "$FMT" "$CLIPPY" "$TEST" "$DOCS"; do
+            [ "$outcome" = "success" ] || failed=1
+          done
+          if [ "$failed" = "1" ]; then
+            echo "A gate does not pass on ${FLOATING:-floating stable}. Read the failing step above; that failure is the work, and it comes before anyone raises RUST_PINNED." >> "$GITHUB_STEP_SUMMARY"
+            echo "::warning title=Rust drift::A gate fails on floating stable ${FLOATING:-?}, while CI is pinned at ${PINNED:-?}. Fix that before bumping the pin."
+          elif [ -n "$FLOATING" ] && [ "$FLOATING" != "$PINNED" ]; then
+            echo "Every gate passes on ${FLOATING}, so the pin can be raised to it: the procedure is in .github/workflows/ci.yml, beside RUST_PINNED." >> "$GITHUB_STEP_SUMMARY"
+            echo "::notice title=Rust drift::Every gate passes on stable ${FLOATING}; RUST_PINNED is ${PINNED:-?} and can be raised to it."
+          else
+            echo "Floating stable is the pinned version; nothing to report." >> "$GITHUB_STEP_SUMMARY"
+          fi
+          # This step reports. It never fails; see the header of this file.
+          exit 0

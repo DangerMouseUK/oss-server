@@ -6,8 +6,11 @@
 //!   seeds and the server time they apply from (key 0: no checks). Clients
 //!   generate prizes and door states from these, so everyone in an arena sees
 //!   the same greens and doors.
-//! * Every minute (first after 25 s) new seeds and a random checksum key are
-//!   drawn and sent to every playing client that has sent a position. The
+//! * Every minute (first after 25 s) new seeds and a checksum key are drawn
+//!   and sent to every playing client that has sent a position. The key comes
+//!   from the zone's key table, or, when it has none, from a draw bounded to
+//!   the range a key may take -- see [`MAX_KEY`], which is where the one
+//!   thing a server must not get wrong about this packet is written down. The
 //!   client answers with C2S `0x1A`: settings checksum, map checksum, exe
 //!   checksum and lag statistics. Mismatches and missing answers (after 15 s)
 //!   are logged and, with `Security:SecurityKickoff`, kicked (capability
@@ -40,6 +43,68 @@ use super::core::{Action, PlayerAction};
 pub const CAP_BYPASS_SECURITY: &str = "bypasssecurity";
 /// Silences security log messages about a player.
 pub const CAP_SUPPRESS_SECURITY: &str = "suppresssecurity";
+
+/// The largest value a security-check key may take.
+///
+/// Public because it is a fact about the protocol rather than about this
+/// module: anything that chooses a key, here or in another implementation
+/// linking this crate, is bound by it.
+///
+/// **A checksum key is a 31-bit number, not a `u32`.** Every key table this
+/// protocol has ever been given -- three distinct files written by three
+/// different generators, 1,500 keys counted rather than sampled -- draws from
+/// `1..=0x7FFF_FFFF` and never sets bit 31. The other 31 bits are evenly
+/// spread, so the bound is the range itself and not an artefact of one
+/// generator.
+///
+/// Two things go wrong above it, and the second is fatal.
+///
+/// 1. **No two implementations agree what the answer is.** The map checksum
+///    starts its walk at row `key % 32` and column `key % 31`. ASSS, Subspace
+///    Server .NET (`IMapData.GetChecksum`, "the same way asss 1.4.4
+///    calculates the checksum") and nullspace (`Map::GetChecksum`) all take
+///    those two remainders on a **signed** copy of the key;
+///    [`oss_proto::checksum::map_checksum`] takes them unsigned. Below
+///    `0x8000_0000` the two readings are the same arithmetic and agree
+///    exactly. At or above it the signed reading starts at a negative row and
+///    column and the unsigned one does not, so the expected answer depends on
+///    which reading a given client was built from. **A server that sends such
+///    a key is asking a question it cannot score.**
+/// 2. **A genuine SubSpace 1.34 client does not survive one.** On 2026-11-14
+///    the 1998 client answered a key from this range correctly and then, on
+///    the next check sixty seconds later, received a key with bit 31 set and
+///    stopped dead -- no response, and no position packets either, until the
+///    session timed out. Both keys were recovered afterwards from the seeds
+///    the run logs record, so this is the measured pair and not an inference
+///    about which key it was. Silence on every channel at once is the client
+///    ceasing to run, not disagreeing about a checksum: a disagreement would
+///    have arrived as a `0x1A` we scored `ok=false`. Of the three numbers a
+///    key is used to compute, two consume it purely as data; only the map
+///    walk turns it into a position, and only above this bound.
+///
+/// Zero is excluded at the other end for a protocol reason rather than a
+/// safety one: key 0 is the defined "these are seeds only, do not answer"
+/// value, which is why [`SecurityModule`] sends it on arena entry and why
+/// ASSS, Subspace Server .NET and this module all skip a table's first pair.
+pub const MAX_KEY: u32 = 0x7FFF_FFFF;
+
+/// The checksum key a zone with no key table sends, drawn from `raw`.
+///
+/// The whole of the choice is [`MAX_KEY`]: keep the draw, put it in the range
+/// a key actually occupies. This is **not** a mask that papers over a client
+/// bug -- it is the key space the protocol has, and `Prng::next_u32` was
+/// simply handing out numbers from outside it. Zones with a key table are
+/// unaffected; they were already drawing from this range, which is why they
+/// never showed the defect.
+fn fallback_key(raw: u32) -> u32 {
+    match raw & MAX_KEY {
+        // One draw in 2^31. A zero here would mean "do not answer", and
+        // `send_checks` would then kick every playing client 15 s later for
+        // not answering something it was told not to answer.
+        0 => 1,
+        k => k,
+    }
+}
 
 /// Ticks before the first check.
 const FIRST_CHECK: u64 = 2500;
@@ -148,8 +213,9 @@ fn switch_checksums(zone: &mut Zone) {
             st.packet.key = s[i];
             st.cont_exe = s.get(i + 1).copied();
         }
+        // No table: draw one. See `fallback_key` -- the range is the point.
         None => {
-            st.packet.key = raw_key;
+            st.packet.key = fallback_key(raw_key);
             st.cont_exe = None;
         }
     }
@@ -496,5 +562,106 @@ impl Module for SecurityModule {
 
     fn unload(&self, zone: &mut Zone, _me: Owner) {
         zone.res.remove::<State>();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::prng::Prng;
+
+    /// A map with something on every tile, so two samplings of it that differ
+    /// at all differ in their sum.
+    fn tile(x: i32, y: i32) -> u8 {
+        if (0..1024).contains(&x) && (0..1024).contains(&y) {
+            ((x.wrapping_mul(31).wrapping_add(y.wrapping_mul(17))).rem_euclid(160) + 1) as u8
+        } else {
+            0
+        }
+    }
+
+    /// The map checksum as ASSS, Subspace Server .NET and nullspace all read
+    /// it: the two remainders taken on a **signed** copy of the key.
+    ///
+    /// Transcribed from Subspace Server .NET `Modules/MapData.cs`
+    /// (`int saveKey = (int)key; for (short y = (short)(saveKey % 32); ...)`)
+    /// and nullspace `src/null/Map.cpp` (`int basekey = key; for (int y =
+    /// basekey % 32; ...)`), which agree with each other. It is deliberately
+    /// **not** derived from anything this module believes, so that the test
+    /// below can disagree with us.
+    fn signed_start_reading(key: u32) -> u32 {
+        let base = key as i32;
+        let mut sum = key;
+        let mut y = base % 32;
+        while y < 1024 {
+            let mut x = base % 31;
+            while x < 1024 {
+                let t = tile(x, y);
+                if oss_proto::checksum::counts_for_map_checksum(t) {
+                    sum = sum.wrapping_add(key ^ u32::from(t));
+                }
+                x += 31;
+            }
+            y += 32;
+        }
+        sum
+    }
+
+    fn ours(key: u32) -> u32 {
+        oss_proto::checksum::map_checksum(key, tile)
+    }
+
+    /// The guard is not vacuous: the two readings really do part company, and
+    /// they part company exactly at [`MAX_KEY`].
+    ///
+    /// Without this, a `fallback_key` that returned a constant would pass the
+    /// test below for the wrong reason.
+    #[test]
+    fn the_two_readings_agree_below_the_bound_and_not_above_it() {
+        for k in [1u32, 2, 0x1234_5678, MAX_KEY - 1, MAX_KEY] {
+            assert_eq!(ours(k), signed_start_reading(k), "agree at {k:#010x}");
+        }
+        for k in [0x8000_0000u32, 0x8000_0001, 0xDEAD_BEEF, 0xFFFF_FFFF] {
+            assert_ne!(ours(k), signed_start_reading(k), "part at {k:#010x}");
+        }
+    }
+
+    /// **The regression.** Every key a tableless zone can send must be one the
+    /// readings agree on, and must not be the reserved zero.
+    ///
+    /// Against the behaviour this replaced -- `st.packet.key = raw_key`, the
+    /// raw 32-bit draw -- this fails on the first draw with bit 31 set, which
+    /// is roughly every other one. The assertion at the end is what keeps it
+    /// honest: it fails if the draws never exercised the case at all.
+    #[test]
+    fn every_key_a_tableless_zone_sends_is_one_the_readings_agree_on() {
+        let mut prng = Prng::new(0x5EED_1234_5EED_1234);
+        let mut exercised = 0usize;
+        for _ in 0..512 {
+            let raw = prng.next_u32();
+            exercised += usize::from(raw >= 0x8000_0000);
+            let key = fallback_key(raw);
+            assert_ne!(key, 0, "key 0 means 'do not answer'");
+            assert_eq!(
+                ours(key),
+                signed_start_reading(key),
+                "a key no two implementations score alike"
+            );
+        }
+        assert!(
+            exercised > 100,
+            "only {exercised} draws had bit 31 set, so the case under test was barely reached"
+        );
+    }
+
+    /// The bound keeps the draw and nothing else: it is a range, not a
+    /// reshaping. Every key in range comes back untouched.
+    #[test]
+    fn a_key_already_in_range_is_passed_through() {
+        for k in [1u32, 2, 0x4000_0000, MAX_KEY] {
+            assert_eq!(fallback_key(k), k);
+        }
+        assert_eq!(fallback_key(0), 1, "the reserved value is nudged off");
+        assert_eq!(fallback_key(0x8000_0000), 1, "and so is a masked zero");
     }
 }

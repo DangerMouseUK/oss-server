@@ -6,6 +6,22 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  # The toolchain the gating jobs run on -- test (fmt + clippy) and docs.
+  #
+  # Those jobs deny warnings: `cargo clippy --workspace --all-targets --
+  # -D warnings` and `RUSTDOCFLAGS: -D warnings`. On a floating channel that
+  # means the day a new stable ships a new lint they go red on code nobody has
+  # touched -- which is what happened to this repo's main on 2026-11-13, when
+  # 1.100.0 arrived with two `needless_range_loop` findings 1.99 does not emit.
+  #
+  # The soak job is deliberately NOT pinned to this: it does not deny warnings,
+  # so a new lint cannot redden it, and leaving it on floating `stable` is how a
+  # genuinely broken release still gets caught here.
+  #
+  # To bump: raise this one value and let CI prove it green as its own change.
+  # Note the `uses:` ref stays @stable -- the ref pins the *action*, and this
+  # input overrides the toolchain that branch would otherwise default to.
+  RUST_PINNED: "1.100.0"
 
 # oss-core is consumed as a sibling path dependency (../oss-core), so both repos
 # are checked out side by side.
@@ -30,6 +46,7 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         with:
+          toolchain: ${{ env.RUST_PINNED }}
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
         with:
@@ -58,6 +75,8 @@ jobs:
           path: oss-core
 
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_PINNED }}
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: oss-server

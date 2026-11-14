@@ -155,7 +155,7 @@ than an edit.
   oss-core. Those totals climb as either repo gains crates, tests, examples or benches, so
   re-count rather than trust them — the verbose output names each root on a line beginning
   `[lib (2024)]`, and no line of it begins `Formatting`. CI's own `fmt` step has run plain
-  `cargo fmt --check` since `09a8341` on 2026-11-12; read `.github/workflows/ci.yml` for what
+  `cargo fmt --check` since `fd0e90c` on 2026-11-12; read `.github/workflows/ci.yml` for what
   CI does today. Inside oss-core itself `--all` is correct and should stay.
   **And the writing form reformats every file in the workspace, including ones another
   session has uncommitted.** Harmless while one session worked at a time; not harmless now.

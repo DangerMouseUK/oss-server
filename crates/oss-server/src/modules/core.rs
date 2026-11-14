@@ -97,7 +97,7 @@ pub const VIE_EXE_CHECKSUM: u32 = 0xF142_9CE8;
 /// is true by definition; it does not establish what the client requires on
 /// the `code = 0` path, which is the path every login here takes. A plain
 /// account was refused with `0x17` three times against a build carrying this
-/// constant (measured 2026-11-13, `04df4d8`), so an ordinary 1.34 player
+/// constant (measured 2026-11-13, `af3c9de`), so an ordinary 1.34 player
 /// still cannot log in. The security response carries the same convention the
 /// other way round -- see `modules::security`.
 pub const VIE_CODE_CHECKSUM: u32 = 0;

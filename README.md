@@ -40,11 +40,11 @@ cargo run --release
 With no arguments it runs its bundled default zone — the ASSS 1.4.4 sample zone, compiled
 into the binary, so there are no files to put anywhere — on UDP port 5000, with the ping port
 on 5001. You are now a zone. Connect with [oss-client](https://github.com/DangerMouseUK/oss-client)
-or with a VIE bot core. The original SubSpace 1.34 client is not there yet: an ordinary
-account is refused at login and the client exits (measured 2026-11-13) — see
-[docs/interoperability.md](docs/interoperability.md) for what has actually joined.
-(Continuum clients need a cipher module this repository does not ship — see
-[below](#what-works-and-what-does-not).)
+or with a VIE bot core. The original SubSpace 1.34 client from 1998 plays on it too, on an
+ordinary account holding no capabilities (measured 2026-11-14) — see
+[docs/interoperability.md](docs/interoperability.md) for what has actually joined and what
+each run did not cover. (Continuum clients need a cipher module this repository does not
+ship — see [below](#what-works-and-what-does-not).)
 
 To see it answer without installing a client, run some headless bots at it from an
 `oss-client` checkout:
@@ -121,7 +121,10 @@ A claim here names its evidence.
 **A real Continuum client has played on it.** A genuine Continuum 0.40 binary logged in,
 entered an arena, drew the zone and flew for about 96 seconds across five sessions, with no
 kick and no checksum complaint — using a private module for Continuum's key exchange, which
-is *not* in this repository and will not be. **An unmodified, prebuilt MERVBot 4.6** —
+is *not* in this repository and will not be. **The original 1998 client has played on a
+stock build**, with nothing private involved: SubSpace 1.34 logged in on an account holding
+no capabilities, entered an arena, flew for 226 seconds and answered four security checks
+with ejection armed (2026-11-14). **An unmodified, prebuilt MERVBot 4.6** —
 a third party's bot core, not recompiled — completed a full session over VIE: login, arena,
 news and map download, security challenge, chat, and position packets both ways.
 [docs/interoperability.md](docs/interoperability.md) has the detail, including what each of

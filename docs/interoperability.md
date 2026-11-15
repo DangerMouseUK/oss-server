@@ -5,14 +5,18 @@ actually joined it rather than what should. Each row below was a live session on
 not a unit test; the detail underneath says what was observed and, as importantly, what was
 *not* covered.
 
-| Client | Encryption | Result | Date |
+| Client | Encryption | Result | Last run |
 |---|---|---|---|
 | **Continuum 0.40**, the genuine client | Continuum (cipher from a private module — see below) | Logged in, entered an arena, rendered the zone, flew ~96 s. Five sessions, no kick | 2026-11-12 |
 | **MERVBot 4.6**, prebuilt and unmodified | VIE | Logged in, entered an arena, downloaded news and map, answered the security challenge, exchanged position packets | 2026-11-12 |
 | **oss-client** (Open SubSpace) | VIE and OpenSec | Plays: arena, map, LVZ, chat, kills | continuously |
 | **oss-bot** (headless, Open SubSpace) | VIE and OpenSec | Logs in, flies, chats; used for load swarms | continuously |
-| **oss-conformance** `server` mode | VIE | 28 live protocol checks pass, 1 skipped | 2026-11-12 |
-| **SubSpace 1.34**, the original 1998 client | VIE | Logged in, downloaded news, entered an arena and was flown. **Staff accounts only on a stock build:** an ordinary account is refused at login (`0x17`) and the client exits | 2026-11-13 |
+| **oss-conformance** `server` mode | VIE | 30 live protocol checks pass, 0 fail, 1 skipped | 2026-11-15 |
+| **SubSpace 1.34**, the original 1998 client | VIE | Logged in, downloaded news, entered an arena and flew, on an ordinary account holding no capabilities. Staff-only until a login-response field was corrected on 2026-11-14 | 2026-11-14 |
+
+**The last column is when that row was last run** — not the date of anything described
+inside it. Where a row has a history worth keeping, such as a defect found on one date and
+fixed on another, both dates are in that row's section below rather than in the table.
 
 ## Continuum 0.40
 
@@ -62,11 +66,12 @@ own `oss-bot`.
 ## SubSpace 1.34
 
 The original 1998 `SUBSPACE.EXE` (630,784 bytes, VIE 1.34 by its version resource)
-connected over VIE, logged in, downloaded `news.txt`, entered an arena and was flown for
-about a minute. It answered the `0x1A` security challenge with the settings and map
-checksums correct and key-dependent, and with `exe_checksum = 0` — it reports no
-executable checksum at all, which is why the server reads a zero there as "not
-applicable" rather than as a mismatch.
+connected over VIE, logged in, downloaded `news.txt`, entered an arena and was flown. The
+first session, on 2026-11-13, was a staff account and lasted about a minute; an ordinary
+account got a different answer until 2026-11-14, which is the rest of this section. It
+answered the `0x1A` security challenge with the settings and map checksums correct and
+key-dependent, and with `exe_checksum = 0` — it reports no executable checksum at all,
+which is why the server reads a zero there as "not applicable" rather than as a mismatch.
 
 **Ordinary accounts can log in, and that was only made true on 2026-11-14.** For two
 days a player without `CAP_SEE_PRIV_FREQ` answered the login response with
@@ -88,14 +93,32 @@ the fallback path and scored with ejection armed.
 
 **Read the rest of this row honestly.**
 
-- **What was not covered:** one person flew, twice, for about four minutes each. Login,
-  arena entry, settings, map download, news and the security exchange are demonstrated.
-  Weapons, kills, flags, chat and a second player are not, and SubSpace 1.35 has never
-  been started.
+- **What was not covered:** one person flew, twice on 2026-11-14, for about four minutes
+  each — the measured session is the 226 seconds above. Login, arena entry, settings, map
+  download, news and the security exchange are demonstrated. Weapons, kills, flags, chat
+  and a second player are not, and SubSpace 1.35 has never been started.
 - **One trailing field is still unexplained.** The original server puts a `0x56` in the
   second word of the login response's unused block where this server sends zero. A flight
   with it removed succeeded, so the client does not need it; this server therefore does
   not send it. What it is for is not known, and nothing here guesses.
+
+## The conformance suite
+
+`oss-conformance server` drives a running zone as a VIE client and checks what comes back.
+Against a build of this repository at `e4e648c` with oss-core at `0a21e82`, on the bundled
+default zone: **30 passed, 0 failed, 1 skipped**, exit 0. Two runs on 2026-11-15, the same
+both times. The one skip is `server.session security` — "the server sent no checksum request
+within 2 s" — so that exchange is evidenced by the client rows above rather than here. The
+command is in [Reproducing the parts you can](#reproducing-the-parts-you-can).
+
+**That count was 28 until 2026-11-15, and the clean result behind it was worth less than it
+looked.** The suite had sent the login response's code checksum to clients under test since
+2026-11-08, but never read the field back from a server under test. So on 2026-11-12 it
+reported 28 passed against a zone that no ordinary 1998 client could log in to, and it had no
+means of saying otherwise. oss-core `0a21e82` added the two checks that read that pair, which
+is where the two extra passes come from. The lesson is worth more than the number: **a suite
+is evidence only for the fields it actually compares**, and a passing run bounds nothing
+outside them.
 
 ## The client settings packet
 
@@ -120,7 +143,9 @@ and the map file CRC-32s the server reports in S2C `0x29`.
 
 ## Reproducing the parts you can
 
-Everything except the Continuum row needs only these repositories.
+Everything except the Continuum row needs nothing private — though the third-party client
+rows also need that client, which this repository does not ship. Only the Continuum row
+depends on a module that is not public and will not be.
 
 ```sh
 # the server, bundled zone, UDP 5000

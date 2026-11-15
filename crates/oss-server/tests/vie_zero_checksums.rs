@@ -1,28 +1,43 @@
 //! What this server sends a plain VIE 1.34 client, and what it accepts back,
 //! on a stock build.
 //!
-//! **This is a test of our own bytes, not of the client.** A plain account is
-//! still refused at login with `SEC_LoginChecksumMismatch` (`0x17`) by the
-//! real 1998 client, measured three times on 2026-11-13; nothing here
-//! contradicts that, because no client is in the loop.
+//! **Zero means "not applicable" in one of these two directions and not the
+//! other, and this file asserted the wrong one for a day.** That is worth
+//! writing down here rather than quietly fixing, because the mistake was not
+//! careless and the next one will not be either.
 //!
-//! In the VIE protocol zero means "not applicable", and it means it in both
-//! directions:
+//! * **The security response's `exe_checksum` (client to server): zero is
+//!   genuine.** A real VIE 1.34 client never computes it and always reports
+//!   zero -- four samples, four keys, three sessions, measured 2026-11-13.
+//!   Accepting it is correct and is tested below.
+//! * **The login response's `code_checksum` (server to client): zero is
+//!   fatal.** The client *computes* this one and compares it, so a zero is a
+//!   mismatch: `SEC_LoginChecksumMismatch` (`0x17`) and the process exits
+//!   within two milliseconds of a login the server thinks succeeded.
 //!
-//! * the login response's `codechecksum` -- the original `subgame` sends 0,
-//!   and a genuine client answers ASSS's computed `0x281C_C948` with
-//!   `SEC_LoginChecksumMismatch` (`0x17`) and exits;
-//! * the security response's `exe_checksum` -- a genuine client never computes
-//!   one and always reports 0, measured off the 1998 binary on 2026-11-13 over
-//!   four samples, four keys and three sessions.
+//! **What this file used to say, and why it was wrong.** It asserted
+//! `lr.code_checksum == 0`, with a header stating that the original server
+//! sends zero and that a genuine client answers the computed value with
+//! `0x17`. Both halves were the reverse of the truth. The belief came from one
+//! decrypted capture of the original server and was then written into a test,
+//! which from that point on reported success for agreeing with itself. **No
+//! client was ever in the loop here -- the file said so plainly, and said so
+//! while being wrong.** Saying honestly what a test does not cover is not the
+//! same as covering it.
 //!
-//! This zone therefore runs with `Security:SecurityKickoff = 1`. It defaults
-//! to 0, which is the only reason the second of those was a log line rather
-//! than an ejection, so a test that left it off would pass for the wrong
-//! reason. The player here holds no capabilities: not `bypasssecurity`, and
-//! not `seeprivfreq`, which would mark it staff and have the server send
+//! On 2026-11-14 a probe read both servers in one session and diffed the
+//! bytes: the original sends `0x281C_C948` on the ordinary and the new-user
+//! path alike. With that value a genuine 1.34 client -- an account holding no
+//! capabilities -- logged in, entered an arena, flew for 226 seconds and
+//! answered four security checks.
+//!
+//! This zone runs with `Security:SecurityKickoff = 1`. It defaults to 0, which
+//! is the only reason the security half was a log line rather than an
+//! ejection, so a test that left it off would pass for the wrong reason. The
+//! player here holds no capabilities: not `bypasssecurity`, and not
+//! `seeprivfreq`, which would mark it staff and have the server send
 //! `0xFFFF_FFFF` for both checksums -- the one case that always worked, and
-//! the one that hid all of this.
+//! the one that hid all of this for two days.
 
 use oss_proto::Packet;
 use oss_proto::c2s::{self, GoArena, Login, SecurityResponse};
@@ -231,7 +246,7 @@ fn vie_answer(settings: &[u8], key: u32) -> SecurityResponse {
 }
 
 #[test]
-fn a_plain_vie_player_is_sent_a_zero_code_checksum() {
+fn a_plain_vie_player_is_sent_the_computed_code_checksum() {
     let mut h = H::new();
     let (p, lr) = h.login("VieTest134");
     assert_eq!(
@@ -247,14 +262,41 @@ fn a_plain_vie_player_is_sent_a_zero_code_checksum() {
         "the exe checksum is the CRC-32 of SUBSPACE.EXE and stays"
     );
     assert_eq!(lr.is_vip, 0, "this player is not VIP");
-    // The whole point: subgame sends zero here, and a genuine 1.34 client
-    // rejects anything else as a code checksum mismatch.
+    // The whole point, and it is the reverse of what this test asserted until
+    // 2026-11-14: the client computes this field and compares it, so a zero
+    // is a mismatch and an immediate exit.
     assert_eq!(
+        lr.code_checksum,
+        core_mod::VIE_CODE_CHECKSUM,
+        "an ordinary player gets the computed value, not zero"
+    );
+    assert_ne!(
         lr.code_checksum, 0,
-        "zero means \"not applicable\"; a computed value is 0x17 and an exit"
+        "zero here is a mismatch, not \"not applicable\""
     );
     h.enter(p);
     assert!(!h.gone(p), "and it is still in the arena");
+}
+
+/// The constant is not a magic number: it is the exe checksum at key zero,
+/// which is what the field means.
+///
+/// This is the assertion that would have caught the original mistake without
+/// any client, and it is cheap. `vie-exe-checksum.txt` in oss-core carries the
+/// same number as its first vector, transcribed from an implementation this
+/// project did not write.
+#[test]
+fn the_code_checksum_is_the_exe_checksum_at_key_zero() {
+    assert_eq!(
+        core_mod::VIE_CODE_CHECKSUM,
+        oss_proto::checksum::vie_exe_checksum(0),
+        "the login code checksum is the exe checksum computed with key 0"
+    );
+    assert_eq!(
+        core_mod::VIE_CODE_CHECKSUM,
+        0x281C_C948,
+        "and for SUBSPACE.EXE 1.34 that value is 0x281CC948"
+    );
 }
 
 #[test]

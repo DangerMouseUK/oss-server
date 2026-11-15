@@ -68,17 +68,34 @@ checksums correct and key-dependent, and with `exe_checksum = 0` — it reports 
 executable checksum at all, which is why the server reads a zero there as "not
 applicable" rather than as a mismatch.
 
-**Read this honestly, because it is the row with the most caveats on the page.**
+**Ordinary accounts can log in, and that was only made true on 2026-11-14.** For two
+days a player without `CAP_SEE_PRIV_FREQ` answered the login response with
+`SEC_LoginChecksumMismatch` (`0x17`) and the process exited about two milliseconds
+later, while staff logged in without trouble — the staff path sends `0xFFFF_FFFF` for
+both login checksums, which the client skips, so the failure was invisible to anyone
+testing as staff.
 
-- **Ordinary accounts cannot log in.** On a stock build a player without
-  `CAP_SEE_PRIV_FREQ` answers the login response with `SEC_LoginChecksumMismatch`
-  (`0x17`) and the process exits about two milliseconds later. Three runs, two names,
-  2026-11-13. Staff get in because that path sends `0xFFFF_FFFF` for both login
-  checksums, which the client skips. The cause is the login `codechecksum`, and what
-  value an ordinary player would accept is **not settled**.
-- **What was not covered:** one person flew for about a minute. Arena entry, settings,
-  map download, news and the security exchange are demonstrated. Weapons, kills, flags,
-  chat and a second player are not, and SubSpace 1.35 has never been started.
+**The cause was one field.** The login response's `code_checksum` is the exe checksum
+computed with a checksum key of zero, and this server was sending zero itself. Zero is
+not "not applicable" in that direction: the client computes the value and compares it,
+so zero is a mismatch. Sending the computed value — `0x281CC948` for `SUBSPACE.EXE`
+1.34 — is the whole of the fix.
+
+**Demonstrated, 2026-11-14.** An account holding no capabilities logged in, entered an
+arena, flew for 226 seconds and answered four security checks, then quit cleanly. The
+zone had no `scrty` key table and `SecurityKickoff = 1`, so every check was drawn from
+the fallback path and scored with ejection armed.
+
+**Read the rest of this row honestly.**
+
+- **What was not covered:** one person flew, twice, for about four minutes each. Login,
+  arena entry, settings, map download, news and the security exchange are demonstrated.
+  Weapons, kills, flags, chat and a second player are not, and SubSpace 1.35 has never
+  been started.
+- **One trailing field is still unexplained.** The original server puts a `0x56` in the
+  second word of the login response's unused block where this server sends zero. A flight
+  with it removed succeeded, so the client does not need it; this server therefore does
+  not send it. What it is for is not known, and nothing here guesses.
 
 ## The client settings packet
 

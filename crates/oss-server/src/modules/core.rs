@@ -82,25 +82,40 @@ pub const SERVER_VERSION: u32 = 134;
 /// `SUBSPACE.EXE` 1.34, which is what the original `subgame` sends. The client
 /// checks this one first and offers an update when it disagrees.
 pub const VIE_EXE_CHECKSUM: u32 = 0xF142_9CE8;
-/// Code checksum reported to VIE clients. **Zero on purpose; do not restore
-/// ASSS's value.**
+/// Code checksum reported to VIE clients: the exe checksum computed with a
+/// checksum key of zero, which for `SUBSPACE.EXE` 1.34 is `0x281C_C948`.
 ///
-/// In the VIE protocol zero means "not applicable". Decrypting the original
-/// `subgame2.exe` on the wire shows it sending `codechecksum = 0` beside the
-/// real `exechecksum` above, while ASSS `core.c:793` sends `0x281C_C948`; a
-/// genuine 1.34 client answers that value with `SEC_LoginChecksumMismatch`
-/// (`0x17`) and exits. Staff get in because the staff path below overwrites
-/// both fields with `0xFFFF_FFFF`, which the client skips.
+/// **This field is not a constant with a story; it is
+/// [`vie_exe_checksum`](oss_proto::checksum::vie_exe_checksum) evaluated at
+/// zero**, and `tests/vie_zero_checksums.rs` asserts exactly that so the two
+/// can never drift. MervBot's login handler names it "SSEXE cksum with seed
+/// of zero" and compares it against the client's own computation, which is
+/// what a disagreement costs: `SEC_LoginChecksumMismatch` (`0x17`), and the
+/// client exits within two milliseconds of a login the server thinks
+/// succeeded.
 ///
-/// **Zero is not known to be sufficient.** The one decrypted `subgame`
-/// response we have is a new-user reply (`code = 1`), where "not applicable"
-/// is true by definition; it does not establish what the client requires on
-/// the `code = 0` path, which is the path every login here takes. A plain
-/// account was refused with `0x17` three times against a build carrying this
-/// constant (measured 2026-11-13, `af3c9de`), so an ordinary 1.34 player
-/// still cannot log in. The security response carries the same convention the
-/// other way round -- see `modules::security`.
-pub const VIE_CODE_CHECKSUM: u32 = 0;
+/// **Do not set this to zero.** It was zero here from 2026-11-13 to
+/// 2026-11-14 and **no ordinary account could log in for that entire time**.
+/// Zero is not the "not applicable" value in this direction -- it is a number
+/// the client checks and rejects. The reasoning that put a zero here is kept
+/// in the project's decision log rather than repeated: it rested on a single
+/// decrypted capture of the original server, and a later capture of the same
+/// server, taken with a probe that read both servers in one session, shows it
+/// sending `0x281C_C948` on the ordinary **and** the new-user login path.
+///
+/// Demonstrated against a genuine SubSpace 1.34 client on 2026-11-14: with
+/// this value an account holding no capabilities logged in, entered an arena,
+/// flew for 226 seconds and answered four security checks. With zero, the
+/// same client on the same build was refused every time.
+///
+/// Staff are unaffected either way: the staff path below overwrites this and
+/// [`VIE_EXE_CHECKSUM`] with `0xFFFF_FFFF`, which the client skips. That is
+/// why staff logins worked throughout and hid this for two days.
+///
+/// The security response carries zero in the **opposite** direction and that
+/// zero is genuine -- see [`modules::security`](super::security), which
+/// explains why the two are not the same convention.
+pub const VIE_CODE_CHECKSUM: u32 = 0x281C_C948;
 
 /// What a player sent to log in, after ASSS's sanitising.
 #[derive(Debug, Clone)]

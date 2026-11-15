@@ -306,10 +306,17 @@ fn check_answers(zone: &mut Zone) -> bool {
 /// Whether a VIE client's reported exe checksum is acceptable.
 ///
 /// **Zero is accepted on purpose; do not tighten this to a plain equality.**
-/// In the VIE protocol zero means "not applicable", the same convention the
-/// login response follows the other way round (see
-/// [`core::VIE_CODE_CHECKSUM`](super::core::VIE_CODE_CHECKSUM)): a genuine VIE
-/// 1.34 client never computes this field and always leaves it at zero.
+/// A genuine VIE 1.34 client never computes this field and always leaves it
+/// at zero, so here zero really does mean "not applicable".
+///
+/// **This is not a general rule about zero, and the login response is not an
+/// instance of it.** This doc comment used to say the two directions followed
+/// the same convention, and [`core::VIE_CODE_CHECKSUM`](super::core::VIE_CODE_CHECKSUM)
+/// was set to zero partly on the strength of that symmetry. It is false: in
+/// the login response the client *computes* the value and compares it, so a
+/// zero there is a mismatch and an immediate disconnect. The two fields hold
+/// the same kind of number and are read by opposite ends for opposite
+/// purposes; **a convention one end observes says nothing about the other.**
 ///
 /// Measured 2026-11-13 off the 1998 client in an arena -- four samples, four
 /// keys, three sessions, with the settings and map checksums in the same

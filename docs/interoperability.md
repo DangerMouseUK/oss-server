@@ -14,6 +14,16 @@ not a unit test; the detail underneath says what was observed and, as importantl
 | **oss-conformance** `server` mode | VIE | 30 live protocol checks pass, 0 fail, 1 skipped | 2026-11-15 |
 | **SubSpace 1.34**, the original 1998 client | VIE | Logged in, downloaded news, entered an arena and flew, on an ordinary account holding no capabilities. Staff-only until a login-response field was corrected on 2026-11-14 | 2026-11-14 |
 
+**Every client in that table encrypts, and from 2026-11-16 that is a requirement rather than
+an observation.** A zone answers a connection request only with an encrypted session: VIE at
+the least, OpenSec or a private module where both ends have one. A peer that asks for no
+encryption — a connection request carrying a key of zero, which ASSS honours and the original
+1998 server does not — is declined, and gets no answer at all. The exception is deliberate and
+has to be configured: `Security:AllowUnencrypted` in `conf/global.conf` registers an acceptor
+for unencrypted sessions behind every encrypting one, for development. The client has to have
+asked for one too, so an unencrypted session is a decision at each end. `D28` has the reasoning
+and what it costs; `oss-core`'s `docs/protocol/encryption.md` has the mechanics.
+
 **The last column is when that row was last run** — not the date of anything described
 inside it. Where a row has a history worth keeping, such as a defect found on one date and
 fixed on another, both dates are in that row's section below rather than in the table.

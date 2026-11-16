@@ -2,8 +2,16 @@
 //!
 //! Connection requests are offered to the registered [`Acceptor`]s in order:
 //! first those modules registered with [`register_acceptor`] (a private build
-//! adds the Continuum handshake this way), then VIE. A connection becomes a
-//! player once its handshake completes; its game packets go to
+//! adds the Continuum handshake this way), then OpenSec, then VIE, and last --
+//! only when `Security:AllowUnencrypted` is set -- no encryption at all.
+//!
+//! **Everything an unset zone can land on is encrypted.** VIE is the floor, and
+//! the unencrypted acceptor is not a rung below it: it is off unless an operator
+//! turned it on, it is asked last so it sees only what VIE declined, and a client
+//! that did not itself ask for an unencrypted session refuses its answer. A
+//! connection runs in the clear only when both ends have been set to allow it.
+//!
+//! A connection becomes a player once its handshake completes; its game packets go to
 //! [`Zone::handle_packet`], and when it closes the player is kicked through the
 //! normal leave path.
 //!
@@ -79,6 +87,9 @@ impl SubspaceTransport {
         if let Ok(n) = usize::try_from(g.get_int("Net", "MaxPlayers", 1024)) {
             server.max_connections = n.clamp(1, crate::player::MAX_PLAYERS);
         }
+        // Read before the acceptors are built, because registering it is the
+        // last thing done below and `zone` is borrowed mutably in between.
+        let allow_unencrypted = g.get_int("Security", "AllowUnencrypted", 0) != 0;
         for a in zone
             .res
             .get::<Acceptors>()
@@ -95,6 +106,22 @@ impl SubspaceTransport {
         server.add_acceptor(Box::new(VieAcceptor {
             accept_continuum: false,
         }));
+        // No encryption at all: off unless an operator turned it on, and last in
+        // the order so it is offered only the requests every encrypting acceptor
+        // declined -- which, after VIE, is a client key of 0, the protocol's way
+        // of asking for no encryption. Nothing negotiates its way here: a client
+        // that did not ask for an unencrypted session refuses this answer, so
+        // both ends have to have been set. See `oss-core`
+        // docs/protocol/encryption.md.
+        if allow_unencrypted {
+            tracing::warn!(
+                target: "net",
+                "Security:AllowUnencrypted is set: this zone accepts connections with no \
+                 encryption from clients that ask for one. For development only -- a login \
+                 on such a connection carries the player's password in the clear"
+            );
+            server.add_acceptor(Box::new(oss_net::NullAcceptor));
+        }
         Self {
             server,
             start: Instant::now(),
@@ -113,6 +140,16 @@ impl SubspaceTransport {
     /// Number of live connections (including ones still in their handshake).
     pub fn connections(&self) -> usize {
         self.server.len()
+    }
+
+    /// Offers one raw datagram to the registered acceptors and reports the
+    /// cipher the connection ended up with, by name. Tests use it to ask what
+    /// this zone's acceptor chain actually does, rather than a copy of it.
+    #[cfg(test)]
+    fn offer(&mut self, data: &[u8]) -> Option<&'static str> {
+        let addr: Endpoint = (0, ([127, 0, 0, 1], 5000).into());
+        self.server.handle_datagram(0, addr, data);
+        self.server.connection(&addr).and_then(|c| c.cipher_name())
     }
 
     fn handle_events(&mut self, zone: &mut Zone) {
@@ -303,5 +340,61 @@ impl Transport for SubspaceTransport {
             self.server.disconnect(&a);
         }
         self.transmit(io);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{ConfigManager, MemSource};
+    use crate::module::ModuleCatalog;
+
+    fn zone(global: &'static str) -> Zone {
+        let cfg = ConfigManager::new(MemSource::new([("conf/global.conf", global)])).expect("cfg");
+        Zone::new(cfg, ModuleCatalog::default())
+    }
+
+    /// A `00 01` connection request carrying `key`, on the SubSpace protocol.
+    fn request(key: u32) -> Vec<u8> {
+        let mut v = vec![0u8, 1];
+        v.extend_from_slice(&key.to_le_bytes());
+        v.extend_from_slice(&1u16.to_le_bytes());
+        v
+    }
+
+    /// An unset zone encrypts everything it accepts, and answers a request for
+    /// no encryption with nothing at all. Until 2026-11-16 the second line of
+    /// this test would have read `Some("none")`: any peer could ask a public
+    /// zone for an unencrypted session and be given one.
+    #[test]
+    fn an_unset_zone_will_not_run_a_connection_in_the_clear() {
+        let mut z = zone("");
+        let mut t = SubspaceTransport::new(&mut z);
+        assert_eq!(t.offer(&request(0x8001_0000)), Some("vie"));
+
+        let mut z = zone("");
+        let mut t = SubspaceTransport::new(&mut z);
+        assert_eq!(
+            t.offer(&request(0)),
+            None,
+            "a request for no encryption must make no connection"
+        );
+        assert_eq!(t.connections(), 0);
+    }
+
+    /// With the toggle set, a client that asks for no encryption gets it, and a
+    /// client that did not ask still gets VIE: the unencrypted acceptor is last
+    /// in the order, so it only ever sees what VIE declined.
+    #[test]
+    fn the_toggle_serves_only_the_clients_that_ask() {
+        let conf = "[ Security ]\nAllowUnencrypted = 1\n";
+
+        let mut z = zone(conf);
+        let mut t = SubspaceTransport::new(&mut z);
+        assert_eq!(t.offer(&request(0)), Some("none"));
+
+        let mut z = zone(conf);
+        let mut t = SubspaceTransport::new(&mut z);
+        assert_eq!(t.offer(&request(0x8001_0000)), Some("vie"));
     }
 }

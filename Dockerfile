@@ -64,7 +64,11 @@ LABEL org.opencontainers.image.title="oss-server" \
       org.opencontainers.image.licenses="GPL-2.0-or-later"
 
 # A fixed uid so a bind-mounted zone directory can be chowned to a known
-# number on the host without inspecting the image first.
+# number on the host without inspecting the image first. 10001 is outside
+# Debian's system-uid range, so `useradd --system` prints "uid 10001 is
+# greater than SYS_UID_MAX 999" while creating it exactly as asked. That
+# warning in the build log is expected: a predictable uid an operator can
+# chown to is worth more here than a tidy one nobody can guess.
 RUN groupadd --system --gid 10001 oss \
     && useradd --system --uid 10001 --gid 10001 \
         --home-dir /var/lib/oss-server --shell /usr/sbin/nologin oss \

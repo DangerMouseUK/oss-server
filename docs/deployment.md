@@ -297,7 +297,9 @@ zone answers its ping port with a population, and the headless bot from
 arena and downloads the map.
 
 **Checked by CI** on every push and pull request, in
-[`.github/workflows/packaging.yml`](../.github/workflows/packaging.yml):
+[`.github/workflows/packaging.yml`](../.github/workflows/packaging.yml). All
+of it has now run green on a real Ubuntu runner with systemd 259
+(2026-11-16), so this list is measured rather than intended:
 
 - The image builds, starts with **no arguments at all**, and runs as uid 10001
   rather than root.
@@ -315,15 +317,22 @@ arena and downloads the map.
   checked to be `0750` and owned by the service account, and an ordinary
   account on the box is checked to be unable to read the zone's configuration
   — a zone holds staff passwords, the billing password and the server's key.
-- The unit starts, the service answers as a zone, `NoNewPrivileges`,
-  `ProtectSystem=strict`, `ProtectHome` and the service user are in effect as
-  systemd itself parsed them, and after a `SIGKILL` the service comes back
-  under a new PID.
+- The unit starts and the service answers as a zone, with real clients logging
+  in and the server's own journal showing them arrive.
+- `NoNewPrivileges`, `ProtectSystem=strict`, `ProtectHome` and the service
+  user read back from `systemctl show` as the unit asks for them — that is
+  systemd confirming it understood the unit, which is not the same as the
+  kernel confirming it enforced it, so `NoNewPrivs` is additionally read out
+  of `/proc/<pid>/status`, where the kernel is the one answering.
+- After a `SIGKILL` the service comes back under a new PID, five seconds
+  later, with systemd's restart counter at 1.
 - Running the installer a **second time, over a running service**, with the
   zone config, the environment file and the unit all hand-edited, leaves every
-  one of them alone and offers its own versions as `.new` — and does not take
-  the service down.
-- `--dry-run` creates nothing.
+  one of them alone and offers its own versions as `.new`, does not take the
+  service down, and does leave the newly built binary in place.
+- `--dry-run` prints its plan and creates nothing. Both halves of that are
+  checked: a dry run that silently did nothing would also have created
+  nothing.
 
 **Checked by hand** (2026-11-16, on Windows): the server starting with no
 arguments and no files and taking real clients; what a `--zone` directory must
@@ -334,13 +343,14 @@ against a live zone with and without players in it.
 
 **Not checked anywhere:**
 
-- **The container half above has run; the systemd half has not finished a
-  run.** On *Packaging*'s first run (2026-11-16) the image job passed on a real
-  runner, with real clients logging in — everything said about the image is
-  therefore measured. The installer job got as far as installing, and then
-  failed on a check in the workflow that was itself wrong, so everything from
-  "the unit starts" onwards is still only intended. Whoever sees that job go
-  green should move this bullet's contents up into the list above.
+- **Coming back after a reboot.** CI never enables the unit, because the
+  installer never does and that is the whole point of it. So
+  `WantedBy=multi-user.target` doing its job after `systemctl enable` is
+  ordinary systemd behaviour rather than something measured here.
+- **That the sandbox stops what it is meant to stop.** The kernel is asked
+  about `NoNewPrivs` and answers, and the service demonstrably can write
+  inside `ReadWritePaths`. Nothing tries to write *outside* it, so
+  `ProtectSystem=strict` is confirmed as accepted and not as enforced.
 - The publish job has never run, because it fires only on a `v*` tag and none
   has been created.
 - **Name resolution under the unit's sandbox.** The bundled zone names no
@@ -350,9 +360,10 @@ against a live zone with and without players in it.
   the first place to look.
 - Only `linux/amd64`. Nothing here says anything about arm64, which matters if
   your small server is an ARM instance.
-- Only the current Ubuntu runner image's systemd. An older distribution may
-  reject a hardening directive; the unit is written so that costs you a
+- Only systemd 259 on the current Ubuntu runner image. An older distribution
+  may reject a hardening directive; the unit is written so that costs you a
   warning rather than a failed start, but that has not been tried.
+  `systemd-analyze verify` had nothing to say about this unit on 259.
 
 If you are the first to hit something this list does not cover, an issue
 saying what broke is worth more than a polite one saying it worked.

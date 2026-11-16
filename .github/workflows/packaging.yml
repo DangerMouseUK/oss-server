@@ -335,15 +335,28 @@ jobs:
             || { echo "::error::the service did not reach active"; exit 1; }
           python3 tools/zone-ping.py 127.0.0.1 5001 --wait 60 --tcp-port 5000
 
-      - name: The hardening in the unit must actually be in effect
+      # Careful about what this proves. `systemctl show` reports what systemd
+      # parsed -- a directive it had rejected would read back as its default,
+      # so this does show the unit was understood, but it is configuration and
+      # not enforcement. NoNewPrivs read out of /proc is the one line here the
+      # kernel answers, so it is the one that proves the sandbox is real.
+      - name: systemd must have accepted the hardening, and the kernel enforce it
         run: |
           set -euo pipefail
           for pair in NoNewPrivileges=yes ProtectSystem=strict ProtectHome=yes User=oss-server; do
             key=${pair%%=*}; want=${pair#*=}
             got=$(systemctl show oss-server --property="$key" --value)
-            echo "$key=$got"
+            echo "configured  $key=$got"
             [ "$got" = "$want" ] || { echo "::error::$key is $got, expected $want"; exit 1; }
           done
+          pid=$(systemctl show oss-server --property=MainPID --value)
+          if [ "$pid" = 0 ]; then
+            echo "::error::the service has no main process to inspect"; exit 1
+          fi
+          nnp=$(sudo awk '/^NoNewPrivs:/ {print $2}' "/proc/$pid/status" 2>/dev/null || true)
+          echo "enforced    NoNewPrivs=${nnp:-<unreadable>} (from /proc/$pid/status)"
+          [ "${nnp:-}" = 1 ] \
+            || { echo "::error::the kernel is not enforcing NoNewPrivileges on pid $pid"; exit 1; }
 
       - name: A real client must log in to the installed service
         working-directory: oss-server
@@ -415,6 +428,11 @@ jobs:
             || { echo "::error::no oss-server.service.new was offered"; exit 1; }
           [ "$(systemctl is-active oss-server)" = active ] \
             || { echo "::error::re-running the installer took the service down"; exit 1; }
+          # The installer saying "replaced" is not the same as the bytes being
+          # there. Without this, a replace that silently did nothing would look
+          # exactly like the ETXTBSY fix working.
+          sudo cmp target/release/oss-server /usr/local/bin/oss-server \
+            || { echo "::error::the installed binary is not the one just built"; exit 1; }
 
       - name: --dry-run must touch nothing
         working-directory: oss-server
@@ -422,7 +440,12 @@ jobs:
           set -euo pipefail
           out=$RUNNER_TEMP/dry
           ./install.sh --dry-run --no-user --binary target/release/oss-server \
-            --prefix "$out/usr" --state-dir "$out/var" --config-dir "$out/etc" --unit-dir "$out/units"
+            --prefix "$out/usr" --state-dir "$out/var" --config-dir "$out/etc" --unit-dir "$out/units" \
+            | tee "$RUNNER_TEMP/dry.log"
+          # "It created nothing" is vacuous if it also did nothing and said
+          # nothing, so make it say what it would have done first.
+          grep -q 'would write' "$RUNNER_TEMP/dry.log" \
+            || { echo "::error::--dry-run reported no plan at all"; exit 1; }
           [ ! -e "$out" ] || { echo "::error::--dry-run created $out"; find "$out"; exit 1; }
 
       - name: Service log

@@ -94,6 +94,11 @@ environment file alone. Three ports matter and it is easy to publish only the fi
 game port on **UDP 5000**, its ping port on **UDP 5001** (always the game port + 1), and
 the text chat protocol on **TCP 5000**.
 
+A zone you have configured no logins for is not an open one: it generates a single shared
+password at start and prints it, so **read the first few lines of its log before trying to
+connect**. An installed zone keeps that password in `zone/conf/passwd.conf`; the container's
+bundled zone has nowhere to keep one, so it is new on every run.
+
 ### Operations
 
 Uncomment `[Admin] Listen` in `conf/global.conf` (and set `[Admin] Token` if it is not on

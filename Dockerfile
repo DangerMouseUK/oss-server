@@ -8,6 +8,15 @@
 # nothing across restarts and has no way to grant anyone staff powers; see
 # docs/deployment.md before putting it in front of real players.
 #
+# It is not open, so you need one thing before you can connect. A zone whose
+# operator configured no logins generates a single shared password at start and
+# prints it. The bundled zone has nowhere to keep one, so it is new every run:
+#
+#   docker logs <container>   # the line beginning "no logins were configured"
+#
+# Players log in with any name and that password. Pass --zone-password to
+# choose your own instead.
+#
 # To run your own zone directory, mount it and point the server at it:
 #
 #   docker run --rm -v /srv/myzone:/zone -p 5000:5000/udp -p 5001:5001/udp \

@@ -43,9 +43,15 @@ It is **not** a zone you should leave facing the public:
   binary there is no file to put one in. `?grplogin` has nothing to log in to,
   and the staff commands that touch files (`?makearena`, `?putfile`,
   `?putmap`) refuse outright because there is no zone directory.
-- **Anyone can log in as anyone.** `conf/passwd.conf` ships with
-  `AllowUnknown = yes` and an empty `[Users]`, which means any name is accepted
-  with any password.
+- **There is one password, it is made up at every start, and it is printed in
+  the log.** A zone whose operator has configured no logins at all generates a
+  single shared zone password when it starts, and the bundled zone has nowhere
+  to keep one, so it is a different password every time. Read it from the
+  first few lines of the server's output — `docker logs <container>` — and give
+  it to players along with the address. They may then log in under any name
+  with that password; it says which zone they may enter, not who they are, so
+  nobody is authenticated by it and nobody gets a staff group from it. There is
+  no way to log in without it.
 - **One small map, one demo arena**, and the zone announces itself to no
   directory server.
 
@@ -211,10 +217,22 @@ Before that, two things are worth doing:
 
    then, in the game, `?grplogin sysop <that password>`.
 
-2. **Decide who may log in.** `zone/conf/passwd.conf` ships with
-   `AllowUnknown = yes`: any name, no password. Set it to `no` and list names,
-   or point the zone at a user database server — `[Billing]` in
-   `conf/global.conf`, and `oss-biller` in this repository is a small local one.
+2. **Decide who may log in.** You do not have to do this before the zone is
+   safe to start — the server will not leave itself open. The first time it
+   starts it generates one shared zone password, prints it, and writes it into
+   `zone/conf/passwd.conf` as `General:ZonePassword`. It keeps that password
+   afterwards, so a restart does not lock your players out. To read it later:
+
+   ```bash
+   sudo grep ZonePassword /var/lib/oss-server/zone/conf/passwd.conf
+   ```
+
+   Anyone with that password can log in under any name, and is *not*
+   authenticated by it, so it never confers a staff group. When you want
+   something better than one shared secret, set your own `ZonePassword`, or set
+   `AllowUnknown = no` and list players under `[Users]`, or point the zone at a
+   user database server — `[Billing]` in `conf/global.conf`, and `oss-biller` in
+   this repository is a small local one.
 
 And open the ports: UDP 5000, UDP 5001, TCP 5000.
 
@@ -297,9 +315,11 @@ zone answers its ping port with a population, and the headless bot from
 arena and downloads the map.
 
 **Checked by CI** on every push and pull request, in
-[`.github/workflows/packaging.yml`](../.github/workflows/packaging.yml). All
-of it has now run green on a real Ubuntu runner with systemd 259
-(2026-11-16), so this list is measured rather than intended:
+[`.github/workflows/packaging.yml`](../.github/workflows/packaging.yml). All of
+it ran green on a real Ubuntu runner with systemd 259 on 2026-11-16, so this
+list is measured rather than intended — **except the four login checks marked
+`new`**, which were added later the same day, after the zone's login default
+was closed, and have not yet had a run of their own:
 
 - The image builds, starts with **no arguments at all**, and runs as uid 10001
   rather than root.
@@ -309,7 +329,18 @@ of it has now run green on a real Ubuntu runner with systemd 259
   restarted, when they leave.
 - A mounted zone directory works end to end: `--init-zone` writes one through
   the mount, refuses to overwrite it when run again, the server then runs from
-  it, and its key lands in `data/` on the host as uid 10001.
+  it, and its key lands in `data/` on the host as uid 10001. **(`new`)** It
+  also keeps its generated password in `conf/passwd.conf` instead of inventing
+  a new one, which is what makes an installed zone usable at all.
+- **(`new`)** A client that brings **no password is refused**, by both the
+  image and the installed service. This is a packaging check rather than a
+  restatement of the zone's own tests: the question here is whether the
+  artefacts we hand people are closed, and if that default is ever reopened by
+  accident this job goes red rather than quietly passing.
+- **(`new`)** The witness clients get in using the password the zone generated
+  and printed, read the way an operator would read it — out of `docker logs`
+  for the container, and out of `conf/passwd.conf` for the installed service,
+  which is additionally checked to be the same password the journal announced.
 - `install.sh`, run as root on a machine with systemd, puts everything where
   this page says it does, creates the service account, and **starts and
   enables nothing** — that one is asserted rather than assumed, because it is
@@ -325,11 +356,16 @@ of it has now run green on a real Ubuntu runner with systemd 259
   kernel confirming it enforced it, so `NoNewPrivs` is additionally read out
   of `/proc/<pid>/status`, where the kernel is the one answering.
 - After a `SIGKILL` the service comes back under a new PID, five seconds
-  later, with systemd's restart counter at 1.
+  later, with systemd's restart counter at 1. **(`new`)** It comes back as the
+  *same* zone: the password is unchanged, because a zone that generated a
+  fresh one on every crash would lock out every player it had, and would look
+  perfectly healthy doing it.
 - Running the installer a **second time, over a running service**, with the
   zone config, the environment file and the unit all hand-edited, leaves every
   one of them alone and offers its own versions as `.new`, does not take the
-  service down, and does leave the newly built binary in place.
+  service down, and does leave the newly built binary in place. **(`new`)**
+  The zone password in `conf/passwd.conf` survives that upgrade — "safe to
+  re-run" is now a claim about a credential, not only about configuration.
 - `--dry-run` prints its plan and creates nothing. Both halves of that are
   checked: a dry run that silently did nothing would also have created
   nothing.
@@ -340,6 +376,13 @@ contain before the server will start at all; `--init-zone` writing a zone and
 refusing to overwrite one; the installer run repeatedly against throwaway
 prefixes; and [`tools/zone-ping.py`](../tools/zone-ping.py), the probe CI uses,
 against a live zone with and without players in it.
+
+Also by hand, the login behaviour this page describes, against the built
+binary: a real client refused with `login failed: wrong password` when it
+brought none, the same client logging in, entering the arena and taking the map
+when given the generated one; the password written into `conf/passwd.conf` when
+the zone has a directory and only announced in the log when it does not; and a
+second start reusing it rather than generating another.
 
 **Not checked anywhere:**
 

@@ -396,8 +396,12 @@ Nothing has been started or enabled. Three things are still yours to do.
    especially who may log in:
 
      conf/global.conf  the port, the zone name, the admin API
-     conf/passwd.conf  shipped with AllowUnknown=yes, so anyone may log in
-                       under any name with no password at all
+     conf/passwd.conf  who may log in. You have configured nobody, so the
+                       first time the zone starts it makes up one shared
+                       password, prints it, and writes it here. Players log
+                       in with any name and that password, and it makes
+                       nobody staff. After starting it, read it with:
+                         sudo grep ZonePassword $ZONE_DIR/conf/passwd.conf
      conf/staff.conf   nobody is staff yet. Put a password under
                        [GroupPasswords] as 'sysop = <password>', then use
                        '?grplogin sysop <password>' once you are in the game

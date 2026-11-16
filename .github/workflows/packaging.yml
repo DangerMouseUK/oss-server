@@ -122,20 +122,56 @@ jobs:
           docker logs zone 2>&1 | grep -q 'listening' \
             || { echo "::error::the server never logged a listening socket"; exit 1; }
 
-      - name: A real client must log in, enter an arena and get the map
+      # Since efe25b0 a zone nobody has configured no longer admits any name
+      # with any password: it generates one zone password at start instead.
+      # This asserts the *shipped image* is closed, which is a packaging claim
+      # rather than a restatement of that change's own tests. If the default is
+      # ever reopened by accident, this job goes red instead of quietly passing.
+      - name: A client that brings no password must be turned away
         working-directory: oss-server
         run: |
           set -euo pipefail
           chmod +x "$RUNNER_TEMP/oss-bot"
+          timeout 60 "$RUNNER_TEMP/oss-bot" --server 127.0.0.1:5000 --count 1 \
+            --duration 10 >"$RUNNER_TEMP/bot-nopw.log" 2>&1 || true
+          cat "$RUNNER_TEMP/bot-nopw.log"
+          if grep -q 'logged in' "$RUNNER_TEMP/bot-nopw.log"; then
+            echo "::error::a client with an empty password got into the bundled zone"
+            exit 1
+          fi
+          grep -q 'login failed' "$RUNNER_TEMP/bot-nopw.log" \
+            || { echo "::error::the client neither logged in nor was refused - it never got that far"; exit 1; }
+          echo "  ok    an empty password was refused, and the refusal was the zone's answer"
+
+      - name: A real client must log in, enter an arena and get the map
+        working-directory: oss-server
+        run: |
+          set -euo pipefail
+          # The bundled zone has no directory to keep a password in, so it
+          # generates one every start and prints it. Reading it back out of the
+          # log is not a trick to get past the door: it is the only way an
+          # operator can learn it either, and docs/deployment.md says so.
+          pw=$(docker logs zone 2>&1 | grep -o 'password=[a-z0-9]\{16\}' | head -1 | cut -d= -f2)
+          [ -n "$pw" ] \
+            || { echo "::error::the zone never printed a generated zone password"; exit 1; }
+          # Keep it out of this job's remaining output, including the container
+          # log dump at the end. It guards a container that dies with the job,
+          # so this is tidiness rather than a secret being protected -- but the
+          # logs of a public repository are public and the habit is cheap.
+          echo "::add-mask::$pw"
+          echo "the zone generated a ${#pw}-character password at start"
+          # Dump the client's own account of itself however this step ends. The
+          # first version printed it only after the assertions, so the one run
+          # that failed destroyed the evidence it needed.
+          trap 'echo "--- what the witness client saw ---"; cat "$RUNNER_TEMP/bot.log" 2>/dev/null || true' EXIT
           "$RUNNER_TEMP/oss-bot" --server 127.0.0.1:5000 --ship 1 --count 2 --fly \
-            --duration 20 >"$RUNNER_TEMP/bot.log" 2>&1 &
+            --password "$pw" --duration 20 >"$RUNNER_TEMP/bot.log" 2>&1 &
           bot=$!
           # While they are in, the zone must report them on its ping port. A
           # container that is up but broken cannot answer this.
           sleep 8
           python3 tools/zone-ping.py 127.0.0.1 5001 --expect-players 2 --tcp-port 5000
           wait "$bot" || true
-          cat "$RUNNER_TEMP/bot.log"
           for want in 'logged in' 'entering arena' 'map .* ready' 'in the arena with'; do
             grep -qE "$want" "$RUNNER_TEMP/bot.log" \
               || { echo "::error::the client never reached: $want"; exit 1; }
@@ -171,6 +207,18 @@ jobs:
           # the first thing it writes, and it has to land on the host.
           sudo test -f "$RUNNER_TEMP/myzone/data/opensec.key" \
             || { echo "::error::nothing was written to the mounted zone's data directory"; exit 1; }
+          # The other half of the generated password, and the half an operator
+          # with a real zone actually meets: with a directory to keep it in the
+          # zone writes the password out instead of inventing a new one each
+          # start, so it can be read from the file rather than caught in a log.
+          # Anchored on purpose. passwd.conf ships the word "ZonePassword" in
+          # its own commentary, so a bare grep for it passes on a zone that has
+          # never been started and holds no password at all -- checked, and it
+          # does. Only the assignment at the start of a line is evidence.
+          sudo grep -q '^General:ZonePassword *= *[a-z0-9]' \
+            "$RUNNER_TEMP/myzone/conf/passwd.conf" \
+            || { echo "::error::the generated zone password was never written to conf/passwd.conf"; exit 1; }
+          echo "  ok    the mounted zone kept its generated password in conf/passwd.conf"
 
       - name: Container logs
         if: always()
@@ -358,18 +406,73 @@ jobs:
           [ "${nnp:-}" = 1 ] \
             || { echo "::error::the kernel is not enforcing NoNewPrivileges on pid $pid"; exit 1; }
 
+      # An installed zone has a directory, so unlike the container it keeps the
+      # password it generated rather than making a new one each start. Both
+      # places an operator might look for it must therefore agree, and the
+      # service must refuse someone who has not looked at all.
+      - name: The installed zone must have a password, and refuse a client without it
+        working-directory: oss-server
+        run: |
+          set -uo pipefail
+          chmod +x "$RUNNER_TEMP/oss-bot"
+          bad=0
+          # The file is 0640 inside a 0750 directory owned by the service
+          # account, so this needs sudo -- the same reason the layout check does.
+          from_file=$(sudo sed -n 's/^General:ZonePassword *= *//p' \
+            /var/lib/oss-server/zone/conf/passwd.conf | head -1)
+          from_log=$(sudo journalctl -u oss-server --no-pager \
+            | grep -o 'password=[a-z0-9]\{16\}' | head -1 | cut -d= -f2)
+          # Keep it out of the service-log dump at the end of this job. It
+          # guards a zone that is destroyed with the runner, so this is a cheap
+          # habit rather than a secret being protected.
+          # `if`, not `[ ... ] && ...`: this step runs without `set -e` on
+          # purpose, but that form would become a landmine for whoever adds it.
+          if [ -n "$from_file" ]; then echo "::add-mask::$from_file"; fi
+          if [ -n "$from_log" ]; then echo "::add-mask::$from_log"; fi
+          if [ -n "$from_file" ]; then
+            printf '  ok    the zone wrote a %s-character password into conf/passwd.conf\n' "${#from_file}"
+          else
+            printf '  FAIL  conf/passwd.conf holds no generated zone password\n'; bad=1
+          fi
+          if [ -n "$from_log" ]; then
+            printf '  ok    the operator can also read it from the journal\n'
+          else
+            printf '  FAIL  the journal never printed the generated password\n'; bad=1
+          fi
+          if [ -n "$from_file" ] && [ "$from_file" = "$from_log" ]; then
+            printf '  ok    the file and the journal name the same password\n'
+          else
+            printf '  FAIL  the file and the journal disagree about the password\n'; bad=1
+          fi
+          timeout 60 "$RUNNER_TEMP/oss-bot" --server 127.0.0.1:5000 --count 1 \
+            --duration 10 >"$RUNNER_TEMP/bot-nopw.log" 2>&1
+          cat "$RUNNER_TEMP/bot-nopw.log"
+          if grep -q 'logged in' "$RUNNER_TEMP/bot-nopw.log"; then
+            printf '  FAIL  a client with an empty password got into the installed zone\n'; bad=1
+          elif grep -q 'login failed' "$RUNNER_TEMP/bot-nopw.log"; then
+            printf '  ok    an empty password was refused by the zone\n'
+          else
+            printf '  FAIL  the client neither logged in nor was refused - it never reached the login\n'; bad=1
+          fi
+          [ "$bad" -eq 0 ] || { echo "::error::see the FAIL lines above"; exit 1; }
+
       - name: A real client must log in to the installed service
         working-directory: oss-server
         run: |
           set -euo pipefail
-          chmod +x "$RUNNER_TEMP/oss-bot"
+          # Read from the file rather than carried between steps: a step output
+          # would put the password in the run's output context for no reason,
+          # and reading it again is the operator's own path anyway.
+          pw=$(sudo sed -n 's/^General:ZonePassword *= *//p' \
+            /var/lib/oss-server/zone/conf/passwd.conf | head -1)
+          [ -n "$pw" ] || { echo "::error::no zone password in conf/passwd.conf"; exit 1; }
+          trap 'echo "--- what the witness client saw ---"; cat "$RUNNER_TEMP/bot-systemd.log" 2>/dev/null || true' EXIT
           "$RUNNER_TEMP/oss-bot" --server 127.0.0.1:5000 --ship 1 --count 2 --fly \
-            --duration 20 >"$RUNNER_TEMP/bot-systemd.log" 2>&1 &
+            --password "$pw" --duration 20 >"$RUNNER_TEMP/bot-systemd.log" 2>&1 &
           bot=$!
           sleep 8
           python3 tools/zone-ping.py 127.0.0.1 5001 --expect-players 2
           wait "$bot" || true
-          cat "$RUNNER_TEMP/bot-systemd.log"
           for want in 'logged in' 'entering arena' 'map .* ready'; do
             grep -qE "$want" "$RUNNER_TEMP/bot-systemd.log" \
               || { echo "::error::the client never reached: $want"; exit 1; }
@@ -382,6 +485,8 @@ jobs:
         run: |
           set -euo pipefail
           before=$(systemctl show oss-server --property=MainPID --value)
+          PW_BEFORE=$(sudo sed -n 's/^General:ZonePassword *= *//p' \
+            /var/lib/oss-server/zone/conf/passwd.conf | head -1)
           echo "killing pid $before"
           sudo systemctl kill --signal=SIGKILL oss-server
           for _ in $(seq 60); do
@@ -398,6 +503,16 @@ jobs:
           after=$(systemctl show oss-server --property=MainPID --value)
           [ "$after" != "$before" ] || { echo "::error::MainPID never changed; it did not actually restart"; exit 1; }
           python3 tools/zone-ping.py 127.0.0.1 5001 --wait 60
+          # Coming back is not enough if it comes back as a different zone.
+          # The password is generated only when there is not one already, so a
+          # zone that invented a new one here would have locked out every
+          # player it had, every time it crashed -- silently, since the service
+          # would look perfectly healthy.
+          now=$(sudo sed -n 's/^General:ZonePassword *= *//p' \
+            /var/lib/oss-server/zone/conf/passwd.conf | head -1)
+          [ -n "$now" ] && [ "$now" = "$PW_BEFORE" ] \
+            || { echo "::error::the zone password changed across a restart"; exit 1; }
+          echo "  ok    the same zone password is in force after the restart"
 
       # The claim on the tin: safe to run twice. This runs it over a live
       # service with every file edited, which is the case an operator upgrading
@@ -411,6 +526,12 @@ jobs:
           sudo sh -c 'sed -i "/Managed by oss-server install.sh/d" /etc/systemd/system/oss-server.service'
           sudo sh -c 'echo "# operator edit, must survive" >> /etc/systemd/system/oss-server.service'
           sudo cp /var/lib/oss-server/zone/conf/global.conf "$RUNNER_TEMP/global.before"
+          # The zone's password now lives in conf/passwd.conf, so "safe to
+          # re-run" has become a claim about a credential: an upgrade that
+          # rewrote this file would lock every player out of a running zone.
+          PW_BEFORE=$(sudo sed -n 's/^General:ZonePassword *= *//p' \
+            /var/lib/oss-server/zone/conf/passwd.conf | head -1)
+          [ -n "$PW_BEFORE" ] || { echo "::error::no zone password to preserve"; exit 1; }
 
           # Replacing the binary of a running service is the part that would
           # fail if the script copied over the top of it (ETXTBSY).
@@ -433,6 +554,11 @@ jobs:
           # exactly like the ETXTBSY fix working.
           sudo cmp target/release/oss-server /usr/local/bin/oss-server \
             || { echo "::error::the installed binary is not the one just built"; exit 1; }
+          pw_after=$(sudo sed -n 's/^General:ZonePassword *= *//p' \
+            /var/lib/oss-server/zone/conf/passwd.conf | head -1)
+          [ "$pw_after" = "$PW_BEFORE" ] \
+            || { echo "::error::the re-run changed the zone password in conf/passwd.conf"; exit 1; }
+          echo "  ok    the zone password survived the upgrade"
 
       - name: --dry-run must touch nothing
         working-directory: oss-server

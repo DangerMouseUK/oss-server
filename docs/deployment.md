@@ -311,7 +311,10 @@ arena and downloads the map.
 - `install.sh`, run as root on a machine with systemd, puts everything where
   this page says it does, creates the service account, and **starts and
   enables nothing** — that one is asserted rather than assumed, because it is
-  the constraint most easily broken by a later edit.
+  the constraint most easily broken by a later edit. The state directory is
+  checked to be `0750` and owned by the service account, and an ordinary
+  account on the box is checked to be unable to read the zone's configuration
+  — a zone holds staff passwords, the billing password and the server's key.
 - The unit starts, the service answers as a zone, `NoNewPrivileges`,
   `ProtectSystem=strict`, `ProtectHome` and the service user are in effect as
   systemd itself parsed them, and after a `SIGKILL` the service comes back
@@ -331,12 +334,20 @@ against a live zone with and without players in it.
 
 **Not checked anywhere:**
 
-- **The workflow above is new in the same commit as this paragraph and has not
-  yet run.** Until the first green run of *Packaging*, the list describes what
-  CI will check rather than what it has checked. Whoever sees that run go green
-  should delete this bullet.
+- **The container half above has run; the systemd half has not finished a
+  run.** On *Packaging*'s first run (2026-11-16) the image job passed on a real
+  runner, with real clients logging in — everything said about the image is
+  therefore measured. The installer job got as far as installing, and then
+  failed on a check in the workflow that was itself wrong, so everything from
+  "the unit starts" onwards is still only intended. Whoever sees that job go
+  green should move this bullet's contents up into the list above.
 - The publish job has never run, because it fires only on a `v*` tag and none
   has been created.
+- **Name resolution under the unit's sandbox.** The bundled zone names no
+  hosts, so CI never makes the service resolve one, and a check that could
+  pass while resolution was broken would be worse than none. If you point
+  `[Billing]` or `[Directory]` at a hostname and it cannot resolve, that is
+  the first place to look.
 - Only `linux/amd64`. Nothing here says anything about arm64, which matters if
   your small server is an ARM instance.
 - Only the current Ubuntu runner image's systemd. An older distribution may

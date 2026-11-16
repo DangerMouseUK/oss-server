@@ -345,7 +345,12 @@ ProtectKernelTunables=yes
 ProtectKernelModules=yes
 ProtectControlGroups=yes
 ProtectProc=invisible
-RestrictAddressFamilies=AF_INET AF_INET6
+# AF_NETLINK and AF_UNIX are here for name resolution, not for the game: on
+# glibc, getaddrinfo opens a netlink socket to see which address families the
+# machine actually has. Without them a zone works fine on the bundled config,
+# which names no hosts, and then fails the day its operator points [Billing]
+# or [Directory] at a hostname.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
 RestrictNamespaces=yes
 RestrictRealtime=yes
 RestrictSUIDSGID=yes

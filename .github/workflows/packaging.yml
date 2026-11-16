@@ -221,16 +221,81 @@ jobs:
         working-directory: oss-server
         run: sudo ./install.sh
 
+      # Two things this step learned the hard way on its first run.
+      #
+      # It used to be a column of bare `test` commands under `set -e`, so it
+      # died on whichever one was false and printed nothing at all -- the log
+      # said "exit code 1" and named no assertion. Every check now says what
+      # it looked at and whether it passed, and the step keeps going to the
+      # end so one log tells you everything rather than the first thing.
+      #
+      # And anything inside the state directory needs `sudo` to look at. The
+      # installer makes it 0750 and owns it to the service account, because a
+      # zone holds staff passwords, the billing password and the server's own
+      # key. The step that failed was reading it as the runner user, which
+      # cannot even traverse it -- the installer was right and the assertion
+      # was wrong. The last check below now pins that down on purpose.
       - name: Everything must be where the script said it would be
         run: |
-          set -euo pipefail
-          test -x /usr/local/bin/oss-server
-          test -f /var/lib/oss-server/zone/conf/global.conf
-          test -f /etc/oss-server/server.env
-          test -f /etc/systemd/system/oss-server.service
-          id oss-server
-          owner=$(stat -c '%U' /var/lib/oss-server/zone/conf/global.conf)
-          [ "$owner" = oss-server ] || { echo "::error::the zone is owned by $owner"; exit 1; }
+          set -uo pipefail
+          set +e          # report every check, not just the first failure
+          bad=0
+          check() {       # check <what it is> <command...>
+            local what=$1
+            shift
+            if "$@" >/dev/null 2>&1; then
+              printf '  ok    %s\n' "$what"
+            else
+              printf '  FAIL  %s   [%s]\n' "$what" "$*"
+              bad=1
+            fi
+          }
+
+          check "the binary is installed and executable" \
+            test -x /usr/local/bin/oss-server
+          check "the zone has a conf/global.conf" \
+            sudo test -f /var/lib/oss-server/zone/conf/global.conf
+          check "the zone has a conf/staff.conf" \
+            sudo test -f /var/lib/oss-server/zone/conf/staff.conf
+          check "the zone has its (default) arena" \
+            sudo test -f "/var/lib/oss-server/zone/arenas/(default)/arena.conf"
+          check "the environment file exists" \
+            test -f /etc/oss-server/server.env
+          check "the unit file exists" \
+            test -f /etc/systemd/system/oss-server.service
+          check "the service account exists" \
+            id oss-server
+
+          mode=$(sudo stat -c '%a' /var/lib/oss-server 2>/dev/null)
+          if [ "${mode:-}" = 750 ]; then
+            printf '  ok    the state directory is 0750\n'
+          else
+            printf '  FAIL  the state directory should be 0750, it is %s\n' "${mode:-<could not stat>}"
+            bad=1
+          fi
+
+          owner=$(sudo stat -c '%U' /var/lib/oss-server/zone/conf/global.conf 2>/dev/null)
+          if [ "${owner:-}" = oss-server ]; then
+            printf '  ok    the zone is owned by oss-server\n'
+          else
+            printf '  FAIL  the zone should be owned by oss-server, it is %s\n' "${owner:-<could not stat>}"
+            bad=1
+          fi
+
+          # The inverse of the mistake that made this step fail the first
+          # time: an ordinary account on the box must NOT be able to read a
+          # zone's configuration.
+          if test -r /var/lib/oss-server/zone/conf/staff.conf; then
+            printf '  FAIL  %s can read the zone config and should not be able to\n' "$(id -un)"
+            bad=1
+          else
+            printf '  ok    an ordinary user cannot read the zone config\n'
+          fi
+
+          if [ "$bad" -ne 0 ]; then
+            echo "::error::the installed layout is not what install.sh documents; the FAIL lines above say which part"
+            exit 1
+          fi
 
       # The standing constraint: the installer starts nothing and enables
       # nothing. This is the check that keeps it true.
@@ -256,7 +321,9 @@ jobs:
         working-directory: oss-server
         run: |
           set -euo pipefail
-          sudo systemctl start oss-server
+          # Not allowed to abort the step: if it will not start, the status
+          # and the journal below are the whole point of running this.
+          sudo systemctl start oss-server || true
           for _ in $(seq 30); do
             if [ "$(systemctl is-active oss-server || true)" = active ]; then
               break

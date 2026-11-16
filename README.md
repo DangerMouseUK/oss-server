@@ -203,9 +203,10 @@ work out of the box.
 them on trust: it builds the image, starts it with no arguments and has two real clients log
 in and fly in it; and it installs the service on a runner with systemd, starts it, kills it to
 watch it come back, and runs the installer a second time over the live service to check it
-leaves an operator's files alone. That workflow is new and has not had its first run yet —
+leaves an operator's files alone. The image half of that has run green on a real runner; the
+systemd half has not finished a run yet, and
 [what is checked, and what is not](docs/deployment.md#what-is-checked-and-what-is-not) keeps
-that list honest. What still does not exist is anything to download: no image on a registry
+that distinction honest. What still does not exist is anything to download: no image on a registry
 yet — the workflow can push one, but only when somebody runs it by hand against a version
 tag — and no crates.io publication. Both routes build from source.
 

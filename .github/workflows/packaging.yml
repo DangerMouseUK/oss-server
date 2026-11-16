@@ -1,0 +1,493 @@
+name: Packaging
+
+# What this workflow is for.
+#
+# `Dockerfile` and `install.sh` landed documented as "never actually run on the
+# thing they target", because the machine they were written on had neither
+# Docker nor systemd. This runs them for real: the image is built and started
+# and a real game client logs into it, and the installer is run as root on a
+# runner that has systemd, which then starts the unit, kills it to see it come
+# back, and is run a second time to check it leaves an operator's files alone.
+#
+# The point of the client is that "the container is still running" proves very
+# little. A zone can be up, listening and completely broken. So every check
+# here ends at a player: the zone answers its ping port with a population, and
+# the headless bot from oss-client logs in, enters an arena and downloads the
+# map.
+#
+# Nothing here publishes anything except the `publish` job, and that one needs
+# a person to run it by hand against a version tag -- pushing the tag is not
+# enough. See the comment on it.
+
+on:
+  push:
+    branches: [main]
+    tags: ["v[0-9]+.[0-9]+.[0-9]+*"]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: "Push the image to ghcr.io. Run this from a v* tag."
+        type: boolean
+        default: false
+      core_ref:
+        description: "oss-core ref to build against (default: the same tag if oss-core has it, else its default branch)"
+        required: false
+
+env:
+  CARGO_TERM_COLOR: always
+  # Kept in step with .github/workflows/ci.yml, which explains the pin and the
+  # procedure for raising it. Raise both together.
+  RUST_PINNED: "1.100.0"
+  IMAGE: oss-server:ci
+
+jobs:
+  # The witness. Built once and handed to both test jobs, because both ask the
+  # same question -- can a client actually play here -- and building it twice
+  # would only be slower.
+  bot:
+    name: Build the client used as a witness
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: DangerMouseUK/oss-client
+          path: oss-client
+      - uses: actions/checkout@v4
+        with:
+          repository: DangerMouseUK/oss-core
+          path: oss-core
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_PINNED }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: oss-client
+      - run: cargo build --release --package oss-bot
+        working-directory: oss-client
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: oss-bot
+          path: oss-client/target/release/oss-bot
+          if-no-files-found: error
+          retention-days: 1
+
+  image:
+    name: Container image
+    runs-on: ubuntu-latest
+    needs: bot
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: oss-server
+      # Not for the build -- the Dockerfile fetches oss-core itself, because the
+      # build context is this repository alone. This checkout is only so the
+      # image is pinned to the same oss-core commit the rest of CI tested.
+      - uses: actions/checkout@v4
+        with:
+          repository: DangerMouseUK/oss-core
+          path: oss-core
+      - id: core
+        run: echo "sha=$(git -C oss-core rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: oss-bot
+          path: ${{ runner.temp }}
+
+      - name: Build the image
+        working-directory: oss-server
+        run: docker build --build-arg "OSS_CORE_REF=${{ steps.core.outputs.sha }}" --tag "$IMAGE" .
+
+      - name: It must not run as root
+        run: |
+          set -euo pipefail
+          uid=$(docker run --rm --entrypoint id "$IMAGE" -u)
+          echo "the image runs as uid $uid"
+          [ "$uid" = 10001 ] || { echo "::error::the image runs as uid $uid, expected 10001"; exit 1; }
+
+      - name: Start it with no arguments at all
+        run: |
+          docker run --detach --name zone \
+            --publish 5000:5000/udp --publish 5001:5001/udp --publish 5000:5000/tcp \
+            "$IMAGE"
+
+      - name: It must come up as a zone, not merely as a process
+        working-directory: oss-server
+        run: |
+          set -euo pipefail
+          python3 tools/zone-ping.py 127.0.0.1 5001 --wait 60 --tcp-port 5000
+          docker logs zone 2>&1 | grep -q 'listening' \
+            || { echo "::error::the server never logged a listening socket"; exit 1; }
+
+      - name: A real client must log in, enter an arena and get the map
+        working-directory: oss-server
+        run: |
+          set -euo pipefail
+          chmod +x "$RUNNER_TEMP/oss-bot"
+          "$RUNNER_TEMP/oss-bot" --server 127.0.0.1:5000 --ship 1 --count 2 --fly \
+            --duration 20 >"$RUNNER_TEMP/bot.log" 2>&1 &
+          bot=$!
+          # While they are in, the zone must report them on its ping port. A
+          # container that is up but broken cannot answer this.
+          sleep 8
+          python3 tools/zone-ping.py 127.0.0.1 5001 --expect-players 2 --tcp-port 5000
+          wait "$bot" || true
+          cat "$RUNNER_TEMP/bot.log"
+          for want in 'logged in' 'entering arena' 'map .* ready' 'in the arena with'; do
+            grep -qE "$want" "$RUNNER_TEMP/bot.log" \
+              || { echo "::error::the client never reached: $want"; exit 1; }
+          done
+
+      - name: And it must still be running afterwards
+        run: |
+          set -euo pipefail
+          state=$(docker inspect --format '{{.State.Status}}' zone)
+          restarts=$(docker inspect --format '{{.RestartCount}}' zone)
+          echo "state=$state restarts=$restarts"
+          [ "$state" = running ] || { echo "::error::the container is $state"; exit 1; }
+          [ "$restarts" = 0 ] || { echo "::error::the container restarted $restarts time(s)"; exit 1; }
+
+      - name: A mounted zone directory must work, written as uid 10001
+        working-directory: oss-server
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/myzone"
+          sudo chown -R 10001:10001 "$RUNNER_TEMP/myzone"
+          docker run --rm --volume "$RUNNER_TEMP/myzone:/zone" "$IMAGE" --init-zone /zone
+          test -f "$RUNNER_TEMP/myzone/conf/global.conf" \
+            || { echo "::error::--init-zone wrote nothing to the mount"; exit 1; }
+          # A second --init-zone must refuse rather than overwrite.
+          if docker run --rm --volume "$RUNNER_TEMP/myzone:/zone" "$IMAGE" --init-zone /zone; then
+            echo "::error::--init-zone overwrote an existing zone"; exit 1
+          fi
+          docker run --detach --name mounted \
+            --publish 6000:5000/udp --publish 6001:5001/udp \
+            --volume "$RUNNER_TEMP/myzone:/zone" "$IMAGE" --zone /zone
+          python3 tools/zone-ping.py 127.0.0.1 6001 --wait 60
+          # Running from a directory means it keeps state; the server key is
+          # the first thing it writes, and it has to land on the host.
+          sudo test -f "$RUNNER_TEMP/myzone/data/opensec.key" \
+            || { echo "::error::nothing was written to the mounted zone's data directory"; exit 1; }
+
+      - name: Container logs
+        if: always()
+        run: |
+          echo "--- bundled-zone container ---"
+          docker logs zone 2>&1 | tail -40 || true
+          echo "--- mounted-zone container ---"
+          docker logs mounted 2>&1 | tail -40 || true
+
+  installer:
+    name: install.sh and the systemd unit
+    runs-on: ubuntu-latest
+    needs: bot
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: oss-server
+      - uses: actions/checkout@v4
+        with:
+          repository: DangerMouseUK/oss-core
+          path: oss-core
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: oss-bot
+          path: ${{ runner.temp }}
+
+      # If this ever stops being true the job must fail here and say so, rather
+      # than quietly testing the file layout and calling that a systemd test.
+      - name: This runner must have a usable systemd
+        run: |
+          set -euo pipefail
+          systemctl --version | head -1
+          systemctl is-system-running || true
+          [ -d /run/systemd/system ] \
+            || { echo "::error::no running systemd on this runner; the unit cannot be tested here, only a VM or a systemd container can do it"; exit 1; }
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_PINNED }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: oss-server
+      - run: cargo build --release --package oss-server
+        working-directory: oss-server
+
+      - name: Install it
+        working-directory: oss-server
+        run: sudo ./install.sh
+
+      - name: Everything must be where the script said it would be
+        run: |
+          set -euo pipefail
+          test -x /usr/local/bin/oss-server
+          test -f /var/lib/oss-server/zone/conf/global.conf
+          test -f /etc/oss-server/server.env
+          test -f /etc/systemd/system/oss-server.service
+          id oss-server
+          owner=$(stat -c '%U' /var/lib/oss-server/zone/conf/global.conf)
+          [ "$owner" = oss-server ] || { echo "::error::the zone is owned by $owner"; exit 1; }
+
+      # The standing constraint: the installer starts nothing and enables
+      # nothing. This is the check that keeps it true.
+      - name: It must not have started or enabled anything
+        run: |
+          set -euo pipefail
+          sudo systemctl daemon-reload
+          active=$(systemctl is-active oss-server || true)
+          enabled=$(systemctl is-enabled oss-server || true)
+          echo "active=$active enabled=$enabled"
+          [ "$active" = inactive ] || { echo "::error::the installer started the service ($active)"; exit 1; }
+          [ "$enabled" = disabled ] || { echo "::error::the installer enabled the service ($enabled)"; exit 1; }
+
+      # Advisory. systemd-analyze is stricter than systemd itself and will
+      # grumble about things that start perfectly well, so it annotates rather
+      # than fails -- the real test is the start below.
+      - name: What systemd-analyze thinks of the unit
+        run: |
+          systemd-analyze verify /etc/systemd/system/oss-server.service \
+            || echo "::warning::systemd-analyze verify had something to say about the unit; see above"
+
+      - name: Start it and prove it is a zone
+        working-directory: oss-server
+        run: |
+          set -euo pipefail
+          sudo systemctl start oss-server
+          for _ in $(seq 30); do
+            if [ "$(systemctl is-active oss-server || true)" = active ]; then
+              break
+            fi
+            sleep 1
+          done
+          systemctl --no-pager --full status oss-server || true
+          [ "$(systemctl is-active oss-server)" = active ] \
+            || { echo "::error::the service did not reach active"; exit 1; }
+          python3 tools/zone-ping.py 127.0.0.1 5001 --wait 60 --tcp-port 5000
+
+      - name: The hardening in the unit must actually be in effect
+        run: |
+          set -euo pipefail
+          for pair in NoNewPrivileges=yes ProtectSystem=strict ProtectHome=yes User=oss-server; do
+            key=${pair%%=*}; want=${pair#*=}
+            got=$(systemctl show oss-server --property="$key" --value)
+            echo "$key=$got"
+            [ "$got" = "$want" ] || { echo "::error::$key is $got, expected $want"; exit 1; }
+          done
+
+      - name: A real client must log in to the installed service
+        working-directory: oss-server
+        run: |
+          set -euo pipefail
+          chmod +x "$RUNNER_TEMP/oss-bot"
+          "$RUNNER_TEMP/oss-bot" --server 127.0.0.1:5000 --ship 1 --count 2 --fly \
+            --duration 20 >"$RUNNER_TEMP/bot-systemd.log" 2>&1 &
+          bot=$!
+          sleep 8
+          python3 tools/zone-ping.py 127.0.0.1 5001 --expect-players 2
+          wait "$bot" || true
+          cat "$RUNNER_TEMP/bot-systemd.log"
+          for want in 'logged in' 'entering arena' 'map .* ready'; do
+            grep -qE "$want" "$RUNNER_TEMP/bot-systemd.log" \
+              || { echo "::error::the client never reached: $want"; exit 1; }
+          done
+
+      # Restart=always is the reason the unit exists. SIGKILL is the honest
+      # test of it: nothing gets to shut down tidily.
+      - name: It must come back after a crash
+        working-directory: oss-server
+        run: |
+          set -euo pipefail
+          before=$(systemctl show oss-server --property=MainPID --value)
+          echo "killing pid $before"
+          sudo systemctl kill --signal=SIGKILL oss-server
+          for _ in $(seq 60); do
+            after=$(systemctl show oss-server --property=MainPID --value)
+            if [ "$(systemctl is-active oss-server || true)" = active ] \
+               && [ "$after" != "$before" ] && [ "$after" != 0 ]; then
+              echo "came back as pid $after"
+              break
+            fi
+            sleep 1
+          done
+          [ "$(systemctl is-active oss-server)" = active ] \
+            || { echo "::error::the service did not restart after SIGKILL"; exit 1; }
+          after=$(systemctl show oss-server --property=MainPID --value)
+          [ "$after" != "$before" ] || { echo "::error::MainPID never changed; it did not actually restart"; exit 1; }
+          python3 tools/zone-ping.py 127.0.0.1 5001 --wait 60
+
+      # The claim on the tin: safe to run twice. This runs it over a live
+      # service with every file edited, which is the case an operator upgrading
+      # a running zone will actually hit.
+      - name: Running it again must change nothing that is not ours
+        working-directory: oss-server
+        run: |
+          set -euo pipefail
+          sudo sh -c 'echo "; operator edit, must survive" >> /var/lib/oss-server/zone/conf/global.conf'
+          sudo sh -c 'echo "OSS_SERVER_ARGS=--json" >> /etc/oss-server/server.env'
+          sudo sh -c 'sed -i "/Managed by oss-server install.sh/d" /etc/systemd/system/oss-server.service'
+          sudo sh -c 'echo "# operator edit, must survive" >> /etc/systemd/system/oss-server.service'
+          sudo cp /var/lib/oss-server/zone/conf/global.conf "$RUNNER_TEMP/global.before"
+
+          # Replacing the binary of a running service is the part that would
+          # fail if the script copied over the top of it (ETXTBSY).
+          sudo ./install.sh
+
+          sudo cmp "$RUNNER_TEMP/global.before" /var/lib/oss-server/zone/conf/global.conf \
+            || { echo "::error::the zone's config was rewritten"; exit 1; }
+          sudo grep -q 'OSS_SERVER_ARGS=--json' /etc/oss-server/server.env \
+            || { echo "::error::the environment file was rewritten"; exit 1; }
+          sudo test -f /etc/oss-server/server.env.new \
+            || { echo "::error::no server.env.new was offered"; exit 1; }
+          sudo grep -q 'operator edit, must survive' /etc/systemd/system/oss-server.service \
+            || { echo "::error::the hand-edited unit was overwritten"; exit 1; }
+          sudo test -f /etc/systemd/system/oss-server.service.new \
+            || { echo "::error::no oss-server.service.new was offered"; exit 1; }
+          [ "$(systemctl is-active oss-server)" = active ] \
+            || { echo "::error::re-running the installer took the service down"; exit 1; }
+
+      - name: --dry-run must touch nothing
+        working-directory: oss-server
+        run: |
+          set -euo pipefail
+          out=$RUNNER_TEMP/dry
+          ./install.sh --dry-run --no-user --binary target/release/oss-server \
+            --prefix "$out/usr" --state-dir "$out/var" --config-dir "$out/etc" --unit-dir "$out/units"
+          [ ! -e "$out" ] || { echo "::error::--dry-run created $out"; find "$out"; exit 1; }
+
+      - name: Service log
+        if: always()
+        run: sudo journalctl --unit oss-server --no-pager --lines 60 || true
+
+  # Publishing to GitHub Container Registry.
+  #
+  # This job takes TWO deliberate acts, not one. Pushing a tag does not publish
+  # anything: it only runs the tests above. To publish, a person goes to
+  # Actions -> Packaging -> Run workflow, picks the tag as the ref, and ticks
+  # `publish`. Nothing on a pull request, nothing on a push to main, and
+  # nothing on a dispatch from a branch can reach this job.
+  #
+  # That is deliberately the same posture as release.yml, which builds on a tag
+  # and leaves the release a DRAFT: in this repository a tag means "build this
+  # and show me", and a human means "hand it out".
+  #
+  # The first successful run creates the package as PRIVATE. Making it public
+  # is a one-off manual step in the repository's package settings, and nothing
+  # here can or should do it.
+  publish:
+    name: Publish to ghcr.io (manual, from a v* tag)
+    if: >-
+      github.event_name == 'workflow_dispatch'
+      && inputs.publish
+      && startsWith(github.ref, 'refs/tags/v')
+    needs: [image, installer]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      # Sigstore signing for the build-provenance attestation.
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: oss-server
+
+      # Same rule release.yml uses, and for the same reason: "whatever
+      # oss-core's main was that afternoon" is not an answer to "what is in
+      # this image". The same tag in oss-core if it has one, otherwise its
+      # default branch, and the `core_ref` input overrides both. Whichever it
+      # was is printed at the end of the job.
+      - id: resolve
+        run: |
+          set -euo pipefail
+          ref='${{ inputs.core_ref }}'
+          if [ -z "$ref" ]; then
+            tag=${GITHUB_REF#refs/tags/}
+            if git ls-remote --exit-code --tags \
+                 https://github.com/DangerMouseUK/oss-core.git "refs/tags/$tag" >/dev/null 2>&1; then
+              ref=$tag
+              echo "oss-core has $tag; building against it"
+            else
+              echo "oss-core has no $tag; falling back to its default branch"
+            fi
+          else
+            echo "oss-core ref given by hand: $ref"
+          fi
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v4
+        with:
+          repository: DangerMouseUK/oss-core
+          ref: ${{ steps.resolve.outputs.ref }}
+          path: oss-core
+
+      - id: names
+        run: |
+          set -euo pipefail
+          # GHCR rejects capitals, and this owner has them.
+          echo "image=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+          echo "core=$(git -C oss-core rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Tags: the exact version, the major.minor that moves with patches, the
+      # commit, and `latest` for the newest non-prerelease. Labels: the OCI set,
+      # which is what links the package to this repository and lets a reader of
+      # `docker inspect` tell what they are running -- including which oss-core
+      # commit went into it, which the source label alone cannot say.
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ steps.names.outputs.image }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha,format=long
+          labels: |
+            org.opencontainers.image.licenses=GPL-2.0-or-later
+            org.opencontainers.image.documentation=https://github.com/${{ github.repository }}/blob/main/docs/deployment.md
+            net.opensubspace.oss-core.revision=${{ steps.names.outputs.core }}
+
+      - id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: oss-server
+          push: true
+          build-args: |
+            OSS_CORE_REF=${{ steps.names.outputs.core }}
+            CARGO_FLAGS=--locked
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          provenance: mode=max
+          sbom: true
+
+      # Signed, verifiable with: gh attestation verify oci://<image>@<digest>
+      - uses: actions/attest-build-provenance@v4
+        with:
+          subject-name: ${{ steps.names.outputs.image }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+
+      - name: What was published
+        run: |
+          {
+            echo "### Image published"
+            echo
+            echo "- digest: \`${{ steps.build.outputs.digest }}\`"
+            echo "- oss-core: \`${{ steps.names.outputs.core }}\`"
+            echo "- built with \`--locked\`, so the committed Cargo.lock is what is in it"
+            echo "- tags:"
+            echo '```'
+            echo "${{ steps.meta.outputs.tags }}"
+            echo '```'
+            echo
+            echo "The package is PRIVATE until someone makes it public in the repository's package settings."
+          } >> "$GITHUB_STEP_SUMMARY"

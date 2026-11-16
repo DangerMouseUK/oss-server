@@ -198,7 +198,10 @@ elif [ -z "$BINARY" ]; then
     BINARY=$SELF_DIR/target/release/$PROGRAM
 fi
 
-if [ ! -x "$BINARY" ] && [ "$DRY_RUN" = no ]; then
+# Checked under --dry-run too: without it the dry run dies later on a failed
+# redirect instead of saying this, and a dry run with no binary to install
+# would not be telling you much anyway.
+if [ ! -x "$BINARY" ]; then
     die "no binary at $BINARY. Build it with 'cargo build --release' (see README \"Building\": oss-core must be checked out beside this repository), or pass --binary PATH, or re-run with --build."
 fi
 note "using $BINARY"
@@ -238,7 +241,12 @@ if [ -e "$INSTALLED_BIN" ]; then
 else
     WORD=installed
 fi
-run install -m 0755 "$BINARY" "$INSTALLED_BIN"
+# Written to a temporary name and renamed into place, not copied over the top.
+# Linux refuses to open a running executable for writing (ETXTBSY), so copying
+# would fail on exactly the case this script is for: upgrading a zone that is
+# currently up. A rename replaces the directory entry and leaves the running
+# process on the old inode until it is restarted.
+write_file "$INSTALLED_BIN" 0755 <"$BINARY"
 changed "$WORD $INSTALLED_BIN"
 
 step "Zone directory"

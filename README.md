@@ -199,10 +199,15 @@ else needs to change. VIE encryption (the one that is public, and in ASSS) and
 work out of the box.
 
 **Packaging, partly.** There is a [`Dockerfile`](Dockerfile) and an [`install.sh`](install.sh)
-(see [docs/deployment.md](docs/deployment.md)), but neither has yet been run on the thing it
-targets: the image has never been built and the systemd unit has never been loaded, because
-the machine they were written on had neither Docker nor systemd. There is still no release
-binary to download and no crates.io publication, so both of them build from source.
+(see [docs/deployment.md](docs/deployment.md)), and CI runs both for real rather than taking
+them on trust: it builds the image, starts it with no arguments and has two real clients log
+in and fly in it; and it installs the service on a runner with systemd, starts it, kills it to
+watch it come back, and runs the installer a second time over the live service to check it
+leaves an operator's files alone. That workflow is new and has not had its first run yet —
+[what is checked, and what is not](docs/deployment.md#what-is-checked-and-what-is-not) keeps
+that list honest. What still does not exist is anything to download: no image on a registry
+yet — the workflow can push one, but only when somebody runs it by hand against a version
+tag — and no crates.io publication. Both routes build from source.
 
 **Not proven yet.** The 500-player figures come from a soak harness, not from 500 real
 people; a crowded 500-player arena is over budget (above). Only the parts listed in

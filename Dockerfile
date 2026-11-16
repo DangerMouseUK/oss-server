@@ -43,9 +43,15 @@ RUN git clone --depth 1 "${OSS_CORE_URL}" oss-core \
 COPY . /src/oss-server
 WORKDIR /src/oss-server
 
+# Empty by default, so a casual `docker build` against oss-core's main branch
+# is not refused for a lockfile that moved. A release build passes `--locked`
+# here, for the reason .github/workflows/release.yml gives: what is handed to
+# strangers should be the committed Cargo.lock or nothing.
+ARG CARGO_FLAGS=
+
 # rusqlite's `bundled` feature compiles SQLite from C; the rust image already
 # carries a C toolchain, which is why this stage is not debian-slim.
-RUN cargo build --release --package oss-server \
+RUN cargo build --release --package oss-server ${CARGO_FLAGS} \
     && strip target/release/oss-server
 
 # -------------------------------------------------------------- runtime stage

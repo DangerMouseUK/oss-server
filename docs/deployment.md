@@ -181,6 +181,10 @@ It is meant to be re-run, and it says what it did and did not touch:
   updates, use a drop-in: `sudo systemctl edit oss-server`.
 - **Directory modes** are set when the directory is created and never changed
   afterwards, so a mode you chose survives.
+- **The service may be running while you do it.** The new binary is written
+  under a temporary name and renamed into place rather than copied over the
+  top, because Linux refuses to open a running executable for writing. The
+  running process stays on the old copy until you restart it.
 
 `--dry-run` prints every action and changes nothing.
 
@@ -228,29 +232,116 @@ enough to warn about a directive in there (`ProtectProc` needs 247,
 `ProtectClock` 245), the warning is harmless: systemd ignores keys it does not
 know.
 
+## Published images
+
+**There is no published image yet.** When there is, it will be on GitHub
+Container Registry at `ghcr.io/dangermouseuk/oss-server`, pushed by the
+`publish` job of
+[`.github/workflows/packaging.yml`](../.github/workflows/packaging.yml).
+
+Publishing takes **two deliberate acts, not one**. Pushing a version tag does
+not publish anything — it only runs the tests above. Someone then has to go to
+Actions → Packaging → Run workflow, choose that tag, and tick `publish`.
+Nothing else reaches that job: not a pull request, not a push to `main`, not a
+run from a branch. It also waits on both test jobs, so a tag whose image does
+not actually serve a zone publishes nothing.
+
+That is the same posture as
+[`release.yml`](../.github/workflows/release.yml), which builds binaries on a
+tag and leaves the GitHub release a draft. In this repository a tag means
+"build this and show me"; a person means "hand it out".
+
+The image is built with `--locked`, so what is in it is the committed
+`Cargo.lock`, and against the oss-core commit carrying the same tag if there
+is one — the same rule `release.yml` uses for the binaries, so a release's
+image and its tarballs are the same software.
+
+What you will be able to tell about an image you are running:
+
+| | |
+|---|---|
+| `1.2.3`, `1.2`, `latest` | the version, the line that moves with patches, and the newest release. Tags are for people — they can be re-pointed. |
+| `sha-<commit>` | the exact `oss-server` commit the image was built from. |
+| `@sha256:...` | the digest. This is the one to pin in a deployment; it cannot be re-pointed at anything else. |
+| `docker inspect` labels | the standard OCI set — source repository, revision, version, created time, `GPL-2.0-or-later`, and a link to this page — plus `net.opensubspace.oss-core.revision`, which names the oss-core commit compiled into it. The source label alone cannot say that, because the two repositories are separate. |
+
+Each published image also carries a signed build-provenance attestation, so
+you can check that it came from this repository's workflow and not from
+somebody's laptop:
+
+```sh
+gh attestation verify oci://ghcr.io/dangermouseuk/oss-server:1.2.3 \
+    --owner DangerMouseUK
+```
+
 ## Upgrading
 
-Container: rebuild the image and recreate the container. The zone directory is
-on the mount, so nothing in it moves.
+Container: rebuild or pull the image and recreate the container. The zone
+directory is on the mount, so nothing in it moves.
 
 systemd: build the new binary, re-run `sudo ./install.sh`, then
 `sudo systemctl restart oss-server`. The installer replaces the binary and the
-unit and leaves the zone and your environment file alone.
+unit and leaves the zone and your environment file alone. You do not have to
+stop the service first.
 
-## What has been tested, and what has not
+## What is checked, and what is not
 
 In keeping with the rest of this repository, the coverage rather than the
-claim:
+claim.
 
-- **Tested** (2026-11-16, on Windows): the server starting with no arguments
-  and no files and taking real clients; what a `--zone` directory must contain
-  before the server will start; `--init-zone` writing a zone and
-  refusing to overwrite one; `install.sh` run twice against a throwaway prefix,
-  including the edited-config, edited-env-file and hand-edited-unit paths; and
-  the installed binary serving the installed zone to a client.
-- **Not tested**: the `Dockerfile` has never been built, and the systemd unit
-  has never been loaded by systemd. No Docker and no systemd were available on
-  the machine where they were written. Both are reasoned from the code and
-  from the behaviour measured above, which is not the same thing as having run
-  them. If you are the first to try either, an issue saying what broke is
-  worth more than a polite one saying it worked.
+The thing being checked for is always a **playable zone**, never a running
+process. A container that has not exited and a service that is `active` both
+prove very little on their own, so every check below ends at a client: the
+zone answers its ping port with a population, and the headless bot from
+[oss-client](https://github.com/DangerMouseUK/oss-client) logs in, enters an
+arena and downloads the map.
+
+**Checked by CI** on every push and pull request, in
+[`.github/workflows/packaging.yml`](../.github/workflows/packaging.yml):
+
+- The image builds, starts with **no arguments at all**, and runs as uid 10001
+  rather than root.
+- It is a zone: it answers on UDP 5001, accepts a TCP connection on 5000, and
+  two real clients log in, enter an arena and get the map — and while they are
+  in, the zone reports them. The container is still running, and has not
+  restarted, when they leave.
+- A mounted zone directory works end to end: `--init-zone` writes one through
+  the mount, refuses to overwrite it when run again, the server then runs from
+  it, and its key lands in `data/` on the host as uid 10001.
+- `install.sh`, run as root on a machine with systemd, puts everything where
+  this page says it does, creates the service account, and **starts and
+  enables nothing** — that one is asserted rather than assumed, because it is
+  the constraint most easily broken by a later edit.
+- The unit starts, the service answers as a zone, `NoNewPrivileges`,
+  `ProtectSystem=strict`, `ProtectHome` and the service user are in effect as
+  systemd itself parsed them, and after a `SIGKILL` the service comes back
+  under a new PID.
+- Running the installer a **second time, over a running service**, with the
+  zone config, the environment file and the unit all hand-edited, leaves every
+  one of them alone and offers its own versions as `.new` — and does not take
+  the service down.
+- `--dry-run` creates nothing.
+
+**Checked by hand** (2026-11-16, on Windows): the server starting with no
+arguments and no files and taking real clients; what a `--zone` directory must
+contain before the server will start at all; `--init-zone` writing a zone and
+refusing to overwrite one; the installer run repeatedly against throwaway
+prefixes; and [`tools/zone-ping.py`](../tools/zone-ping.py), the probe CI uses,
+against a live zone with and without players in it.
+
+**Not checked anywhere:**
+
+- **The workflow above is new in the same commit as this paragraph and has not
+  yet run.** Until the first green run of *Packaging*, the list describes what
+  CI will check rather than what it has checked. Whoever sees that run go green
+  should delete this bullet.
+- The publish job has never run, because it fires only on a `v*` tag and none
+  has been created.
+- Only `linux/amd64`. Nothing here says anything about arm64, which matters if
+  your small server is an ARM instance.
+- Only the current Ubuntu runner image's systemd. An older distribution may
+  reject a hardening directive; the unit is written so that costs you a
+  warning rather than a failed start, but that has not been tried.
+
+If you are the first to hit something this list does not cover, an issue
+saying what broke is worth more than a polite one saying it worked.

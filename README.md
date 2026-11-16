@@ -78,6 +78,22 @@ The config reader is ASSS's: `#include`, sections, per-arena overrides and all. 
 already expects. Modules ASSS has that this server does not are listed as `not implemented`
 in the bundled `conf/modules.conf`, so you can see at a glance what you would lose.
 
+### On a server of your own
+
+Two ways to put it on a machine that is not a developer's, both documented in
+[docs/deployment.md](docs/deployment.md):
+
+```sh
+docker build -t oss-server .     # multi-stage; the image runs as uid 10001
+sudo ./install.sh                # /usr/local/bin + /var/lib/oss-server + a systemd unit
+```
+
+Neither starts or enables anything; both print what to run next. `install.sh` is safe to
+re-run — it replaces the binary and the unit, and leaves an existing zone directory and
+environment file alone. Three ports matter and it is easy to publish only the first: the
+game port on **UDP 5000**, its ping port on **UDP 5001** (always the game port + 1), and
+the text chat protocol on **TCP 5000**.
+
 ### Operations
 
 Uncomment `[Admin] Listen` in `conf/global.conf` (and set `[Admin] Token` if it is not on
@@ -182,8 +198,11 @@ else needs to change. VIE encryption (the one that is public, and in ASSS) and
 [OpenSec](https://github.com/DangerMouseUK/oss-core/blob/main/docs/protocol/opensec.md) both
 work out of the box.
 
-**Not done yet: packaging.** There is no container image, no installer, no release binary and
-no crates.io publication. Today the only way to run it is to build it from source, as above.
+**Packaging, partly.** There is a [`Dockerfile`](Dockerfile) and an [`install.sh`](install.sh)
+(see [docs/deployment.md](docs/deployment.md)), but neither has yet been run on the thing it
+targets: the image has never been built and the systemd unit has never been loaded, because
+the machine they were written on had neither Docker nor systemd. There is still no release
+binary to download and no crates.io publication, so both of them build from source.
 
 **Not proven yet.** The 500-player figures come from a soak harness, not from 500 real
 people; a crowded 500-player arena is over budget (above). Only the parts listed in

@@ -1,0 +1,16 @@
+# Keep the build context small and keep host build output out of the image.
+# The builder compiles from source inside the container, so nothing built
+# here is useful there.
+target/
+local/
+
+.git/
+.github/
+.claude/
+CLAUDE.local.md
+
+# Packet captures and game assets never travel with this repository.
+*.pcap
+*.pcapng
+*.bm2
+*.wa2

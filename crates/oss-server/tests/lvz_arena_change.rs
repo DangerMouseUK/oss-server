@@ -45,7 +45,7 @@ impl H {
             ("conf/global.conf", String::new()),
             (
                 "conf/passwd.conf",
-                "[General]\nAllowUnknown = yes\n".to_owned(),
+                "[General]\nAllowUnknown = yes\nAllowAnyLogin = yes\n".to_owned(),
             ),
             ("conf/groupdef.conf", "[default]\ncmd_go = 1\n".to_owned()),
             ("conf/staff.conf", String::new()),
@@ -248,7 +248,14 @@ mod bundled {
 
     impl B {
         fn new() -> Self {
-            let mut zone = ServerBuilder::default_zone().build_zone().expect("zone");
+            // Logs real players in to the BUNDLED zone, which since D29
+            // needs a zone password it generates at start. The subject here
+            // is LVZ on arena change, not authentication, so it asks for the
+            // open login explicitly.
+            let mut zone = ServerBuilder::default_zone()
+                .allow_any_login(true)
+                .build_zone()
+                .expect("zone");
             zone.res.insert(oss_server::prng::Prng::new(1));
             zone.fire(&ZoneStarted);
             Self {
@@ -447,7 +454,7 @@ mod replay {
         src.insert(
             "conf/passwd.conf",
             format!(
-                "[General]\nAllowUnknown = yes\n[Users]\nalice = {}\n",
+                "[General]\nAllowUnknown = yes\nAllowAnyLogin = yes\n[Users]\nalice = {}\n",
                 hash_password("alice", "secret")
             ),
         );

@@ -21,6 +21,21 @@ struct Args {
     /// Listen address for the game port (ping uses port + 1).
     #[arg(long)]
     bind: Option<SocketAddr>,
+    /// Shared password that lets any name log in. Without it, and without
+    /// any other login configuration, the server generates one on start and
+    /// prints it. Note that a command line is visible to other users on the
+    /// machine; a zone directory keeps this in conf/passwd.conf instead.
+    #[arg(
+        long,
+        value_name = "PASSWORD",
+        conflicts_with = "insecure_allow_any_login"
+    )]
+    zone_password: Option<String>,
+    /// Accept ANY name with ANY password, with no zone password at all.
+    /// This is a developer convenience and is never a default: a name on
+    /// such a zone is a name anyone may claim.
+    #[arg(long)]
+    insecure_allow_any_login: bool,
     /// Log as JSON lines.
     #[arg(long)]
     json: bool,
@@ -59,6 +74,12 @@ fn main() -> ExitCode {
     };
     if let Some(b) = args.bind {
         builder = builder.bind(b);
+    }
+    if let Some(pw) = args.zone_password {
+        builder = builder.zone_password(pw);
+    }
+    if args.insecure_allow_any_login {
+        builder = builder.allow_any_login(true);
     }
     match builder.run() {
         Ok(()) => ExitCode::SUCCESS,

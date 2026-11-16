@@ -133,7 +133,10 @@ fn listen_sockets() {
                   [Listen2]\nPort = 0\nBindAddress = 127.0.0.1\nAllowVIE = 0\n";
     let src = MemSource::new([
         ("conf/global.conf", global),
-        ("conf/passwd.conf", "[General]\nAllowUnknown = yes\n"),
+        (
+            "conf/passwd.conf",
+            "[General]\nAllowUnknown = yes\nAllowAnyLogin = yes\n",
+        ),
         ("arenas/(default)/arena.conf", ""),
     ]);
     let server = ServerBuilder::with_source(src).start().expect("server");

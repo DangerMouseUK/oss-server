@@ -32,7 +32,10 @@ impl H {
                 "conf/global.conf",
                 "[Net]\nChatListen = 127.0.0.1:0\nChatMessageDelay = 0\n",
             ),
-            ("conf/passwd.conf", "[General]\nAllowUnknown = yes\n"),
+            (
+                "conf/passwd.conf",
+                "[General]\nAllowUnknown = yes\nAllowAnyLogin = yes\n",
+            ),
             ("conf/groupdef.conf", "[default]\ncmd_go = 1\n"),
             ("conf/staff.conf", ""),
             ("arenas/(default)/arena.conf", "[Team]\nDesiredTeams = 2\n"),

@@ -35,7 +35,10 @@ impl H {
     fn new(arena_conf: &str, map: Option<Vec<u8>>) -> Self {
         let mut src = MemSource::new([
             ("conf/global.conf", ""),
-            ("conf/passwd.conf", "[General]\nAllowUnknown = yes\n"),
+            (
+                "conf/passwd.conf",
+                "[General]\nAllowUnknown = yes\nAllowAnyLogin = yes\n",
+            ),
             (
                 "conf/groupdef.conf",
                 "[default]\ncmd_flaginfo = 1\ncmd_neutflag = 1\ncmd_moveflag = 1\n",

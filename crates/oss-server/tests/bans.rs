@@ -31,7 +31,7 @@ impl H {
             (
                 "conf/passwd.conf",
                 format!(
-                    "[General]\nAllowUnknown = yes\n[Users]\nboss = {}\n",
+                    "[General]\nAllowUnknown = yes\nAllowAnyLogin = yes\n[Users]\nboss = {}\n",
                     oss_server::modules::auth_file::hash_password("boss", "x")
                 ),
             ),

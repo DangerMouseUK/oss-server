@@ -70,7 +70,7 @@ fn make_zone() -> TempZone {
     w(
         "conf/passwd.conf",
         format!(
-            "[General]\nAllowUnknown = yes\n[Users]\nalice = {}\n",
+            "[General]\nAllowUnknown = yes\nAllowAnyLogin = yes\n[Users]\nalice = {}\n",
             hash_password("alice", "pw")
         )
         .as_bytes(),

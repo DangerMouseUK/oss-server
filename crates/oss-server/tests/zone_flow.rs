@@ -33,7 +33,7 @@ impl H {
 
     fn with_conf(arena_conf: &str, global: &str) -> Self {
         let passwd = format!(
-            "[General]\nAllowUnknown = yes\n[Users]\nbob = {}\nlocked = lock\n",
+            "[General]\nAllowUnknown = yes\nAllowAnyLogin = yes\n[Users]\nbob = {}\nlocked = lock\n",
             hash_password("Bob", "secret")
         );
         let src = MemSource::new([
@@ -1200,7 +1200,7 @@ fn arenaperm_keeps_players_out_of_restricted_arenas() {
     // "duel" needs a capability only bob's group has; the public arena is
     // open to everyone
     let passwd = format!(
-        "[General]\nAllowUnknown = yes\n[Users]\nbob = {}\n",
+        "[General]\nAllowUnknown = yes\nAllowAnyLogin = yes\n[Users]\nbob = {}\n",
         hash_password("Bob", "secret")
     );
     let src = MemSource::new([

@@ -184,11 +184,15 @@ struct H {
 impl H {
     /// A zone with **no key table**, `SecurityKickoff` as given, and `caps`
     /// (one bare capability name per line) granted to the `default` group --
-    /// which, with `AllowUnknown = yes`, is the group every player here is in.
+    /// which, with `AllowAnyLogin = yes`, is the group every player here is
+    /// in (nobody is authenticated, so nobody gets a staff group).
     fn new(kickoff: bool, caps: &str) -> Self {
         let kick = u8::from(kickoff);
         let mut src = MemSource::new([
-            ("conf/passwd.conf", "[General]\nAllowUnknown = yes\n"),
+            (
+                "conf/passwd.conf",
+                "[General]\nAllowUnknown = yes\nAllowAnyLogin = yes\n",
+            ),
             ("conf/staff.conf", ""),
             (
                 "arenas/(default)/arena.conf",

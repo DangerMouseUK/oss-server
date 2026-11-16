@@ -266,6 +266,7 @@ pub struct ServerBuilder {
     modules: Option<Vec<String>>,
     transport: Option<TransportFactory>,
     bind: Option<SocketAddr>,
+    login: crate::modules::auth_file::OpenLoginPolicy,
 }
 
 impl ServerBuilder {
@@ -279,6 +280,7 @@ impl ServerBuilder {
             modules: None,
             transport: None,
             bind: None,
+            login: Default::default(),
         }
     }
 
@@ -297,6 +299,7 @@ impl ServerBuilder {
             modules: None,
             transport: None,
             bind: None,
+            login: Default::default(),
         }
     }
 
@@ -334,6 +337,33 @@ impl ServerBuilder {
         self
     }
 
+    /// Lets any name log in with any password, the way ASSS's shipped
+    /// `AllowUnknown = yes` does, instead of requiring a zone password.
+    ///
+    /// This is the zone's developer mode and it is never a default. A zone
+    /// in this state logs a warning at every start, and a name on it is a
+    /// name anyone may claim. The same thing can be asked for permanently
+    /// with `[General] AllowAnyLogin` in `conf/passwd.conf`.
+    ///
+    /// It has no effect when a biller is loaded: that module, not
+    /// `auth_file`, decides who may log in. See
+    /// [`crate::modules::auth_file`].
+    pub fn allow_any_login(mut self, yes: bool) -> Self {
+        self.login.allow_any_login = yes;
+        self
+    }
+
+    /// Uses `password` as the zone's shared login password rather than
+    /// generating one on first start, so a zone that keeps nothing across
+    /// restarts can still keep the password its players already have.
+    ///
+    /// See [`crate::modules::auth_file`] for what a zone password is and
+    /// why it does not make the players who use it authenticated.
+    pub fn zone_password(mut self, password: impl Into<String>) -> Self {
+        self.login.zone_password = Some(password.into());
+        self
+    }
+
     /// Builds the zone and loads its modules, without any network.
     pub fn build_zone(&mut self) -> Result<Zone, ServerError> {
         let (cfg, dir, names) = match (self.source.take(), &self.dir) {
@@ -354,6 +384,9 @@ impl ServerBuilder {
         };
         let mut zone = Zone::new(cfg, std::mem::take(&mut self.catalog));
         zone.dir = dir;
+        // Before the modules load, because `auth_file` reads it in its
+        // post-load hook.
+        zone.res.insert(std::mem::take(&mut self.login));
         let names = self.modules.take().or(names).unwrap_or_else(|| {
             crate::modules::DEFAULT_MODULES
                 .iter()

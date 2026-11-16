@@ -69,7 +69,10 @@ impl H {
             [Team]\nDesiredTeams = 2\n";
         let mut src = MemSource::new([
             ("conf/global.conf", ""),
-            ("conf/passwd.conf", "[General]\nAllowUnknown = yes\n"),
+            (
+                "conf/passwd.conf",
+                "[General]\nAllowUnknown = yes\nAllowAnyLogin = yes\n",
+            ),
             ("conf/groupdef.conf", "[default]\n"),
             ("conf/staff.conf", ""),
             ("arenas/(default)/arena.conf", conf),

@@ -61,6 +61,7 @@ fn minimal_zone() -> Zone {
             "conf/passwd.conf",
             "[General]
 AllowUnknown = yes
+AllowAnyLogin = yes
 "
             .to_owned(),
         ),
@@ -134,7 +135,7 @@ impl H {
             ("conf/global.conf", String::new()),
             (
                 "conf/passwd.conf",
-                "[General]\nAllowUnknown = yes\n".to_owned(),
+                "[General]\nAllowUnknown = yes\nAllowAnyLogin = yes\n".to_owned(),
             ),
             ("conf/groupdef.conf", "[default]\n".to_owned()),
             ("conf/staff.conf", String::new()),

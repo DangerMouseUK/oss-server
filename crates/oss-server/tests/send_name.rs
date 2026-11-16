@@ -69,7 +69,10 @@ impl H {
     fn new() -> Self {
         let src = MemSource::new([
             ("conf/global.conf", ""),
-            ("conf/passwd.conf", "[General]\nAllowUnknown = yes\n"),
+            (
+                "conf/passwd.conf",
+                "[General]\nAllowUnknown = yes\nAllowAnyLogin = yes\n",
+            ),
             ("conf/groupdef.conf", "[default]\ncmd_go = 1\n"),
             ("conf/staff.conf", ""),
             ("arenas/(default)/arena.conf", "[Team]\nDesiredTeams = 2\n"),

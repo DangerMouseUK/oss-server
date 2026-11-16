@@ -88,7 +88,10 @@ impl H {
     fn new() -> Self {
         let mut src = MemSource::new([
             ("conf/global.conf", "[Security]\nSecurityKickoff = 1\n"),
-            ("conf/passwd.conf", "[General]\nAllowUnknown = yes\n"),
+            (
+                "conf/passwd.conf",
+                "[General]\nAllowUnknown = yes\nAllowAnyLogin = yes\n",
+            ),
             // no capabilities at all: an ordinary player, not staff
             ("conf/groupdef.conf", "[default]\n"),
             ("conf/staff.conf", ""),

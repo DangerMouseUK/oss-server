@@ -178,7 +178,7 @@ fn opensec_end_to_end() {
     std::fs::write(dir.join("conf/global.conf"), "").expect("write");
     std::fs::write(
         dir.join("conf/passwd.conf"),
-        "[General]\nAllowUnknown = yes\n",
+        "[General]\nAllowUnknown = yes\nAllowAnyLogin = yes\n",
     )
     .expect("write");
     std::fs::write(dir.join("arenas/(default)/arena.conf"), "").expect("write");
@@ -235,6 +235,7 @@ fn identity_keys_and_key_bans() {
             "conf/passwd.conf",
             "[General]
 AllowUnknown = yes
+AllowAnyLogin = yes
 ",
         ),
         ("arenas/(default)/arena.conf", ""),

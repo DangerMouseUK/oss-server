@@ -86,7 +86,10 @@ fn admin_api() {
             "conf/global.conf",
             "[Admin]\nListen = 127.0.0.1:0\nToken = s3cret\n",
         ),
-        ("conf/passwd.conf", "[General]\nAllowUnknown = yes\n"),
+        (
+            "conf/passwd.conf",
+            "[General]\nAllowUnknown = yes\nAllowAnyLogin = yes\n",
+        ),
         ("arenas/(default)/arena.conf", ""),
     ]);
     let server = ServerBuilder::with_source(src)

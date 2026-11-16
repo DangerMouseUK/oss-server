@@ -14,6 +14,40 @@
 //! offset 24, zero-padded. Hashes written by ASSS work unchanged. Only a
 //! correct password marks the player as authenticated (which enables staff
 //! groups by name).
+//!
+//! # Names that are not listed, and the zone password
+//!
+//! ASSS and Subspace Server .NET both ship `AllowUnknown = yes`, and with it
+//! a name that has no `[Users]` entry is let in with **any** password. That
+//! is the historical behaviour of a public SubSpace zone and this module
+//! keeps it, but it is no longer what an unconfigured zone does, because an
+//! unconfigured zone is now something a stranger can reach in one command.
+//!
+//! Two keys, neither of which exists in ASSS, decide what happens to an
+//! unlisted name when `AllowUnknown` is on:
+//!
+//! - **`[General] ZonePassword`** -- one shared secret for the whole zone.
+//!   An unlisted name is accepted only if the password it logged in with
+//!   equals this. The player is **not** marked authenticated: the zone
+//!   password says which zone you are entitled to enter, not who you are, so
+//!   it must never confer a staff group (see [`super::capman`], which keys
+//!   staff groups on `authenticated`).
+//! - **`[General] AllowAnyLogin`** -- restores the old behaviour explicitly:
+//!   any name, any password, no zone password. Also reachable as
+//!   `--insecure-allow-any-login`. A zone in this state logs a warning at
+//!   every start.
+//!
+//! If neither key is set, [`AuthFileModule::post_load`] generates a zone
+//! password, prints it once and installs it -- writing it into
+//! `conf/passwd.conf` when the zone has a directory, and holding it for the
+//! run when it does not.
+//!
+//! None of this runs when another module has taken over as the zone's
+//! [`Auth`] provider, which is what [`super::billing_ssc`] does: a biller
+//! **replaces** this module rather than layering over it, so `AllowUnknown`
+//! and `ZonePassword` are not consulted at all while one is loaded.
+
+use std::sync::Arc;
 
 use md5::{Digest, Md5};
 
@@ -47,8 +81,176 @@ struct PwData {
     hash: Option<String>,
 }
 
-fn passwd(zone: &mut Zone) -> Option<std::sync::Arc<crate::config::ConfigFile>> {
+fn passwd(zone: &mut Zone) -> Option<Arc<crate::config::ConfigFile>> {
     zone.cfg.open(None, "passwd.conf").ok()
+}
+
+/// What the command line said about logins that no config file covers.
+///
+/// The runtime puts one of these in the zone's resources before the modules
+/// load ([`crate::runtime::ServerBuilder::allow_any_login`] and
+/// [`crate::runtime::ServerBuilder::zone_password`]). Absent, the default
+/// means "the operator said nothing", which is the case
+/// the module's post-load check exists for.
+#[derive(Debug, Clone, Default)]
+pub struct OpenLoginPolicy {
+    /// `--insecure-allow-any-login`: accept any name with any password.
+    pub allow_any_login: bool,
+    /// `--zone-password <PASSWORD>`: use this rather than generating one.
+    pub zone_password: Option<String>,
+}
+
+/// The `Arc` this module registered as the zone's [`Auth`], kept so
+/// [`close_open_login`] can tell whether something else has replaced it.
+struct OurAuth(Arc<dyn Auth>);
+
+/// Characters a generated zone password is drawn from: 32 of them, so each
+/// one carries exactly five bits, and none of the pairs a person reading a
+/// log line aloud confuses (`0`/`O`, `1`/`l`/`I`).
+const PW_ALPHABET: &[u8; 32] = b"abcdefghijkmnpqrstuvwxyz23456789";
+
+/// How many characters a generated zone password has (16 x 5 bits = 80).
+const PW_LEN: usize = 16;
+
+/// Draws a zone password from operating-system entropy.
+///
+/// Deliberately **not** [`crate::prng::Prng`]: that is the game's
+/// ASSS-compatible generator, it is seeded and reproducible, and a zone
+/// password drawn from it would be guessable by anyone who could watch the
+/// zone play.
+fn generate_zone_password() -> String {
+    let entropy = oss_net::opensec::os_entropy();
+    let mut buf = [0u8; PW_LEN];
+    entropy(&mut buf);
+    buf.iter()
+        .map(|b| char::from(PW_ALPHABET[usize::from(b & 0x1f)]))
+        .collect()
+}
+
+/// Whether `file` leaves an unlisted name able to log in with any password.
+///
+/// Note what is *not* here: entries in `[Users]`. A zone with
+/// `AllowUnknown = yes` and a hundred listed players still lets a
+/// hundred-and-first name in with any password, so a populated `[Users]`
+/// does not close this door and must not be read as though it does.
+fn accepts_any_login(file: &crate::config::ConfigFile) -> bool {
+    file.get_int("General", "AllowUnknown", 1) != 0 && zone_password(file).is_none()
+}
+
+/// The configured zone password, if there is a non-empty one.
+fn zone_password(file: &crate::config::ConfigFile) -> Option<&str> {
+    file.get("General", "ZonePassword")
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+}
+
+/// Installs `password` as the zone password, in memory and -- when the zone
+/// has a directory -- appended to `conf/passwd.conf` the way `?passwd`
+/// already writes. With no directory (the bundled zone) the append is a
+/// no-op and the value lasts for this run only.
+fn install_zone_password(zone: &mut Zone, file: &Arc<crate::config::ConfigFile>, password: &str) {
+    zone.cfg.set(
+        file,
+        "General",
+        "ZonePassword",
+        password,
+        Some("zone password: any name may log in with this"),
+        true,
+    );
+}
+
+/// Closes the login that nobody chose, at the end of module loading.
+///
+/// The case this exists for is a zone nobody has configured: `AllowUnknown`
+/// on (its ASSS default, so it needs no file to be true), no zone password,
+/// no biller. Until 2026-11-16 that zone -- which is exactly what
+/// `oss-server` with no arguments and `docker run` with no arguments produce
+/// -- accepted any name with any password from anyone who could reach the
+/// port. It no longer does.
+///
+/// What this does **not** do, on purpose:
+///
+/// - It does not change `AllowUnknown`'s default, which is `1` in ASSS
+///   (`auth_file.c`, `cfghelp: General:AllowUnknown ... def: 1`) and in
+///   Subspace Server .NET (`AuthFile.cs`, `Default = true`). Flipping it
+///   would lock every unlisted player out of every zone directory written
+///   for either server, which is an interoperability break and not the one
+///   that was asked for.
+/// - It does not touch a zone whose operator has decided something:
+///   `AllowUnknown = no`, a `ZonePassword`, `AllowAnyLogin`, a biller.
+/// - It does not refuse to start, and it does not bind to loopback. Both are
+///   known answers to this shape of problem and both would stop `docker run`
+///   from producing a zone anyone can join, which is what the bundled zone
+///   is for.
+fn close_open_login(zone: &mut Zone) {
+    let policy = zone
+        .res
+        .get::<OpenLoginPolicy>()
+        .cloned()
+        .unwrap_or_default();
+
+    // A biller replaces this module as the zone's authenticator rather than
+    // layering over it (`billing_ssc` registers its own `Auth`, and the
+    // registry keeps the last provider), so none of the keys below are read
+    // while one is loaded. Say so rather than silently doing nothing.
+    let ours = zone.res.get::<OurAuth>().map(|o| o.0.clone());
+    let current = zone.iface::<dyn Auth>();
+    let still_ours = match (&ours, &current) {
+        (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+        _ => false,
+    };
+    if !still_ours {
+        if policy.allow_any_login || policy.zone_password.is_some() {
+            tracing::warn!(
+                target: "auth_file",
+                "another module is the zone's authenticator, so --insecure-allow-any-login and --zone-password do nothing here: that module decides who may log in"
+            );
+        }
+        return;
+    }
+
+    let Some(file) = passwd(zone) else { return };
+
+    // An explicit password from the command line wins over everything, so a
+    // container can be restarted with the password its players already have.
+    if let Some(pw) = policy.zone_password.clone() {
+        let already = zone_password(&file) == Some(pw.as_str());
+        install_zone_password(zone, &file, &pw);
+        if !already {
+            tracing::info!(
+                target: "auth_file",
+                "zone password set from the command line; unlisted names need it to log in"
+            );
+        }
+        return;
+    }
+
+    if policy.allow_any_login || file.get_int("General", "AllowAnyLogin", 0) != 0 {
+        tracing::warn!(
+            target: "auth_file",
+            "ANY NAME WITH ANY PASSWORD can log in to this zone: AllowAnyLogin is set. Nobody is authenticated, so nobody gets a staff group, but every name on this zone is a name anyone may claim. Remove it before this zone is reachable from anywhere you do not control."
+        );
+        return;
+    }
+
+    if !accepts_any_login(&file) {
+        return;
+    }
+
+    let pw = generate_zone_password();
+    install_zone_password(zone, &file, &pw);
+    let persisted = zone.dir.is_some();
+    // Printing a credential is deliberate here and is the only way the
+    // operator can learn it: the same shape as the OpenSec public key this
+    // server already logs at start, and as Elasticsearch's and Jenkins's
+    // first-run passwords. It is printed when it is generated, which is once
+    // whenever there is a file to keep it in.
+    tracing::warn!(
+        target: "auth_file",
+        password = %pw,
+        persisted,
+        "no logins were configured for this zone, so one zone password was generated. Players log in with any name and THIS password. It is kept in conf/passwd.conf as [General] ZonePassword when the zone has a directory, and is new on every start when it does not. Pass --zone-password to choose your own, or set AllowAnyLogin to let any name in with any password."
+    );
 }
 
 /// The auth_file authenticator.
@@ -86,6 +288,15 @@ impl Auth for AuthFile {
                     .map_or(1, |f| f.get_int("General", "AllowUnknown", 1));
                 if allow == 0 {
                     ad.code = auth_code::NO_PERMISSION2;
+                } else if let Some(zp) = file.as_deref().and_then(zone_password) {
+                    // The zone password admits any name, so it says which
+                    // zone you may enter and nothing about who you are.
+                    // `ad.authenticated` therefore stays false, exactly as
+                    // it does for `AllowUnknown`, and capman gives these
+                    // players the default group rather than a staff one.
+                    if pass != zp {
+                        ad.code = auth_code::BAD_PASSWORD;
+                    }
                 }
             }
         }
@@ -216,8 +427,10 @@ impl Module for AuthFileModule {
                 reason: "conf/passwd.conf not found".into(),
             });
         }
+        let iface: Arc<dyn Auth> = Arc::new(AuthFile);
         zone.reg
-            .provide::<dyn Auth>(me, Scope::Global, std::sync::Arc::new(AuthFile));
+            .provide::<dyn Auth>(me, Scope::Global, iface.clone());
+        zone.res.insert(OurAuth(iface));
         zone.on::<NewPlayer>(me, Scope::Global, |z, ev| {
             if let Some(p) = z.players.get_mut(ev.player) {
                 p.ext.remove::<PwData>();
@@ -240,6 +453,16 @@ impl Module for AuthFileModule {
             c_set_local_password,
         );
         Ok(())
+    }
+
+    /// Runs once every module has loaded, which is the first moment it is
+    /// knowable whether a biller has taken over as the zone's [`Auth`].
+    fn post_load(&self, zone: &mut Zone, _me: Owner) {
+        close_open_login(zone);
+    }
+
+    fn unload(&self, zone: &mut Zone, _me: Owner) {
+        zone.res.remove::<OurAuth>();
     }
 }
 

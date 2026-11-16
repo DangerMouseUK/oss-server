@@ -62,7 +62,7 @@ impl H {
             ("conf/global.conf", "[General]\n".to_owned()),
             (
                 "conf/passwd.conf",
-                "[General]\nAllowUnknown = yes\n".to_owned(),
+                "[General]\nAllowUnknown = yes\nAllowAnyLogin = yes\n".to_owned(),
             ),
             ("conf/groupdef.conf", format!("[default]\n{caps}")),
             ("conf/staff.conf", String::new()),
@@ -520,7 +520,7 @@ fn an_arena_with_no_lvz_files_still_works() {
         ("conf/global.conf", "[General]\n".to_owned()),
         (
             "conf/passwd.conf",
-            "[General]\nAllowUnknown = yes\n".to_owned(),
+            "[General]\nAllowUnknown = yes\nAllowAnyLogin = yes\n".to_owned(),
         ),
         (
             "conf/groupdef.conf",

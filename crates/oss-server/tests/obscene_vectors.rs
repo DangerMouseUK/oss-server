@@ -20,7 +20,7 @@ fn zone_with(setting: &str) -> Zone {
         ("conf/global.conf", format!("[Chat]\nObscene = {setting}\n")),
         (
             "conf/passwd.conf",
-            "[General]\nAllowUnknown = yes\n".to_owned(),
+            "[General]\nAllowUnknown = yes\nAllowAnyLogin = yes\n".to_owned(),
         ),
         ("conf/groupdef.conf", "[default]\n".to_owned()),
         ("conf/staff.conf", String::new()),

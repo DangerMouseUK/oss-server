@@ -146,7 +146,10 @@ impl H {
 fn setting_commands_change_config_live() {
     let dir = temp_zone(&[
         ("conf/global.conf", "[Misc]\nGreeting = one\n"),
-        ("conf/passwd.conf", "[General]\nAllowUnknown = yes\n"),
+        (
+            "conf/passwd.conf",
+            "[General]\nAllowUnknown = yes\nAllowAnyLogin = yes\n",
+        ),
         (
             "conf/groupdef.conf",
             "[default]\ncmd_setg = 1\ncmd_seta = 1\ncmd_getg = 1\ncmd_geta = 1\n",
@@ -228,7 +231,10 @@ fn setting_commands_change_config_live() {
 fn config_and_modules_reload_live() {
     let dir = temp_zone(&[
         ("conf/global.conf", "[Misc]\nGreeting = one\n"),
-        ("conf/passwd.conf", "[General]\nAllowUnknown = yes\n"),
+        (
+            "conf/passwd.conf",
+            "[General]\nAllowUnknown = yes\nAllowAnyLogin = yes\n",
+        ),
         (
             "conf/groupdef.conf",
             "[default]\ncmd_reloadconf = 1\ncmd_insmod = 1\ncmd_rmmod = 1\ncmd_attmod = 1\ncmd_lsmod = 1\n",

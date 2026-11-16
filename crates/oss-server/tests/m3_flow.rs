@@ -36,7 +36,10 @@ impl H {
     fn with_arena(arena: &str) -> Self {
         let src = MemSource::new([
             ("conf/global.conf", "[Security]\nSecurityKickoff = 1\n"),
-            ("conf/passwd.conf", "[General]\nAllowUnknown = yes\n"),
+            (
+                "conf/passwd.conf",
+                "[General]\nAllowUnknown = yes\nAllowAnyLogin = yes\n",
+            ),
             (
                 "conf/groupdef.conf",
                 "[default]\ncmd_go = 1\ncmd_endinterval = 1\ncmd_recyclearena = 1\n",

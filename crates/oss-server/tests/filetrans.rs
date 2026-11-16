@@ -146,7 +146,10 @@ impl H {
 
 const CONF: &[(&str, &str)] = &[
     ("conf/global.conf", "[Chat]\nMessageReliable = 1\n"),
-    ("conf/passwd.conf", "[General]\nAllowUnknown = yes\n"),
+    (
+        "conf/passwd.conf",
+        "[General]\nAllowUnknown = yes\nAllowAnyLogin = yes\n",
+    ),
     (
         "conf/groupdef.conf",
         "[default]\ncmd_cd = 1\ncmd_pwd = 1\ncmd_getfile = 1\ncmd_putfile = 1\ncmd_delfile = 1\n\

@@ -143,7 +143,13 @@ fn position(x: i16, y: i16, time: u32) -> Vec<u8> {
 
 #[test]
 fn the_position_relay_allocates_nothing_when_warm() {
-    let mut zone = ServerBuilder::default_zone().build_zone().expect("zone");
+    // Logs real players in to the BUNDLED zone, which since D29 needs a zone
+    // password it generates at start. The subject here is allocation, not
+    // authentication, so it asks for the open login explicitly.
+    let mut zone = ServerBuilder::default_zone()
+        .allow_any_login(true)
+        .build_zone()
+        .expect("zone");
     let mut t = 0u64;
     // drains the outbox the way a transport would, and says how much it took
     let tick = |z: &mut Zone, t: &mut u64, n: u64| -> usize {

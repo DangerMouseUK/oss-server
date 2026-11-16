@@ -1,0 +1,355 @@
+name: Release
+
+# What this is for.
+#
+# Pushing a version tag builds the zone server and its biller for Linux,
+# Windows and macOS, and attaches them to a GitHub release that is left as a
+# DRAFT. Nothing in this file publishes a release; see "This workflow cannot
+# publish" below.
+#
+# What is in each archive.
+#
+#   * `oss-server` -- the zone. With no arguments it runs its bundled default
+#     zone, which is compiled into the binary, so the download needs no data
+#     files put anywhere to be a working zone.
+#   * `oss-biller` -- the local user database that speaks the SSC billing
+#     protocol. It ships alongside because a zone that wants accounts needs
+#     one, and fetching it separately would be a second download for one
+#     deployment.
+#   * `LICENSE` -- the GPL-2.0-or-later text. A binary handed to someone with
+#     no licence beside it tells them nothing about what they may do with it,
+#     and this licence in particular is one the recipient has rights under.
+#   * `README.md` -- how to run the thing.
+#
+# This workflow cannot publish.
+#
+#   1. The release is created with `gh release create --draft`. The flag is in
+#      the command, in this file, not an input to a third-party action.
+#   2. If a release for the tag already exists and is NOT a draft, the job
+#      fails instead of touching it. A release the lead has published is never
+#      modified by a re-run.
+#   3. No step runs `gh release edit`, and none passes `--latest`.
+#
+# The sibling oss-core checkout, and why a release has to pin it.
+#
+# This repository consumes oss-core as a path dependency from a sibling
+# checkout, so CI checks both repositories out side by side. ci.yml takes
+# oss-core's default branch, which is right for CI: it is asking whether this
+# repository works against oss-core as it stands today.
+#
+# A release is asking a different question -- what is in this file I am handing
+# out -- and "whatever oss-core's main happened to be that afternoon" is not an
+# answer. So the `check` job below resolves a ref once and every build uses it:
+# the SAME tag in oss-core if that tag exists there, otherwise oss-core's
+# default branch, and a `core_ref` input overrides both. The commit it resolved
+# to is recorded in the draft release notes either way, so the release says
+# what it was built from even when it fell back.
+#
+# Toolchain, and what is deliberately different from ci.yml.
+#
+#   * RUST_PINNED matches ci.yml exactly, and is bumped by the same procedure,
+#     which is written out beside the value in ci.yml.
+#   * There is NO Swatinem/rust-cache here, which ci.yml uses on every job. A
+#     release build happens a few times a year and its output is handed to
+#     strangers; the build time saved is not worth another input to what is in
+#     the binary. Release builds start from nothing, on purpose.
+#   * `--locked` is on every cargo invocation, so the committed Cargo.lock is
+#     what gets built. This also catches a mismatch with the resolved oss-core:
+#     if that checkout no longer satisfies the lockfile, the release fails
+#     rather than shipping a binary nobody meant to build.
+#
+# Platform coverage, stated with its gaps.
+#
+#   * Linux x86-64, Windows x86-64 and macOS arm64, built on the host runner --
+#     the same three images ci.yml tests on. Nothing is cross-compiled.
+#   * macOS artefacts are arm64 (Apple Silicon) ONLY. `macos-latest` is an
+#     arm64 image, so an Intel Mac is not covered by any file this workflow
+#     produces. The filenames say `aarch64-apple-darwin` so that gap is legible
+#     from the release page rather than discovered on download.
+#   * The Linux binary is built on `ubuntu-latest`, as ci.yml does, so it
+#     carries whatever glibc floor that image has on the day it runs, and
+#     GitHub rolls that label forward. Pinning the image to an older Ubuntu
+#     would give the binary a fixed, lower floor and widen the distributions it
+#     runs on; that is a deliberate open question, not an oversight.
+
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+*"
+  # So a release whose build failed halfway can be re-run by hand without
+  # deleting and re-pushing the tag.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "An existing tag to build, e.g. v0.1.0"
+        required: true
+      core_ref:
+        description: "oss-core ref to build against (blank: the same tag if it exists there, else oss-core's default branch)"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  # Must equal RUST_PINNED in ci.yml. The bump procedure is written out there,
+  # beside the value, and covers all three repositories in order.
+  RUST_PINNED: "1.100.0"
+
+jobs:
+  # Is this tag fit to release, and what oss-core does it build against?
+  # Everything else waits on these answers.
+  check:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: oss-server
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
+      version: ${{ steps.version.outputs.version }}
+      sha: ${{ steps.version.outputs.sha }}
+      core_ref: ${{ steps.core.outputs.ref }}
+      core_sha: ${{ steps.core_sha.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: DangerMouseUK/oss-server
+          ref: ${{ inputs.tag || github.ref_name }}
+          path: oss-server
+
+      # A filename that carries a version is a claim about what is inside it.
+      # If the tag and the workspace version disagree, every artefact this
+      # workflow produces would be mislabelled, so stop here instead.
+      - name: Tag matches the workspace version
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${{ inputs.tag || github.ref_name }}"
+          manifest="$(sed -n '/^\[workspace\.package\]/,/^\[/ s/^version *= *"\([^"]*\)".*/\1/p' Cargo.toml | head -n1)"
+          if [ -z "$manifest" ]; then
+            echo "::error title=Release::Could not read version from [workspace.package] in Cargo.toml."
+            exit 1
+          fi
+          if [ "${tag#v}" != "$manifest" ]; then
+            echo "::error title=Release::Tag ${tag} does not match the workspace version ${manifest} in Cargo.toml. Fix one of them; do not ship a file whose name says a version the build is not."
+            exit 1
+          fi
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+          echo "version=${manifest}" >> "$GITHUB_OUTPUT"
+          # The commit the TAG points at. Not $GITHUB_SHA: on a manual re-run
+          # that is the branch the run was started from, not the tag.
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Resolve which oss-core to build against
+        id: core
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${{ inputs.tag || github.ref_name }}"
+          ref="${{ inputs.core_ref }}"
+          if [ -z "$ref" ]; then
+            if git ls-remote --exit-code --tags https://github.com/DangerMouseUK/oss-core "refs/tags/${tag}" >/dev/null 2>&1; then
+              ref="$tag"
+              echo "oss-core has ${tag}; building against it."
+            else
+              ref="$(git ls-remote --symref https://github.com/DangerMouseUK/oss-core HEAD | sed -n 's#^ref: refs/heads/\([^[:space:]]*\).*#\1#p')"
+              echo "::warning title=Release::oss-core has no ${tag}; falling back to its default branch (${ref}). The release notes record the exact commit."
+            fi
+          fi
+          echo "ref=${ref}" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v4
+        with:
+          repository: DangerMouseUK/oss-core
+          ref: ${{ steps.core.outputs.ref }}
+          path: oss-core
+
+      - name: Record the oss-core commit
+        id: core_sha
+        shell: bash
+        run: |
+          set -euo pipefail
+          sha="$(git -C "$GITHUB_WORKSPACE/oss-core" rev-parse HEAD)"
+          echo "sha=${sha}" >> "$GITHUB_OUTPUT"
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_PINNED }}
+
+      # ci.yml gates main; this gates the commit the tag actually points at,
+      # which is not necessarily one CI has seen, against the oss-core this
+      # release will be built from. One platform only -- this is a guard
+      # against tagging a broken commit, not a second CI run.
+      - run: cargo test --workspace --locked
+
+  build:
+    needs: check
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            archive: tar.gz
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            archive: zip
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            archive: tar.gz
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: oss-server
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: DangerMouseUK/oss-server
+          ref: ${{ needs.check.outputs.tag }}
+          path: oss-server
+      - uses: actions/checkout@v4
+        with:
+          repository: DangerMouseUK/oss-core
+          ref: ${{ needs.check.outputs.core_ref }}
+          path: oss-core
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_PINNED }}
+
+      # The target triple is written into every filename below, so assert the
+      # runner really is that target rather than trusting the label. The day
+      # GitHub changes what an image is, this fails loudly instead of shipping
+      # a file whose name is wrong.
+      - name: Runner is the target this job claims
+        shell: bash
+        run: |
+          set -euo pipefail
+          host="$(rustc -vV | sed -n 's/^host: //p')"
+          if [ "$host" != "${{ matrix.target }}" ]; then
+            echo "::error title=Release::Runner ${{ matrix.os }} has host triple ${host}, but this job names its artefacts ${{ matrix.target }}."
+            exit 1
+          fi
+
+      - run: cargo build --release --locked -p oss-server -p oss-biller
+
+      - name: Stage the archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          name="oss-server-${{ needs.check.outputs.version }}-${{ matrix.target }}"
+          ext=""
+          if [ "$RUNNER_OS" = "Windows" ]; then ext=".exe"; fi
+          mkdir -p "dist/${name}"
+          cp "target/release/oss-server${ext}" "dist/${name}/"
+          cp "target/release/oss-biller${ext}" "dist/${name}/"
+          cp LICENSE "dist/${name}/"
+          cp README.md "dist/${name}/"
+          echo "STAGE_NAME=${name}" >> "$GITHUB_ENV"
+
+      - name: Archive (tar.gz)
+        if: matrix.archive == 'tar.gz'
+        shell: bash
+        run: tar -czf "${STAGE_NAME}.tar.gz" -C dist "${STAGE_NAME}"
+
+      - name: Archive (zip)
+        if: matrix.archive == 'zip'
+        shell: pwsh
+        run: Compress-Archive -Path "dist/$env:STAGE_NAME" -DestinationPath "$env:STAGE_NAME.zip"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: oss-server-${{ matrix.target }}
+          # Relative to the workspace, not to defaults.working-directory.
+          path: oss-server/oss-server-*.${{ matrix.archive }}
+          if-no-files-found: error
+
+  release:
+    needs: [check, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: downloads
+          merge-multiple: true
+
+      # One SHA256SUMS.txt over every attached file, in the format
+      # `sha256sum -c` reads, so a downloader can check what they got with a
+      # command they already have.
+      - name: Collect and checksum
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p upload
+          find downloads -type f \( -name '*.tar.gz' -o -name '*.zip' \) -exec cp {} upload/ \;
+          cd upload
+          sha256sum -- * > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          # No checkout in this job, so gh has no git remote to infer the
+          # repository from. Tell it.
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ needs.check.outputs.tag }}
+          VERSION: ${{ needs.check.outputs.version }}
+          SELF_SHA: ${{ needs.check.outputs.sha }}
+          CORE_REF: ${{ needs.check.outputs.core_ref }}
+          CORE_SHA: ${{ needs.check.outputs.core_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # Refuse to touch a release the lead has already published.
+          if gh release view "$TAG" --json isDraft >/dev/null 2>&1; then
+            if [ "$(gh release view "$TAG" --json isDraft --jq .isDraft)" != "true" ]; then
+              echo "::error title=Release::A published release already exists for ${TAG}. This workflow will not modify a published release. Delete it by hand if that is really what you want."
+              exit 1
+            fi
+            echo "Re-using the existing draft for ${TAG}."
+          else
+            {
+              echo "Open SubSpace zone server ${VERSION}."
+              echo
+              echo "**What is in the archive.** \`oss-server\` is the zone: run it with no arguments and it serves its bundled default zone on UDP port 5000, with no files to put anywhere. \`oss-biller\` is the local user database, for a zone that wants accounts. \`README.md\` explains both."
+              echo
+              echo "**Platforms.** Linux x86-64, Windows x86-64, macOS arm64. There is no Intel macOS build."
+              echo
+              echo "**Checking what you downloaded.** \`SHA256SUMS.txt\` covers every archive here. On Linux or macOS: \`sha256sum -c SHA256SUMS.txt\`."
+              echo
+              echo "**Licence.** GPL-2.0-or-later. The full text is in every archive, and in LICENSE in the repository."
+              echo
+              echo "Built from \`${SELF_SHA}\`, against oss-core \`${CORE_REF}\` (\`${CORE_SHA}\`)."
+            } > notes.md
+            gh release create "$TAG" --draft --title "oss-server ${VERSION}" --notes-file notes.md
+          fi
+
+          gh release upload "$TAG" upload/* --clobber
+
+      - name: Summary
+        env:
+          TAG: ${{ needs.check.outputs.tag }}
+          CORE_REF: ${{ needs.check.outputs.core_ref }}
+          CORE_SHA: ${{ needs.check.outputs.core_sha }}
+        shell: bash
+        run: |
+          {
+            echo "## Draft release ${TAG}"
+            echo
+            echo "The release is a **draft**. Nothing is public until someone publishes it by hand."
+            echo
+            echo "Built against oss-core \`${CORE_REF}\` (\`${CORE_SHA}\`)."
+            echo
+            echo '```'
+            cat upload/SHA256SUMS.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

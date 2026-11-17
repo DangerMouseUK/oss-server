@@ -8,7 +8,7 @@
 //! it is still available here, but it is no longer what a zone that was
 //! never configured does, because `oss-server` with no arguments (and
 //! `docker run` with no arguments) is now a one-command zone a stranger can
-//! reach. See decision `D29`.
+//! reach. The decision and the reasoning behind it are recorded as `D29`.
 //!
 //! Every test here drives a real login packet through the real module set,
 //! so what is asserted is the login response code a client would receive.

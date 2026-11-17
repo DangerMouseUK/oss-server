@@ -5,10 +5,8 @@ Rust zone server for SubSpace/Continuum. Licence **GPL-2.0-or-later**. Behaviour
 ## What must never reach this repository
 
 **This section is identical in all four public repositories. Change it in all four or
-in none.** It exists because material that must not be public has reached a public
-repository three times, in three different places, and each time the rule written
-afterwards was aimed at the previous instance. So read the test first and the list
-second — the list is worked examples of the test, not its boundary.
+in none.** It is written as a test rather than a list on purpose: a rule written as a
+list of past mistakes guards only the places where mistakes have already happened.
 
 ### The test
 
@@ -17,40 +15,32 @@ obtain the material that is being kept back?** If it does, it does not go in —
 small it is, however incidental to what you were doing, and whatever else in the commit
 is perfectly fine.
 
-That test is the rule. The classes below are the ones already known to have gone wrong;
-**a thing can fail the test without appearing in any of them**, and when it does, the
-answer is still no.
+That test is the rule. There is deliberately no list of examples under it: **an example
+of what is being kept back would describe what is being kept back**, which is the thing
+the test exists to prevent.
 
-### The classes
+### What fails it
 
-- **The method itself, and any prose detailed enough to implement a step from.**
-  Paraphrase counts. What is protected is a method, and a method survives paraphrase —
-  "roughly how it works" *is* the disclosure. So is a diagram, a worked example, or a
-  sequence of operations given in order.
-- **How the material is put together** — its internal construction, how many parts it
-  has, how they relate, what feeds what. This is disclosure on its own and needs no
-  values attached to it.
-- **Addresses, offsets or locations inside somebody else's binary**, named as such, with
-  or without a behavioural claim attached. An address is a foothold whatever routine it
-  names, and the audience best placed to use one is the audience this project is handed
-  to.
-- **The names of private tooling, private crates and the project's private
-  repositories**, and any dependency stated between them. **A name can state a
-  structure, and several of ours do** — so a bare name, with nothing else said about it,
-  can be the whole leak.
-- **Anything that characterises who the material is being kept back for**, or the
-  circumstances under which that was settled. That the material exists and is not public
-  may be said; for whom may not.
-- **How this project is said to have come by anything.** Both directions are out:
-  asserting it and denying it are equally disclosive, because the denial names the thing
-  it denies.
+**Anything specific about the withheld material fails the test** — its nature, how it
+works, how it is made or organised, where it came from, where it is kept, why it is kept
+back, or anything about any of those. Paraphrase counts, and so does a partial answer: a
+detail is not made safe by being small, vague or incomplete, because a search is
+narrowed a little at a time. A denial counts too, since a denial names the thing it
+denies.
+
+**The names of anything private fail it as well** — repositories, tools, files, paths,
+notes, and any relationship stated between them. A private name is a pointer, so a bare
+name with nothing else said about it can be the whole leak.
+
+**So does a signpost.** A sentence that tells a reader where withheld detail is kept, or
+to look somewhere for it, fails the test even when it names nothing. Drop the sentence;
+do not reword it into a vaguer signpost.
 
 ### Where this applies
 
 **Not only to file content.** All of it applies equally to:
 
-- **commit messages**, subject and body — *the absence of this line is literally how the
-  second incident happened*;
+- **commit messages**, subject and body;
 - **branch names and tag names**;
 - code comments, test fixtures and their headers, documentation prose, changelog
   entries;
@@ -63,32 +53,30 @@ decision, so the cheap moment is before the commit, every time.
 
 ### It applies to passing remarks
 
-**The subject of a commit does not limit the rule.** The worst instance so far arrived
-as an aside about machine load, inside a commit about an unrelated networking fix. The
-file content was completely clean. Nobody was being careless — nobody was looking there.
+**The subject of a commit does not limit the rule.** A commit about something unrelated
+is checked exactly as carefully as one about the private material, because that is
+where nobody is looking. An aside, a parenthesis, a "while I was at it", a name
+mentioned only to explain something else — those are where this kind of thing slips
+through, not in the places anyone is guarding.
 
-So: an aside, a parenthesis, a "while I was at it", a tool named only to explain why a
-measurement was noisy. Those are where this has actually gone wrong, not in the places
-anyone was guarding.
+### When you find something the guard missed
 
-### When you find a class that is not listed here
-
-**Add it here, and to the guard, in the same change.** Do not handle it quietly and move
-on. The recurring failure in this project has not been carelessness; it has been that
-each fix was scoped to the thing that had just happened, so the next one surfaced
-somewhere nobody had thought to look. A class that is noticed and not written down is a
-class that gets rediscovered the hard way.
+**Report it to the lead, and add it to the guard, in the same change.** Do not handle it
+quietly and move on: a gap that is noticed and not closed is a gap that gets found again
+the hard way. **Do not add it to this section as an example** — this section is public,
+and an example here would publish the very thing the guard was just taught to stop.
 
 ### What is permitted, so this is not read as a gag
 
 - **Compatibility is permitted. The method is not.** A public client or server may be
-  fully compatible with the original. What may not happen is telling anyone how.
-- **The seam is deliberate and public-safe.** The cipher trait, the security hooks and
-  the documentation describing their shape are this repository's own contents and belong
-  here. They are not a leak of anything; they are what makes the rest work unchanged.
+  fully compatible with the original. What may not appear is anything about how.
+- **Saying that something is supplied by a private module is allowed**, and so is naming
+  the public interface it plugs into. The cipher trait, the security hooks and the
+  documentation describing their shape are this repository's own contents and belong
+  here. They are what makes the rest work unchanged.
 - **Saying the material exists and is being kept back is allowed**, including in public
-  documentation, as long as the saying carries no part of the method and describes no
-  part of its construction. The public repositories already say it, and should.
+  documentation, as long as the saying carries nothing that fails the test above. The
+  public repositories already say it, and should.
 - **The VIE-era stack and OpenSec are public in full**, constants, vectors and all.
   Nothing in this section narrows them, and nothing here is a reason to redact them.
 
@@ -98,19 +86,18 @@ A local guard refuses a commit whose staged content, message or ref names match 
 private pattern list. **The list is not in this repository and must never be**: a
 denylist of forbidden terms, committed to a public repository, is itself a disclosure —
 the most efficient index to the problem anyone could write. It is kept outside this
-repository, and the hooks that read it live in `.git/hooks`, which is neither
-committed nor cloned.
+repository, and the hooks that read it live in `.git/hooks`, which is neither committed
+nor cloned.
 
 Three things about it that matter more than its existence:
 
 - **It fails closed.** If it cannot find or read its list it refuses the commit and says
   so. A check that passes when it cannot find its list is worse than no check at all.
-- **It is a floor, not a ceiling.** It matches known shapes. It has nothing to say about
-  a class nobody has thought of yet, which is exactly how all three incidents happened.
-  **The test at the top of this section is the rule; the guard only catches the part of
-  it that a regular expression can see.**
+- **It is a floor, not a ceiling.** It matches known shapes and has nothing to say about
+  one nobody has thought of yet. **The test at the top of this section is the rule; the
+  guard only catches the part of it that a regular expression can see.**
 - **A clone does not have it.** Anyone working from a fresh clone, without the private
-  checkout, has no guard at all — only this section and review. That is the price of not
+  list, has no guard at all — only this section and review. That is the price of not
   publishing the list, and it is the right way round: the written rule travels, the index
   does not.
 
@@ -118,12 +105,11 @@ Bypassing the guard with `--no-verify` is a decision to report to the lead, not 
 
 ### When in doubt
 
-**It does not go in.** There is no deadline that trades against this. It is an agreement
-rather than a licensing question, so it cannot be reasoned around case by case, and it
-does not expire. Ask the lead instead of deciding.
+**It does not go in.** There is no deadline that trades against this. It cannot be
+reasoned around case by case, and it does not expire. Ask the lead instead of deciding.
 
-The reasoning behind all of the above is recorded as decisions **`D10`, `D17` and
-`D19`**. If you think one of them is wrong, that is a question for the lead rather
+The reasoning behind all of the above is recorded as decisions **`D10`, `D17`, `D19`
+and `D33`**. If you think one of them is wrong, that is a question for the lead rather
 than an edit.
 
 ## If the local-only card is not beside this file

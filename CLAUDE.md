@@ -126,6 +126,19 @@ The reasoning behind all of the above is recorded as decisions **`D10`, `D17` an
 `D19`**. If you think one of them is wrong, that is a question for the lead rather
 than an edit.
 
+## If the local-only card is not beside this file
+
+This repository is one of several developed together, and what is agreed across them —
+conventions, decisions already taken, and work already in progress — is recorded outside
+it, in a checkout that the local-only card beside this file names. That card is
+deliberately not committed, so a working copy can arrive without it: a fresh clone does,
+and so does a secondary working tree made from this one.
+
+**A missing card is not evidence that there is no earlier work.** If you are working
+here and it is not present, stop and ask for it rather than carrying on from this file
+alone. Do not re-decide something that has already been settled, and do not start work
+that may already belong to somebody else.
+
 ## Architecture
 - Protocol, transport and formats come from the sibling `../oss-core` crates (`oss-proto`, `oss-net`, `oss-formats`). Don't fork them here; request changes there.
 - `oss-server` is a **library + thin binary**. Private or third-party builds link the library and register extra modules (ciphers, security, billing) — so every pluggable concern is a trait registered at startup, never a hard-coded match.

@@ -5,7 +5,7 @@ members = ["crates/*"]
 default-members = ["crates/oss-server"]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.1.0-dev5"
 edition = "2024"
 rust-version = "1.89"
 license = "GPL-2.0-or-later"

@@ -1,0 +1,36 @@
+# cargo-about's configuration for THIRD-PARTY-NOTICES.txt, read by the
+# `notices` job in .github/workflows/release.yml.
+#
+# `accepted` is the set of licences a crate in a download may be used under,
+# in order of preference: where a crate offers a choice ("MIT OR Apache-2.0"),
+# the first one listed here is the one recorded. A crate whose terms include
+# none of these fails the release (`--fail`), so a new licence is a decision,
+# not something that slips in with a dependency update.
+#
+# Kept the same in every repository this project builds downloads from, so
+# every download chooses licences the same way. Change one, change them all.
+
+accepted = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-3-Clause",
+    "BSD-2-Clause",
+    "ISC",
+    "Zlib",
+    "Unicode-3.0",
+    "BSL-1.0",
+    "0BSD",
+    "BSD-1-Clause",
+    "OFL-1.1",
+    "Ubuntu-font-1.0",
+    "Unlicense",
+    # This project's own crates. They are left out of the rendered list, but
+    # cargo-about must still accept them.
+    "GPL-2.0-or-later",
+]
+
+private = { ignore = true }
+
+ignore-build-dependencies = true
+ignore-dev-dependencies = true

@@ -7,7 +7,8 @@ name: Release
 # DRAFT. Nothing in this file publishes a release; see "This workflow cannot
 # publish" below.
 #
-# What is in each archive.
+# One archive per platform: oss-server-<version>-<platform>, where platform is
+# windows-x64 (zip), linux-x64 or macos-arm64 (tar.gz). What is in it:
 #
 #   * `oss-server` -- the zone. With no arguments it runs its bundled default
 #     zone, which is compiled into the binary, so the download needs no data
@@ -19,6 +20,11 @@ name: Release
 #   * `LICENSE` -- the GPL-2.0-or-later text. A binary handed to someone with
 #     no licence beside it tells them nothing about what they may do with it,
 #     and this licence in particular is one the recipient has rights under.
+#   * `LICENSE-oss-biller` -- the same text, named for the biller, so every
+#     flavour of this download has the same files in the same places.
+#   * `THIRD-PARTY-NOTICES.txt` -- the crates compiled in and their licences
+#     (the `notices` job below).
+#   * `ABOUT.txt` -- which download this is, what it speaks, and its licence.
 #   * `README.md` -- how to run the thing.
 #
 # This workflow cannot publish.
@@ -64,8 +70,8 @@ name: Release
 #     the same three images ci.yml tests on. Nothing is cross-compiled.
 #   * macOS artefacts are arm64 (Apple Silicon) ONLY. `macos-latest` is an
 #     arm64 image, so an Intel Mac is not covered by any file this workflow
-#     produces. The filenames say `aarch64-apple-darwin` so that gap is legible
-#     from the release page rather than discovered on download.
+#     produces. The filenames say `macos-arm64` so that gap is legible from
+#     the release page rather than discovered on download.
 #   * The Linux binary is built on `ubuntu-latest`, as ci.yml does, so it
 #     carries whatever glibc floor that image has on the day it runs, and
 #     GitHub rolls that label forward. Pinning the image to an older Ubuntu
@@ -100,6 +106,9 @@ env:
   # Must equal RUST_PINNED in ci.yml. The bump procedure is written out there,
   # beside the value, and covers all three repositories in order.
   RUST_PINNED: "1.100.0"
+  # Pinned so the generated notices do not change with a tool upgrade nobody
+  # chose. The `cli` feature is what installs the program at all.
+  CARGO_ABOUT_VERSION: "0.9.3"
 
 jobs:
   # Is this tag fit to release, and what oss-core does it build against?
@@ -188,20 +197,161 @@ jobs:
       # against tagging a broken commit, not a second CI run.
       - run: cargo test --workspace --locked
 
-  build:
+  # THIRD-PARTY-NOTICES.txt: every crate from crates.io compiled into the
+  # programs, with the licence terms it declares and the full text of each
+  # licence it is used under. A binary handed to someone must carry those
+  # notices -- most of the crates are MIT or Apache-2.0, which require it --
+  # and the LICENSE beside the program covers only this project's own code.
+  # Generated per platform from the dependency graph of this build, so each
+  # archive lists exactly what is in it. This project's own crates are left
+  # out. Nothing is compiled here, so one Linux job serves all three.
+  notices:
     needs: check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: DangerMouseUK/oss-server
+          ref: ${{ needs.check.outputs.tag }}
+          path: oss-server
+      - uses: actions/checkout@v4
+        with:
+          repository: DangerMouseUK/oss-core
+          ref: ${{ needs.check.outputs.core_ref }}
+          path: oss-core
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_PINNED }}
+
+      - name: Install cargo-about
+        shell: bash
+        run: cargo install cargo-about --version "$CARGO_ABOUT_VERSION" --features cli --locked
+
+      # The renderer turns cargo-about's JSON into the text file. The same
+      # renderer is used for every download this project makes, so all of
+      # them list their crates the same way.
+      - name: Write the renderer
+        shell: bash
+        run: |
+          cat > "$RUNNER_TEMP/notices.py" <<'PY'
+          """Render THIRD-PARTY-NOTICES text from `cargo about generate --format json`.
+
+              python3 notices.py <out.txt> <about.json>...
+
+          Lists every crate from a registry -- other people's code -- with the licence
+          terms it declares, then the full text of each licence it is used under, once
+          per distinct text. Crates with no registry source are this project's own
+          (path dependencies) and are left out: their terms are the download's LICENSE.
+          """
+
+          import json
+          import sys
+
+
+          def main() -> int:
+              if len(sys.argv) < 3:
+                  print("usage: notices.py <out.txt> <about.json>...", file=sys.stderr)
+                  return 2
+              out, inputs = sys.argv[1], sys.argv[2:]
+
+              crates = {}  # (name, version) -> licence expression
+              texts = {}  # (licence id, text) -> set of (name, version)
+              for path in inputs:
+                  with open(path, encoding="utf-8") as f:
+                      data = json.load(f)
+                  for c in data["crates"]:
+                      p = c["package"]
+                      if not p.get("source"):
+                          continue
+                      crates[(p["name"], p["version"])] = c.get("license") or p.get("license") or "?"
+                  for lic in data["licenses"]:
+                      users = {
+                          (u["crate"]["name"], u["crate"]["version"])
+                          for u in lic["used_by"]
+                          if u["crate"].get("source")
+                      }
+                      if users:
+                          texts.setdefault((lic["id"], lic["text"]), set()).update(users)
+
+              if not crates:
+                  print("notices.py: no third-party crates found -- refusing to write an empty list", file=sys.stderr)
+                  return 1
+
+              lines = [
+                  "THIRD-PARTY SOFTWARE",
+                  "",
+                  "The programs in this download are built with the open-source Rust",
+                  'libraries ("crates") listed below, written by other people. Each is',
+                  "listed with the licence terms it declares; the full text of each",
+                  "licence it is used under follows. The list is generated from the exact",
+                  "set of crates in this build.",
+                  "",
+                  f"CRATES ({len(crates)})",
+                  "",
+              ]
+              width = max(len(f"{n} {v}") for n, v in crates)
+              for (name, version), expr in sorted(crates.items()):
+                  lines.append(f"  {f'{name} {version}':<{width}}  {expr}")
+              lines += ["", "", "LICENCE TEXTS", ""]
+              for (lid, text), users in sorted(texts.items(), key=lambda kv: (kv[0][0], sorted(kv[1]))):
+                  lines.append("=" * 72)
+                  lines.append(lid)
+                  lines.append("Used by: " + ", ".join(f"{n} {v}" for n, v in sorted(users)))
+                  lines.append("=" * 72)
+                  lines.append("")
+                  lines.append(text.strip("\n"))
+                  lines.append("")
+                  lines.append("")
+              with open(out, "w", encoding="utf-8", newline="\n") as f:
+                  f.write("\n".join(lines))
+              print(f"notices.py: {len(crates)} crates, {len(texts)} licence texts -> {out}")
+              return 0
+
+
+          if __name__ == "__main__":
+              sys.exit(main())
+          PY
+
+      - name: Generate the crate lists
+        shell: bash
+        working-directory: oss-server
+        run: |
+          set -euo pipefail
+          mkdir -p ../notices "$RUNNER_TEMP/about"
+          for pair in linux-x64:x86_64-unknown-linux-gnu windows-x64:x86_64-pc-windows-msvc macos-arm64:aarch64-apple-darwin; do
+            platform="${pair%%:*}"; target="${pair#*:}"
+            json="$RUNNER_TEMP/about/$platform.json"
+            cargo about generate --fail --locked --format json --workspace --target "$target" -o "$json"
+            mkdir -p "../notices/$platform"
+            python3 -I "$RUNNER_TEMP/notices.py" "../notices/$platform/THIRD-PARTY-NOTICES.txt" "$json"
+          done
+          wc -c ../notices/*/*.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: notices
+          path: notices/
+          if-no-files-found: error
+          retention-days: 1
+
+  build:
+    needs: [check, notices]
     strategy:
       fail-fast: false
       matrix:
         include:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
+            platform: linux-x64
             archive: tar.gz
           - os: windows-latest
             target: x86_64-pc-windows-msvc
+            platform: windows-x64
             archive: zip
           - os: macos-latest
             target: aarch64-apple-darwin
+            platform: macos-arm64
             archive: tar.gz
     runs-on: ${{ matrix.os }}
     defaults:
@@ -237,20 +387,58 @@ jobs:
             exit 1
           fi
 
+      # A Rust program carries the full path of its source files, for crash
+      # messages. Rewrite the runner's folders to /oss and /cargo, so the
+      # programs carry no paths from the machine that built them.
+      - name: Write no runner paths into the programs
+        shell: bash
+        run: |
+          set -euo pipefail
+          ws="$GITHUB_WORKSPACE"
+          ch="${CARGO_HOME:-$HOME/.cargo}"
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            flags="--remap-path-prefix=$(cygpath -w "$ws")=/oss --remap-path-prefix=$(cygpath -m "$ws")=/oss"
+            flags="$flags --remap-path-prefix=$(cygpath -w "$ch")=/cargo --remap-path-prefix=$(cygpath -m "$ch")=/cargo"
+          else
+            flags="--remap-path-prefix=${ws}=/oss --remap-path-prefix=${ch}=/cargo"
+          fi
+          echo "RUSTFLAGS=$flags" >> "$GITHUB_ENV"
+
       - run: cargo build --release --locked -p oss-server -p oss-biller
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: notices
+          path: notices-download
+
 
       - name: Stage the archive
         shell: bash
         run: |
           set -euo pipefail
-          name="oss-server-${{ needs.check.outputs.version }}-${{ matrix.target }}"
+          version="${{ needs.check.outputs.version }}"
+          name="oss-server-${version}-${{ matrix.platform }}"
           ext=""
           if [ "$RUNNER_OS" = "Windows" ]; then ext=".exe"; fi
           mkdir -p "dist/${name}"
           cp "target/release/oss-server${ext}" "dist/${name}/"
           cp "target/release/oss-biller${ext}" "dist/${name}/"
           cp LICENSE "dist/${name}/"
+          cp LICENSE "dist/${name}/LICENSE-oss-biller"
           cp README.md "dist/${name}/"
+          # The download-artifact step above runs from the workspace root.
+          cp "../notices-download/${{ matrix.platform }}/THIRD-PARTY-NOTICES.txt" "dist/${name}/"
+          {
+            echo "OSS Server ${version} -- open flavour."
+            echo
+            echo "Speaks SubSpace (VIE) and OpenSec. Fully open source under"
+            echo "GPL-2.0-or-later (LICENSE). Source: https://github.com/${GITHUB_REPOSITORY}"
+            echo
+            echo "oss-biller, the zone's account database, is under the same licence"
+            echo "(LICENSE-oss-biller)."
+            echo
+            echo "Third-party software in this download: THIRD-PARTY-NOTICES.txt."
+          } > "dist/${name}/ABOUT.txt"
           echo "STAGE_NAME=${name}" >> "$GITHUB_ENV"
 
       - name: Archive (tar.gz)
@@ -265,7 +453,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: oss-server-${{ matrix.target }}
+          name: oss-server-${{ matrix.platform }}
           # Relative to the workspace, not to defaults.working-directory.
           path: oss-server/oss-server-*.${{ matrix.archive }}
           if-no-files-found: error
@@ -279,6 +467,7 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           path: downloads
+          pattern: oss-server-*
           merge-multiple: true
 
       # One SHA256SUMS.txt over every attached file, in the format
@@ -320,9 +509,9 @@ jobs:
             {
               echo "Open SubSpace zone server ${VERSION}."
               echo
-              echo "**What is in the archive.** \`oss-server\` is the zone: run it with no arguments and it serves its bundled default zone on UDP port 5000, with no files to put anywhere. \`oss-biller\` is the local user database, for a zone that wants accounts. \`README.md\` explains both."
+              echo "**What is in the archive.** \`oss-server\` is the zone: run it with no arguments and it serves its bundled default zone on UDP port 5000, with no files to put anywhere. \`oss-biller\` is the local user database, for a zone that wants accounts. \`README.md\` explains both. \`THIRD-PARTY-NOTICES.txt\` lists the libraries compiled in and their licences."
               echo
-              echo "**Platforms.** Linux x86-64, Windows x86-64, macOS arm64. There is no Intel macOS build."
+              echo "**Platforms.** \`windows-x64\`, \`linux-x64\` and \`macos-arm64\` (Apple Silicon). There is no Intel macOS build."
               echo
               echo "**Checking what you downloaded.** \`SHA256SUMS.txt\` covers every archive here. On Linux or macOS: \`sha256sum -c SHA256SUMS.txt\`."
               echo

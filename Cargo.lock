@@ -803,7 +803,7 @@ checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
 name = "oss-biller"
-version = "0.1.0-dev5"
+version = "0.1.0-dev6"
 dependencies = [
  "clap",
  "oss-net",
@@ -816,7 +816,7 @@ dependencies = [
 
 [[package]]
 name = "oss-formats"
-version = "0.1.0-dev5"
+version = "0.1.0-dev6"
 dependencies = [
  "miniz_oxide 0.8.9",
  "oss-proto",
@@ -824,7 +824,7 @@ dependencies = [
 
 [[package]]
 name = "oss-net"
-version = "0.1.0-dev5"
+version = "0.1.0-dev6"
 dependencies = [
  "chacha20poly1305",
  "getrandom 0.4.3",
@@ -835,11 +835,11 @@ dependencies = [
 
 [[package]]
 name = "oss-proto"
-version = "0.1.0-dev5"
+version = "0.1.0-dev6"
 
 [[package]]
 name = "oss-server"
-version = "0.1.0-dev5"
+version = "0.1.0-dev6"
 dependencies = [
  "axum",
  "clap",
@@ -861,7 +861,7 @@ dependencies = [
 
 [[package]]
 name = "oss-sim"
-version = "0.1.0-dev5"
+version = "0.1.0-dev6"
 dependencies = [
  "oss-proto",
 ]

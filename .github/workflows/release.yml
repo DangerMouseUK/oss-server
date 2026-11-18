@@ -441,6 +441,13 @@ jobs:
           } > "dist/${name}/ABOUT.txt"
           echo "STAGE_NAME=${name}" >> "$GITHUB_ENV"
 
+      # One download, extracted once, gives one folder:
+      #   * tar.gz (Linux, macOS): ONE top-level folder named after the
+      #     download, because `tar -xzf` unpacks where it stands. The tar also
+      #     keeps the programs' executable bit.
+      #   * zip (Windows): the folder's CONTENTS at the root of the zip, not
+      #     the folder. Explorer's "Extract All" makes a folder named after the
+      #     zip, so a folder inside the zip would be a folder inside a folder.
       - name: Archive (tar.gz)
         if: matrix.archive == 'tar.gz'
         shell: bash
@@ -449,7 +456,7 @@ jobs:
       - name: Archive (zip)
         if: matrix.archive == 'zip'
         shell: pwsh
-        run: Compress-Archive -Path "dist/$env:STAGE_NAME" -DestinationPath "$env:STAGE_NAME.zip"
+        run: Compress-Archive -Path "dist/$env:STAGE_NAME/*" -DestinationPath "$env:STAGE_NAME.zip"
 
       - uses: actions/upload-artifact@v4
         with:

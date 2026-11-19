@@ -34,6 +34,7 @@ pub mod koth;
 pub mod lagdata;
 pub mod mapdata;
 pub mod mapnewsdl;
+pub mod notify;
 pub mod objects;
 pub mod obscene;
 pub mod periodic;
@@ -95,6 +96,7 @@ pub const DEFAULT_MODULES: &[&str] = &[
     "sendfile",
     "jackpot",
     "points_flag",
+    "notify",
     "playercmd",
     "staffcmd",
     "admin",
@@ -173,6 +175,7 @@ pub fn builtin_catalog() -> ModuleCatalog {
     });
     c.register("auth_file", &[], || auth_file::AuthFileModule);
     c.register("auth_ban", &["bans"], || bans::BansModule);
+    c.register("notify", &[], || notify::NotifyModule);
     c.register("playercmd", &[], || playercmd::PlayerCmdModule);
     c.register("staffcmd", &["admincmd"], || staffcmd::StaffCmdModule);
     c

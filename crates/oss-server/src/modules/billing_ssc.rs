@@ -85,6 +85,7 @@
 //! cannot be answered from this repository: it would need a live SSC, or
 //! subgame, which is closed source.
 
+use std::collections::HashMap;
 use std::net::{SocketAddr, UdpSocket};
 use std::sync::Arc;
 use std::time::Instant;
@@ -314,6 +315,10 @@ struct BillingState {
     identity: Option<Vec<u8>>,
     last_banner: Option<Ticks>,
     retry_ticks: u64,
+    /// The player each connection id the biller was given belongs to.
+    by_connection: HashMap<u32, PlayerId>,
+    /// The next connection id to give out.
+    next_connection_id: u32,
 }
 
 impl Default for BillingState {
@@ -328,6 +333,8 @@ impl Default for BillingState {
             identity: None,
             last_banner: None,
             retry_ticks: 18000,
+            by_connection: HashMap::new(),
+            next_connection_id: 0,
         }
     }
 }
@@ -345,6 +352,8 @@ struct BillingPlayer {
     known: bool,
     demographics_set: bool,
     login: Option<LoginData>,
+    /// The id the biller knows this player by, while it means this player.
+    connection_id: Option<u32>,
     first_used: String,
     saved_score: PlayerScore,
 }
@@ -387,6 +396,57 @@ pub fn user_id(zone: &Zone, p: PlayerId) -> Option<u32> {
         .and_then(|x| x.ext.get::<BillingPlayer>())
         .filter(|d| d.known)
         .map(|d| d.billing_id)
+}
+
+// ---- connection ids ----------------------------------------------------------
+//
+// ASSS gives the biller the player id as the connection id. Player ids are
+// reused, so a slow biller's answer for a player who has left lands on the
+// next player given the same id. As Subspace Server .NET does
+// (`BillingUdp.cs`, `AssignConnectionId`), each login sent to the biller gets
+// a connection id of its own, and the id stops meaning anyone when the player
+// leaves or logs in again.
+
+/// The highest connection id given out. The biller reads the field as signed
+/// and -1 means "every player", so ids stay non-negative.
+const MAX_CONNECTION_ID: u32 = i32::MAX as u32;
+
+/// Gives `p` a new connection id for a login going to the biller, replacing
+/// any it had.
+fn assign_connection_id(zone: &mut Zone, p: PlayerId) -> u32 {
+    release_connection_id(zone, p);
+    let s = st(zone);
+    let mut id = s.next_connection_id;
+    // skip any still in use, should the counter ever wrap round
+    while s.by_connection.contains_key(&id) {
+        id = if id >= MAX_CONNECTION_ID { 0 } else { id + 1 };
+    }
+    s.next_connection_id = if id >= MAX_CONNECTION_ID { 0 } else { id + 1 };
+    s.by_connection.insert(id, p);
+    if let Some(d) = pdata(zone, p) {
+        d.connection_id = Some(id);
+    }
+    id
+}
+
+/// Makes `p`'s connection id mean nobody: anything the biller sends for it
+/// from now on is dropped.
+fn release_connection_id(zone: &mut Zone, p: PlayerId) {
+    let Some(id) = pdata(zone, p).and_then(|d| d.connection_id.take()) else {
+        return;
+    };
+    let s = st(zone);
+    if s.by_connection.get(&id) == Some(&p) {
+        s.by_connection.remove(&id);
+    }
+}
+
+/// The connection id the biller knows `p` by.
+fn connection_id(zone: &Zone, p: PlayerId) -> Option<u32> {
+    zone.players
+        .get(p)
+        .and_then(|x| x.ext.get::<BillingPlayer>())
+        .and_then(|d| d.connection_id)
 }
 
 fn send(zone: &mut Zone, pkt: &[u8], reliable: bool) {
@@ -516,12 +576,13 @@ impl Auth for BillingAuth {
                     (Some(ClientKind::Continuum), Some(c)) => c.to_vec(),
                     _ => Vec::new(),
                 };
+                let connection_id = assign_connection_id(zone, p);
                 let pkt = ServerToBiller::UserLogin(UserLogin {
                     make_new: lp.flags,
                     ip,
                     name: fixed(lp.name.as_bytes()),
                     password: fixed(lp.password.as_bytes()),
-                    connection_id: u32::from(p.0),
+                    connection_id,
                     machine_id: lp.machine_id,
                     timezone: lp.timezone_bias,
                     timezone_high: if lp.timezone_bias < 0 { 0xFFFF } else { 0 },
@@ -584,7 +645,7 @@ fn on_player_action(zone: &mut Zone, ev: &PlayerAction) {
                 s.pending_auths -= 1;
                 s.interrupted_auths += 1;
             }
-            if was_known {
+            if was_known && let Some(connection_id) = connection_id(zone, p) {
                 let score = current_score(zone, p);
                 let changed = pdata(zone, p).is_some_and(|d| {
                     let c = d.saved_score != score;
@@ -593,7 +654,7 @@ fn on_player_action(zone: &mut Zone, ev: &PlayerAction) {
                 });
                 // without the score when it didn't change (ASSS sends 15 bytes)
                 let pkt = ServerToBiller::UserLogoff {
-                    connection_id: u32::from(p.0),
+                    connection_id,
                     reason: 0,
                     latency: 0,
                     ping: 0,
@@ -612,6 +673,7 @@ fn on_player_action(zone: &mut Zone, ev: &PlayerAction) {
                 );
                 send_s2b(zone, &pkt);
             }
+            release_connection_id(zone, p);
         }
         Action::LeaveArena => {
             let public = ev
@@ -647,6 +709,9 @@ fn on_chat(zone: &mut Zone, ev: &ChatMessage) {
     if !known(zone, p) {
         return;
     }
+    let Some(connection_id) = connection_id(zone, p) else {
+        return;
+    };
     let text = to_latin1(&ev.text);
     if ev.kind == chat_type::CHANNEL {
         // "text" or "channel;text" (a name works too, if the biller allows)
@@ -660,7 +725,7 @@ fn on_chat(zone: &mut Zone, ev: &ChatMessage) {
         send_s2b(
             zone,
             &ServerToBiller::UserChannelChat {
-                connection_id: u32::from(p.0),
+                connection_id,
                 channel: fixed(&channel),
                 text: cut(body, MAX_TEXT),
             },
@@ -759,6 +824,9 @@ fn c_default(zone: &mut Zone, inv: &Invocation<'_>) {
     if !known(zone, p) {
         return;
     }
+    let Some(connection_id) = connection_id(zone, p) else {
+        return;
+    };
     if !matches!(inv.target, Target::Arena(_)) {
         tracing::debug!(target: "billing_ssc", pid = p.0, "unknown command with bad target: {}", inv.params);
         return;
@@ -799,7 +867,7 @@ fn c_default(zone: &mut Zone, inv: &Invocation<'_>) {
     send_s2b(
         zone,
         &ServerToBiller::UserCommand {
-            connection_id: u32::from(p.0),
+            connection_id,
             text: cut(to_latin1(&text), MAX_TEXT),
         },
     );
@@ -909,12 +977,14 @@ fn on_demographics(zone: &mut Zone, p: PlayerId, pkt: &[u8]) {
     let Some(d) = pdata(zone, p) else { return };
     if d.demographics_set {
         tracing::warn!(target: "billing_ssc", pid = p.0, "duplicate demographics packet");
-    } else if d.known {
+    } else if d.known
+        && let Some(connection_id) = d.connection_id
+    {
         d.demographics_set = true;
         send_s2b(
             zone,
             &ServerToBiller::UserDemographics {
-                connection_id: u32::from(p.0),
+                connection_id,
                 data: pkt.get(1..).unwrap_or_default().to_vec(),
             },
         );
@@ -926,11 +996,14 @@ fn on_banner(zone: &mut Zone, ev: &BannerSet) {
     let now = zone.now();
     let last = st(zone).last_banner;
     // at most one banner every 0.2 s gets to the biller; the rest are dropped
-    if known(zone, p) && last.is_none_or(|l| now.since(l) > 20) {
+    if known(zone, p)
+        && last.is_none_or(|l| now.since(l) > 20)
+        && let Some(connection_id) = connection_id(zone, p)
+    {
         send_s2b(
             zone,
             &ServerToBiller::UserBanner {
-                connection_id: u32::from(p.0),
+                connection_id,
                 banner: Raw(ev.banner),
             },
         );
@@ -940,8 +1013,13 @@ fn on_banner(zone: &mut Zone, ev: &BannerSet) {
 
 // ---- packets from the biller ------------------------------------------------
 
+/// The player the biller means by `connection_id`, if it still means anyone.
 fn player_for(zone: &Zone, connection_id: u32) -> Option<PlayerId> {
-    let id = PlayerId(u16::try_from(connection_id).ok()?);
+    let id = *zone
+        .res
+        .get::<BillingState>()?
+        .by_connection
+        .get(&connection_id)?;
     zone.players.get(id).map(|_| id)
 }
 

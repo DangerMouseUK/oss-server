@@ -236,6 +236,20 @@ fn sent(s: &Arc<Mutex<Script>>) -> Vec<Vec<u8>> {
     std::mem::take(&mut s.lock().expect("lock").from_zone)
 }
 
+/// The connection id of the one login the zone has sent the biller since
+/// [`sent`] was last called.
+fn login_cid(s: &Arc<Mutex<Script>>) -> u32 {
+    let logins: Vec<u32> = sent(s)
+        .iter()
+        .filter_map(|d| match ServerToBiller::decode(d) {
+            Ok(ServerToBiller::UserLogin(l)) => Some(l.connection_id),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(logins.len(), 1, "exactly one login sent");
+    logins[0]
+}
+
 #[test]
 fn scripted_biller() {
     let (mut h, s) = scripted();
@@ -282,7 +296,8 @@ fn scripted_biller() {
     };
     assert_eq!(l.name.as_bytes(), b"player");
     assert_eq!(l.password.as_bytes(), b"pw");
-    assert_eq!(l.connection_id, u32::from(p.0));
+    // a connection id of its own, not the player id
+    let cid = l.connection_id;
     assert_eq!(
         (l.machine_id, l.timezone, l.timezone_high),
         (0xDEAD_BEEF, -60, 0xFFFF)
@@ -291,7 +306,7 @@ fn scripted_biller() {
 
     // the biller's answer (ASSS vector, with our connection id)
     let mut ok = vector("login_ok");
-    ok[2..6].copy_from_slice(&u32::from(p.0).to_le_bytes());
+    ok[2..6].copy_from_slice(&cid.to_le_bytes());
     push(&s, LinkEvent::Packet(ok));
     h.tick(10);
     assert_eq!(h.login_code(p), Some(0));
@@ -325,7 +340,6 @@ fn scripted_biller() {
         .iter()
         .map(|d| ServerToBiller::decode(d).expect("decode"))
         .collect();
-    let cid = u32::from(p.0);
     let chan = |c: &[u8], t: &[u8]| ServerToBiller::UserChannelChat {
         connection_id: cid,
         channel: FixedStr::new(c),
@@ -401,9 +415,10 @@ fn scripted_biller() {
     // a bad password, then the biller kicks the player out
     let q = h.start_login("other", "bad", false);
     h.tick(1);
-    sent(&s);
+    let qcid = login_cid(&s);
+    assert_ne!(qcid, cid);
     let mut bad = vector("login_invalidpw");
-    bad[2..6].copy_from_slice(&u32::from(q.0).to_le_bytes());
+    bad[2..6].copy_from_slice(&qcid.to_le_bytes());
     push(&s, LinkEvent::Packet(bad));
     h.tick(10);
     assert_eq!(
@@ -412,13 +427,13 @@ fn scripted_biller() {
     );
 
     let mut kick = vector("kickout");
-    kick[1..5].copy_from_slice(&u32::from(p.0).to_le_bytes());
+    kick[1..5].copy_from_slice(&cid.to_le_bytes());
     push(&s, LinkEvent::Packet(kick));
     h.tick(50);
     let logoff: Vec<Vec<u8>> = sent(&s).into_iter().filter(|d| d[0] == 0x05).collect();
     assert_eq!(logoff.len(), 1);
     assert_eq!(logoff[0].len(), 15, "score unchanged: logoff without Score");
-    assert_eq!(&logoff[0][1..5], &u32::from(p.0).to_le_bytes());
+    assert_eq!(&logoff[0][1..5], &cid.to_le_bytes());
 
     // losing the biller: retry after Billing:RetryInterval
     push(&s, LinkEvent::Disconnected);
@@ -639,7 +654,7 @@ fn logged_in_player(h: &mut H, s: &Arc<Mutex<Script>>, name: &str) -> PlayerId {
     let p = h.start_login(name, "pw", false);
     h.tick(1);
     let mut ok = vector("login_ok");
-    ok[2..6].copy_from_slice(&u32::from(p.0).to_le_bytes());
+    ok[2..6].copy_from_slice(&login_cid(s).to_le_bytes());
     push(s, LinkEvent::Packet(ok));
     h.tick(10);
     assert_eq!(h.login_code(p), Some(0));
@@ -703,4 +718,90 @@ fn a_flag_pickup_is_what_lets_a_public_score_through() {
     let score = score.expect("the score is sent once the flag counts disagree");
     assert_eq!((score.kills, score.points), (1, 11));
     assert_eq!(score.flags, 0, "flags carried, not flags picked up");
+}
+
+/// What the biller sends about a player who has left must not reach the next
+/// player given the same player id. ASSS used the player id as the biller's
+/// connection id, so a kick or message still on its way for the first player
+/// landed on the second. Each login now goes to the biller with a connection
+/// id of its own, which stops meaning anyone when the player leaves (Subspace
+/// Server .NET `BillingUdp.cs` does the same).
+#[test]
+fn the_biller_cannot_reach_the_next_player_given_a_leavers_id() {
+    let (mut h, s) = scripted();
+    let first = logged_in_player(&mut h, &s, "first");
+    let first_cid = connection_id_of_logoff(&mut h, &s, first);
+    h.tick(200);
+    assert!(h.zone.players.get(first).is_none(), "slot freed");
+
+    // the next player is given the same player id, and a new connection id
+    let second = h.start_login("second", "pw", false);
+    assert_eq!(second, first, "the player id is reused");
+    h.tick(1);
+    let second_cid = login_cid(&s);
+    assert_ne!(second_cid, first_cid);
+    let mut ok = vector("login_ok");
+    ok[2..6].copy_from_slice(&second_cid.to_le_bytes());
+    push(&s, LinkEvent::Packet(ok));
+    h.tick(10);
+    assert_eq!(h.login_code(second), Some(0));
+    h.enter(second);
+
+    // the biller, late, still acting on the first player: none of it lands
+    let mut kick = vector("kickout");
+    kick[1..5].copy_from_slice(&first_cid.to_le_bytes());
+    push(&s, LinkEvent::Packet(kick));
+    push(
+        &s,
+        LinkEvent::Packet(
+            BillerToServer::ArenaMessage {
+                connection_id: first_cid,
+                text: b"meant for first".to_vec(),
+            }
+            .to_bytes(),
+        ),
+    );
+    push(
+        &s,
+        LinkEvent::Packet(
+            BillerToServer::UserPacket {
+                connection_id: first_cid,
+                data: vec![s2c::kind::LOGIN_TEXT, b'x', 0],
+            }
+            .to_bytes(),
+        ),
+    );
+    h.tick(200);
+    assert!(
+        h.zone.players.get(second).is_some(),
+        "the second player was kicked by the biller's kick of the first"
+    );
+    let out = h.take(second);
+    assert!(chats(&out).is_empty(), "{:?}", chats(&out));
+    assert!(!out.iter().any(|d| d[0] == s2c::kind::LOGIN_TEXT));
+
+    // what the biller sends for the second player's own id still arrives
+    push(
+        &s,
+        LinkEvent::Packet(
+            BillerToServer::ArenaMessage {
+                connection_id: second_cid,
+                text: b"meant for second".to_vec(),
+            }
+            .to_bytes(),
+        ),
+    );
+    h.tick(1);
+    assert_eq!(
+        chats(&h.take(second)),
+        vec![(chat_type::ARENA, "meant for second".to_owned())]
+    );
+}
+
+/// Kicks `p` and returns the connection id its logoff named.
+fn connection_id_of_logoff(h: &mut H, s: &Arc<Mutex<Script>>, p: PlayerId) -> u32 {
+    match logoff_of(h, s, p) {
+        ServerToBiller::UserLogoff { connection_id, .. } => connection_id,
+        other => panic!("not a logoff: {other:?}"),
+    }
 }

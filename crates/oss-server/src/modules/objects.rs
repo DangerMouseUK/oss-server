@@ -324,16 +324,54 @@ pub fn send_state(zone: &mut Zone, player: PlayerId) {
         }
         (toggles, changes)
     };
-    if !toggles.is_empty() {
-        let mut buf = Vec::with_capacity(1 + 2 * toggles.len());
-        ToggleObjects { toggles }.encode(&mut buf);
+    for buf in toggle_packets(&toggles) {
         zone.send(player, &buf, SendFlags::RELIABLE);
     }
-    if !changes.is_empty() {
-        let mut buf = Vec::with_capacity(1 + 11 * changes.len());
-        MoveObjects { changes }.encode(&mut buf);
+    for buf in change_packets(&changes) {
         zone.send(player, &buf, SendFlags::RELIABLE);
     }
+}
+
+/// The largest S2C `0x35` or `0x36` Continuum accepts, type byte included.
+/// A longer one is rejected outright, so the objects in it never change
+/// (Subspace Server .NET records the same limit in `LvzObjects.cs`).
+pub const MAX_OBJECT_PACKET: usize = 2048;
+
+/// Toggles that fit in one [`MAX_OBJECT_PACKET`]-byte `0x35` (1023).
+const TOGGLES_PER_PACKET: usize = (MAX_OBJECT_PACKET - 1) / 2;
+
+/// Changes that fit in one [`MAX_OBJECT_PACKET`]-byte `0x36` (186).
+const CHANGES_PER_PACKET: usize = (MAX_OBJECT_PACKET - 1) / 11;
+
+/// `toggles` as as many `0x35` packets as it takes to keep each one within
+/// [`MAX_OBJECT_PACKET`] bytes; none at all when there is nothing to send.
+fn toggle_packets(toggles: &[ObjectToggle]) -> Vec<Vec<u8>> {
+    toggles
+        .chunks(TOGGLES_PER_PACKET)
+        .map(|chunk| {
+            let mut buf = Vec::with_capacity(1 + 2 * chunk.len());
+            ToggleObjects {
+                toggles: chunk.to_vec(),
+            }
+            .encode(&mut buf);
+            buf
+        })
+        .collect()
+}
+
+/// `changes` as `0x36` packets of at most [`MAX_OBJECT_PACKET`] bytes each.
+fn change_packets(changes: &[ObjectChange]) -> Vec<Vec<u8>> {
+    changes
+        .chunks(CHANGES_PER_PACKET)
+        .map(|chunk| {
+            let mut buf = Vec::with_capacity(1 + 11 * chunk.len());
+            MoveObjects {
+                changes: chunk.to_vec(),
+            }
+            .encode(&mut buf);
+            buf
+        })
+        .collect()
 }
 
 /// Remembers a toggle for the arena. An object with a display time hides
@@ -351,18 +389,19 @@ pub fn toggle(zone: &mut Zone, target: Target, id: u16, on: bool) {
     toggle_set(zone, target, &[(id, on)]);
 }
 
-/// ASSS `ToggleSet`: several objects in one packet.
+/// ASSS `ToggleSet`: several objects in one packet, or in several when one
+/// would be longer than Continuum accepts.
 pub fn toggle_set(zone: &mut Zone, target: Target, items: &[(u16, bool)]) {
     if items.is_empty() {
         return;
     }
-    let toggles = items
+    let toggles: Vec<ObjectToggle> = items
         .iter()
         .map(|&(id, on)| ObjectToggle::new(id, on))
         .collect();
-    let mut buf = Vec::with_capacity(1 + 2 * items.len());
-    ToggleObjects { toggles }.encode(&mut buf);
-    send_target(zone, target, &buf);
+    for buf in toggle_packets(&toggles) {
+        send_target(zone, target, &buf);
+    }
     if let Target::Arena(a) = target {
         for &(id, on) in items {
             remember_toggle(zone, a, id, on);
@@ -1060,6 +1099,41 @@ mod tests {
         assert_eq!(code_of(&MODE_NAMES, "nonsense"), None);
         assert_eq!(name_of(&LAYER_NAMES, layer::AFTER_SHIPS), "AfterShips");
         assert_eq!(name_of(&LAYER_NAMES, 200), "?");
+    }
+
+    #[test]
+    fn object_packets_never_exceed_what_continuum_accepts() {
+        let toggles: Vec<ObjectToggle> = (0..2500).map(|i| ObjectToggle::new(i, true)).collect();
+        let packets = toggle_packets(&toggles);
+        assert_eq!(packets.len(), 3);
+        assert!(packets.iter().all(|p| p.len() <= MAX_OBJECT_PACKET));
+        // the first is exactly as full as the limit allows: 1 + 2 * 1023
+        assert_eq!(packets[0].len(), 2047);
+        let back: Vec<ObjectToggle> = packets
+            .iter()
+            .flat_map(|p| ToggleObjects::decode(p).expect("0x35").toggles)
+            .collect();
+        assert_eq!(back, toggles);
+
+        let changes: Vec<ObjectChange> = (0..400)
+            .map(|i| ObjectChange {
+                mask: MASK_ALL,
+                data: ObjectData::map(i, 0, 0),
+            })
+            .collect();
+        let packets = change_packets(&changes);
+        assert_eq!(packets.len(), 3);
+        assert!(packets.iter().all(|p| p.len() <= MAX_OBJECT_PACKET));
+        // 1 + 11 * 186
+        assert_eq!(packets[0].len(), 2047);
+        let back: Vec<ObjectChange> = packets
+            .iter()
+            .flat_map(|p| MoveObjects::decode(p).expect("0x36").changes)
+            .collect();
+        assert_eq!(back, changes);
+
+        assert!(toggle_packets(&[]).is_empty());
+        assert!(change_packets(&[]).is_empty());
     }
 
     #[test]

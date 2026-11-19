@@ -602,3 +602,73 @@ fn a_clv1_screen_object_is_loaded_and_can_be_driven() {
         "CLV2 accessors would say (2, 6): {info:?}"
     );
 }
+
+/// `n` map objects, ids 1..=n, all off by default.
+fn many_objects(n: u16) -> Vec<u8> {
+    let section = ObjectSection {
+        version: CLV2,
+        objects: (1..=n)
+            .map(|id| {
+                let mut o = ObjectData::map(id, i16::try_from(16 * id).expect("fits"), 16);
+                o.set_mode(mode::SERVER_CONTROLLED);
+                o
+            })
+            .collect(),
+        images: Vec::new(),
+    };
+    Lvz {
+        sections: vec![Section::objects(&section)],
+    }
+    .to_bytes()
+}
+
+#[test]
+fn a_late_joiner_in_a_crowded_arena_gets_packets_continuum_accepts() {
+    // Continuum rejects a 0x35 or 0x36 longer than 2048 bytes; 1500 shown
+    // objects (3001 bytes) and 300 changed ones (3301 bytes) must be split.
+    let mut h = H::new_with("cmd_go = 1\nbroadcastbot = 1\n", many_objects(1500));
+    let bot = h.player("bot");
+    for ids in (1..=1500u16).collect::<Vec<_>>().chunks(250) {
+        let mut pkt = Vec::new();
+        ToggleObjects {
+            toggles: ids.iter().map(|&id| ObjectToggle::new(id, true)).collect(),
+        }
+        .encode(&mut pkt);
+        relay(&mut h, bot, pkt);
+    }
+    for ids in (1..=300u16).collect::<Vec<_>>().chunks(100) {
+        let mut pkt = Vec::new();
+        MoveObjects {
+            changes: ids
+                .iter()
+                .map(|&id| {
+                    let mut data = ObjectData::map(id, i16::try_from(16 * id).expect("fits"), 16);
+                    data.image = 3;
+                    ObjectChange {
+                        mask: object_change::IMAGE,
+                        data,
+                    }
+                })
+                .collect(),
+        }
+        .encode(&mut pkt);
+        relay(&mut h, bot, pkt);
+    }
+
+    let late = h.player("latecomer");
+    let seen = h.take(late);
+    let objects: Vec<&Vec<u8>> = seen
+        .iter()
+        .filter(|d| d[0] == s2c::kind::TOGGLE_OBJECTS || d[0] == s2c::kind::MOVE_OBJECTS)
+        .collect();
+    assert!(objects.len() >= 4, "{} object packets", objects.len());
+    for d in &objects {
+        assert!(d.len() <= 2048, "a {}-byte object packet", d.len());
+    }
+    let shown = toggles(&seen);
+    assert_eq!(shown.len(), 1500);
+    assert!(shown.iter().all(|&(_, on)| on));
+    let changed = changes(&seen);
+    assert_eq!(changed.len(), 300);
+    assert!(changed.iter().all(|c| c.data.image == 3));
+}

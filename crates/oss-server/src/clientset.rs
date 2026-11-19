@@ -472,7 +472,21 @@ pub struct ArenaSettings {
     pub prize_weights: PrizeWeights,
 }
 
-/// ASSS `load_settings`.
+/// Zone-wide 16-bit settings that crash Continuum when they reach it as 0,
+/// with the value sent instead. ASSS sends the 0 regardless; Subspace Server
+/// .NET (`ClientSettings.cs`) found the crash and substitutes these values:
+/// 10 for `SendPositionDelay` (its original modem-era default), and 1 for the
+/// other two. A `PrizeNegativeFactor` of 1 makes every prize negative, which
+/// at least makes the missing setting obvious.
+pub const ZERO_CRASHES_CONTINUUM: [(&str, u16); 3] = [
+    ("Misc:SendPositionDelay", 10),
+    ("Radar:MapZoomFactor", 1),
+    ("Prize:PrizeNegativeFactor", 1),
+];
+
+/// ASSS `load_settings`, except that a setting in [`ZERO_CRASHES_CONTINUUM`]
+/// left at 0 (or truncated to 0) is replaced by its safe value, with a
+/// warning in the log.
 pub fn load(cfg: &ConfigFile) -> ArenaSettings {
     let mut s = SettingsBlock::default();
     s.bytes[0] = S2C_SETTINGS;
@@ -533,11 +547,18 @@ pub fn load(cfg: &ConfigFile) -> ArenaSettings {
         s.set_bits(8 * (LONGS + 4 * i) as u32, 32, v as u32);
     }
     for (i, name) in SHORT_NAMES.iter().enumerate() {
-        s.set_bits(
-            8 * (SHORTS + 2 * i) as u32,
-            16,
-            cfg.get_int_raw(name, 0) as u32,
-        );
+        let mut v = cfg.get_int_raw(name, 0) as u32 & 0xFFFF;
+        if v == 0
+            && let Some(&(_, safe)) = ZERO_CRASHES_CONTINUUM.iter().find(|(n, _)| n == name)
+        {
+            tracing::warn!(
+                setting = *name,
+                used = safe,
+                "{name} is 0, which crashes Continuum; sending {safe} instead"
+            );
+            v = u32::from(safe);
+        }
+        s.set_bits(8 * (SHORTS + 2 * i) as u32, 16, v);
     }
     for (i, name) in BYTE_NAMES.iter().enumerate() {
         s.set_bits(8 * (BYTES + i) as u32, 8, cfg.get_int_raw(name, 0) as u32);
@@ -732,12 +753,66 @@ impl Overrides {
 mod tests {
     use super::*;
 
+    /// Zone-wide short setting `name`, as sent.
+    fn short(s: &ArenaSettings, name: &str) -> u16 {
+        let i = SHORT_NAMES.iter().position(|n| *n == name).expect("name");
+        let b = s.block.as_bytes();
+        u16::from_le_bytes([b[SHORTS + 2 * i], b[SHORTS + 2 * i + 1]])
+    }
+
     #[test]
     fn layout_and_type_byte() {
         let s = load(&ConfigFile::default());
         assert_eq!(s.block.as_bytes()[0], S2C_SETTINGS);
-        assert!(s.block.as_bytes()[1..].iter().all(|&b| b == 0));
+        // everything an empty config leaves at 0 is sent as 0, except the
+        // three settings Continuum cannot take at 0
+        let mut zeroed = s.block.clone();
+        for (name, _) in ZERO_CRASHES_CONTINUUM {
+            let i = SHORT_NAMES.iter().position(|n| *n == name).expect("name");
+            zeroed.set_bits(8 * (SHORTS + 2 * i) as u32, 16, 0);
+        }
+        assert!(zeroed.as_bytes()[1..].iter().all(|&b| b == 0));
         assert_eq!(s.prize_weights.random_prize(|_| 0), 0);
+    }
+
+    #[test]
+    fn settings_that_crash_continuum_at_zero_are_never_sent_as_zero() {
+        // absent: the safe values
+        let s = load(&ConfigFile::default());
+        assert_eq!(short(&s, "Misc:SendPositionDelay"), 10);
+        assert_eq!(short(&s, "Radar:MapZoomFactor"), 1);
+        assert_eq!(short(&s, "Prize:PrizeNegativeFactor"), 1);
+
+        // set to 0, or to a value whose low 16 bits are 0: the safe values
+        let s = load(&ConfigFile::from_text(
+            "[Misc]
+SendPositionDelay=0
+[Radar]
+MapZoomFactor=65536
+             [Prize]
+PrizeNegativeFactor=0
+",
+        ));
+        assert_eq!(short(&s, "Misc:SendPositionDelay"), 10);
+        assert_eq!(short(&s, "Radar:MapZoomFactor"), 1);
+        assert_eq!(short(&s, "Prize:PrizeNegativeFactor"), 1);
+
+        // anything else is sent as configured
+        let s = load(&ConfigFile::from_text(
+            "[Misc]
+SendPositionDelay=5
+[Radar]
+MapZoomFactor=8
+             [Prize]
+PrizeNegativeFactor=80
+",
+        ));
+        assert_eq!(short(&s, "Misc:SendPositionDelay"), 5);
+        assert_eq!(short(&s, "Radar:MapZoomFactor"), 8);
+        assert_eq!(short(&s, "Prize:PrizeNegativeFactor"), 80);
+
+        // and other short settings may still be 0
+        assert_eq!(short(&s, "Misc:BounceFactor"), 0);
     }
 
     #[test]

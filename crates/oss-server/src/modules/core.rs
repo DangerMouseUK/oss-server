@@ -22,7 +22,7 @@ use crate::config::{latin1, to_latin1};
 use crate::module::{Module, ModuleError};
 use crate::net::SendFlags;
 use crate::player::{ClientKind, PlayerId, PlayerStatus, Ship};
-use crate::registry::{Event, Owner};
+use crate::registry::{Event, Owner, Scope};
 use crate::zone::Zone;
 
 /// ASSS authentication result codes (`AUTH_*`), as sent in the login response.
@@ -879,6 +879,81 @@ fn process_player_states(zone: &mut Zone) {
     }
 }
 
+/// ASSS's keep-alive interval, in ticks: what a player is sent at most this
+/// far apart while their arena allows it.
+pub const KEEP_ALIVE_INTERVAL: u64 = 500;
+
+/// How often, in ticks, the keep-alive timer looks for players who are due.
+/// A player is sent one at most this much later than their interval.
+const KEEP_ALIVE_CHECK: u64 = 10;
+
+/// A `Latency:S2CNoDataKickoutDelay` must be above this many ticks before the
+/// keep-alive interval is cut to beat it.
+const KICKOUT_DELAY_FLOOR: i32 = 200;
+
+/// How far ahead of the arena's kick-out, in ticks, a keep-alive is sent.
+const KICKOUT_MARGIN: i32 = 100;
+
+/// The keep-alive interval for an arena whose `Latency:S2CNoDataKickoutDelay`
+/// is `kickout_delay` ticks.
+///
+/// A client disconnects a player who is in a ship and has heard nothing for
+/// that long. ASSS sends a keep-alive every [`KEEP_ALIVE_INTERVAL`] ticks
+/// whatever it is, and the stock delay is also 500, so a player flying alone
+/// sat on the edge of being kicked. As Subspace Server .NET does
+/// (`Network.cs`, `GetKeepAliveThreshold`), a delay above 200 ticks makes the
+/// interval 100 ticks shorter than the delay, when that is sooner than the
+/// usual interval; a delay of 200 or less (or unset) leaves it alone.
+pub fn keep_alive_interval(kickout_delay: i32) -> u64 {
+    if kickout_delay > KICKOUT_DELAY_FLOOR {
+        u64::try_from(kickout_delay - KICKOUT_MARGIN)
+            .map_or(KEEP_ALIVE_INTERVAL, |t| t.min(KEEP_ALIVE_INTERVAL))
+    } else {
+        KEEP_ALIVE_INTERVAL
+    }
+}
+
+/// When a player is next due a keep-alive, and how often.
+struct KeepAlive {
+    every: u64,
+    next: u64,
+}
+
+impl Default for KeepAlive {
+    fn default() -> Self {
+        Self {
+            every: KEEP_ALIVE_INTERVAL,
+            next: 0,
+        }
+    }
+}
+
+/// Sends S2C `0x27` to every playing player whose interval is up.
+fn send_keep_alives(zone: &mut Zone) {
+    let now = zone.now().0;
+    let mut due = Vec::new();
+    for p in zone.players.iter_mut() {
+        if p.status != PlayerStatus::Playing {
+            continue;
+        }
+        let k = p.ext.get_or_default::<KeepAlive>();
+        if k.next == 0 {
+            // playing without having entered through an arena action
+            k.next = now + k.every;
+        } else if now >= k.next {
+            k.next = now + k.every;
+            due.push(p.id);
+        }
+    }
+    if !due.is_empty() {
+        zone.send_many(
+            due,
+            &[oss_proto::s2c::kind::KEEP_ALIVE],
+            SendFlags::UNRELIABLE,
+        );
+    }
+}
+
 /// Drops the connection and frees the player slot.
 fn free_player(zone: &mut Zone, pid: PlayerId) {
     zone.disconnect(pid, "left zone");
@@ -914,20 +989,25 @@ impl Module for CoreModule {
             process_player_states(z);
             true
         });
-        // ASSS SendKeepalive: every 5 s, S2C 0x27 to everyone playing, so idle
-        // clients keep seeing traffic
-        zone.set_timer(me, 500, 500, |z| {
-            let ids: Vec<PlayerId> = z
-                .players
-                .iter()
-                .filter(|p| p.status == PlayerStatus::Playing)
-                .map(|p| p.id)
-                .collect();
-            z.send_many(
-                ids,
-                &[oss_proto::s2c::kind::KEEP_ALIVE],
-                SendFlags::UNRELIABLE,
-            );
+        // ASSS SendKeepalive: S2C 0x27 to everyone playing, so idle clients
+        // keep seeing traffic; how often depends on the player's arena
+        zone.on::<PlayerAction>(me, Scope::Global, |z, ev| {
+            let every = match (ev.action, ev.arena) {
+                (Action::EnterArena, Some(a)) => keep_alive_interval(
+                    z.arenas
+                        .get(a)
+                        .map_or(0, |a| a.cfg.get_int("Latency", "S2CNoDataKickoutDelay", 0)),
+                ),
+                (Action::LeaveArena, _) => KEEP_ALIVE_INTERVAL,
+                _ => return,
+            };
+            let next = z.now().0 + every;
+            if let Some(p) = z.players.get_mut(ev.player) {
+                *p.ext.get_or_default::<KeepAlive>() = KeepAlive { every, next };
+            }
+        });
+        zone.set_timer(me, KEEP_ALIVE_CHECK, KEEP_ALIVE_CHECK, |z| {
+            send_keep_alives(z);
             true
         });
         Ok(())
@@ -937,6 +1017,21 @@ impl Module for CoreModule {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn keep_alives_beat_the_arena_kickout() {
+        // unset, or too short to plan around: ASSS's 500 ticks
+        assert_eq!(keep_alive_interval(0), 500);
+        assert_eq!(keep_alive_interval(-5), 500);
+        assert_eq!(keep_alive_interval(200), 500);
+        // the stock 500: 400, no longer on the edge
+        assert_eq!(keep_alive_interval(500), 400);
+        assert_eq!(keep_alive_interval(201), 101);
+        assert_eq!(keep_alive_interval(300), 200);
+        // a longer delay never stretches the interval past 500
+        assert_eq!(keep_alive_interval(600), 500);
+        assert_eq!(keep_alive_interval(6000), 500);
+    }
 
     #[test]
     fn names_are_cleaned_like_asss() {

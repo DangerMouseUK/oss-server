@@ -332,13 +332,7 @@ pub fn recycle_arena(zone: &mut Zone, arena: ArenaId) -> bool {
     for (p, standard) in here {
         if standard {
             // the "you are" packet makes the client leave the arena
-            let mut buf = Vec::with_capacity(4);
-            oss_proto::s2c::PlayerId {
-                pid: p.0 as i16,
-                arena: None,
-            }
-            .encode(&mut buf);
-            zone.send(p, &buf, SendFlags::RELIABLE);
+            send_who_am_i(zone, p, arena);
         }
         leave_arena(zone, p);
         if let Some(x) = zone.players.get_mut(p) {
@@ -555,6 +549,41 @@ fn enter_bytes(p: &Player) -> Vec<u8> {
     v
 }
 
+/// The "you are" packet, S2C `0x01`, for a player in (or leaving) `arena`.
+///
+/// ASSS sends the 3-byte form to everyone. A VIE client still gets that. A
+/// Continuum client also gets the arena's base name, or an empty name for a
+/// public arena, as Subspace Server .NET does (`ArenaManager.cs`,
+/// `SendWhoAmI`): without a name Continuum keeps the name it last asked for,
+/// which is wrong whenever the server put the player somewhere else, and it
+/// picks the arena's file folder from the name and only saves ships in a
+/// public arena, which the empty name signals.
+fn send_who_am_i(zone: &mut Zone, player: PlayerId, arena: ArenaId) {
+    let continuum = zone
+        .players
+        .get(player)
+        .is_some_and(|p| p.kind == ClientKind::Continuum);
+    let name = continuum.then(|| {
+        zone.arenas.get(arena).map_or_else(Vec::new, |a| {
+            if a.is_public() {
+                Vec::new()
+            } else {
+                // Continuum drops the packet outright if the name is longer
+                let mut b = to_latin1(&a.basename);
+                b.truncate(oss_proto::s2c::PlayerId::MAX_ARENA_NAME);
+                b
+            }
+        })
+    });
+    let mut buf = Vec::with_capacity(4 + name.as_ref().map_or(0, Vec::len));
+    oss_proto::s2c::PlayerId {
+        pid: player.0 as i16,
+        arena: name,
+    }
+    .encode(&mut buf);
+    zone.send(player, &buf, SendFlags::RELIABLE);
+}
+
 /// ASSS `SendArenaResponse`.
 pub fn send_arena_response(zone: &mut Zone, player: PlayerId) {
     let Some(p) = zone.players.get(player) else {
@@ -569,13 +598,7 @@ pub fn send_arena_response(zone: &mut Zone, player: PlayerId) {
     let me = enter_bytes(p);
     tracing::info!(target: "arenaman", pid = player.0, name = %p.name, arena = arena.0, "entering arena");
     if standard {
-        let mut buf = Vec::with_capacity(4);
-        oss_proto::s2c::PlayerId {
-            pid: player.0 as i16,
-            arena: None,
-        }
-        .encode(&mut buf);
-        zone.send(player, &buf, SendFlags::RELIABLE);
+        send_who_am_i(zone, player, arena);
         if let Some(cs) = zone.iface_in::<dyn SendSettings>(arena) {
             cs.send_settings(zone, player);
         }

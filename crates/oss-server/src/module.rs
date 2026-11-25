@@ -272,6 +272,7 @@ fn cleanup(zone: &mut Zone, owner: Owner) {
     zone.reg.remove_owner(owner);
     zone.timers.cancel_owner(owner);
     zone.commands.remove_owner(owner);
+    crate::transport::forget_mechanisms(zone, owner);
 }
 
 /// Unloads one module.

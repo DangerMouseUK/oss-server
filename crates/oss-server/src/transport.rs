@@ -48,14 +48,16 @@ use oss_net::{
 use crate::modules::core as core_mod;
 use crate::net::{DatagramIo, ListenSpec, Listeners, Transport};
 use crate::player::{ClientKind, PlayerId};
+use crate::registry::Owner;
 use crate::zone::Zone;
 
-/// Mechanisms registered by modules, added to the built-in ones when the
-/// transport is built.
+/// Mechanisms registered by modules, each with the module that registered it,
+/// added to the built-in ones when the transport is built.
 #[derive(Default)]
-struct ModuleMechanisms(Vec<Mechanism>);
+struct ModuleMechanisms(Vec<(Owner, Mechanism)>);
 
-/// Registers an extra security mechanism (call from a module's `load`).
+/// Registers an extra security mechanism for the module `me` (call from its
+/// `load`, passing the `me` it was given).
 ///
 /// It joins the built-in ones by its strength, wherever it was registered
 /// from: it is named in the start-up lines, and if it is automatic and has a
@@ -64,6 +66,10 @@ struct ModuleMechanisms(Vec<Mechanism>);
 /// supported but not served. Only modules loaded before the server starts
 /// count, because the transport reads the registrations once, when it is
 /// built.
+///
+/// The registration belongs to `me` and is dropped when that module unloads,
+/// or when its `load` fails, so the module can be loaded again. A transport
+/// already built keeps what it read.
 ///
 /// Refused, so the module's load can fail, if its identifier or display name
 /// is already taken, by a built-in mechanism or one registered earlier, or if
@@ -75,18 +81,41 @@ struct ModuleMechanisms(Vec<Mechanism>);
 /// default, is that refusal. A guessed key fails silently, with both ends
 /// talking on and neither able to tell the traffic from corruption, so a
 /// refusal an operator can see is always the better failure.
-pub fn register_mechanism(zone: &mut Zone, mechanism: Mechanism) -> Result<(), MechanismError> {
+pub fn register_mechanism(
+    zone: &mut Zone,
+    me: Owner,
+    mechanism: Mechanism,
+) -> Result<(), MechanismError> {
     // Checked now against everything it will be registered beside, so a clash
     // fails the module that caused it rather than the start of the zone. The
     // OpenSec stand-in has no key; only its identifier and name are compared.
     let mut trial = builtin_mechanisms(Mechanism::opensec(OpenSecSetup::new(os_entropy())))?;
     let registered = zone.res.get_or_default::<ModuleMechanisms>();
-    for m in &registered.0 {
+    for (_, m) in &registered.0 {
         trial.register(m.clone())?;
     }
     trial.register(mechanism.clone())?;
-    registered.0.push(mechanism);
+    registered.0.push((me, mechanism));
     Ok(())
+}
+
+/// Drops the mechanisms `owner` registered (the module manager calls this when
+/// a module unloads or its load fails).
+pub(crate) fn forget_mechanisms(zone: &mut Zone, owner: Owner) {
+    if let Some(registered) = zone.res.get_mut::<ModuleMechanisms>() {
+        registered.0.retain(|(o, _)| *o != owner);
+    }
+}
+
+/// Whether `Security:AllowUnencrypted` is set.
+fn allow_unencrypted(zone: &Zone) -> bool {
+    zone.cfg.global().get_int("Security", "AllowUnencrypted", 0) != 0
+}
+
+/// The two start-up lines, as the zone logs them: what this program can speak,
+/// and what the operator has switched on.
+fn startup_lines(registry: &MechanismRegistry, policy: &MechanismPolicy) -> [String; 2] {
+    [registry.supported_line(), policy.enabled_line(registry)]
 }
 
 /// The mechanisms built into this server. Its SubSpace cipher does not answer
@@ -106,14 +135,14 @@ fn builtin_mechanisms(opensec: Mechanism) -> Result<MechanismRegistry, Mechanism
 /// OpenSec is on.
 fn zone_mechanisms(
     zone: &mut Zone,
-    allow_unencrypted: bool,
 ) -> Result<(MechanismRegistry, MechanismPolicy), MechanismError> {
     let opensec_on = crate::opensec::enabled(zone);
+    let allow_unencrypted = allow_unencrypted(zone);
     let mut registry = builtin_mechanisms(crate::opensec::mechanism(zone))?;
-    let from_modules = zone
+    let from_modules: Vec<Mechanism> = zone
         .res
         .get::<ModuleMechanisms>()
-        .map(|m| m.0.clone())
+        .map(|m| m.0.iter().map(|(_, m)| m.clone()).collect())
         .unwrap_or_default();
     for m in from_modules {
         registry.register(m)?;
@@ -181,11 +210,11 @@ impl SubspaceTransport {
         if let Ok(n) = usize::try_from(g.get_int("Net", "MaxPlayers", 1024)) {
             server.max_connections = n.clamp(1, crate::player::MAX_PLAYERS);
         }
-        let allow_unencrypted = g.get_int("Security", "AllowUnencrypted", 0) != 0;
-        match zone_mechanisms(zone, allow_unencrypted) {
+        match zone_mechanisms(zone) {
             Ok((registry, policy)) => {
-                tracing::info!(target: "net", "{}", registry.supported_line());
-                tracing::info!(target: "net", "{}", policy.enabled_line(&registry));
+                for line in startup_lines(&registry, &policy) {
+                    tracing::info!(target: "net", "{line}");
+                }
                 // No encryption at all: off unless an operator turned it on,
                 // and last in the order so it is offered only the requests
                 // every encrypting acceptor declined -- which, after VIE, is a
@@ -194,7 +223,7 @@ impl SubspaceTransport {
                 // did not ask for an unencrypted session refuses this answer,
                 // so both ends have to have been set. See `oss-core`
                 // docs/protocol/encryption.md.
-                if allow_unencrypted {
+                if allow_unencrypted(zone) {
                     tracing::warn!(
                         target: "net",
                         "Security:AllowUnencrypted is set: this zone accepts connections with no \
@@ -498,8 +527,6 @@ mod tests {
     // mechanism, and the order the acceptors are asked in.
     // -----------------------------------------------------------------------
 
-    use std::sync::{Arc, Mutex};
-
     use oss_net::mechanism::{Era, Selection};
     use oss_net::opensec::{OpenSecAcceptor, OpenSecClientHandshake, ServerKey};
     use oss_net::{Accept, Acceptor, Cipher, Handshake, NullAcceptor};
@@ -558,8 +585,8 @@ mod tests {
     struct DummyModule;
 
     impl Module for DummyModule {
-        fn load(&self, zone: &mut Zone, _me: Owner) -> Result<(), ModuleError> {
-            register_mechanism(zone, dummy()).map_err(|e| ModuleError::Failed {
+        fn load(&self, zone: &mut Zone, me: Owner) -> Result<(), ModuleError> {
+            register_mechanism(zone, me, dummy()).map_err(|e| ModuleError::Failed {
                 module: "dummy".into(),
                 reason: e.to_string(),
             })
@@ -585,42 +612,11 @@ mod tests {
             .expect("an OpenSec client opens with a hello")
     }
 
-    /// Captures what the zone logs while its transport is built, and returns
-    /// the lines about mechanisms, exactly as written.
-    fn startup_lines(zone: &mut Zone) -> Vec<String> {
-        #[derive(Clone, Default)]
-        struct Buf(Arc<Mutex<Vec<u8>>>);
-        impl std::io::Write for Buf {
-            fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
-                self.0.lock().expect("buffer").extend_from_slice(b);
-                Ok(b.len())
-            }
-            fn flush(&mut self) -> std::io::Result<()> {
-                Ok(())
-            }
-        }
-        impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Buf {
-            type Writer = Buf;
-            fn make_writer(&'a self) -> Buf {
-                self.clone()
-            }
-        }
-        let buf = Buf::default();
-        let subscriber = tracing_subscriber::fmt()
-            .with_writer(buf.clone())
-            .with_ansi(false)
-            .without_time()
-            .with_level(false)
-            .with_target(false)
-            .finish();
-        tracing::subscriber::with_default(subscriber, || {
-            SubspaceTransport::new(zone);
-        });
-        let text = String::from_utf8(buf.0.lock().expect("buffer").clone()).expect("utf-8");
-        text.lines()
-            .filter(|l| l.starts_with("Mechanisms "))
-            .map(str::to_owned)
-            .collect()
+    /// The two start-up lines this zone logs, from the same function the
+    /// transport logs them from.
+    fn lines(zone: &mut Zone) -> [String; 2] {
+        let (registry, policy) = zone_mechanisms(zone).expect("mechanisms");
+        startup_lines(&registry, &policy)
     }
 
     /// The two start-up lines of an unset zone, word for word.
@@ -628,7 +624,7 @@ mod tests {
     fn the_two_startup_lines_are_exact() {
         let mut z = zone("");
         assert_eq!(
-            startup_lines(&mut z),
+            lines(&mut z),
             [
                 "Mechanisms supported: None, Subspace, OpenSecurity",
                 "Mechanisms enabled on this zone: Subspace, OpenSecurity",
@@ -657,7 +653,7 @@ mod tests {
             ),
         ] {
             let mut z = zone(conf);
-            assert_eq!(startup_lines(&mut z), [supported, enabled], "{conf:?}");
+            assert_eq!(lines(&mut z), [supported, enabled], "{conf:?}");
         }
     }
 
@@ -691,7 +687,7 @@ mod tests {
     fn a_mid_ranked_mechanism_registered_once_is_served() {
         let mut z = zone_with_dummy("");
         assert_eq!(
-            startup_lines(&mut z),
+            lines(&mut z),
             [
                 "Mechanisms supported: None, Subspace, Dummy, OpenSecurity",
                 "Mechanisms enabled on this zone: Subspace, Dummy, OpenSecurity",
@@ -703,7 +699,7 @@ mod tests {
 
         let mut z = zone_with_dummy("[ OpenSec ]\nEnabled = 0\n");
         assert_eq!(
-            startup_lines(&mut z)[1],
+            lines(&mut z)[1],
             "Mechanisms enabled on this zone: Subspace, Dummy"
         );
         let mut z = zone_with_dummy("[ OpenSec ]\nEnabled = 0\n");
@@ -717,13 +713,13 @@ mod tests {
     #[test]
     fn a_clashing_mechanism_is_refused_when_registered() {
         let mut z = zone("");
-        assert!(register_mechanism(&mut z, dummy()).is_ok());
+        assert!(register_mechanism(&mut z, Owner(1), dummy()).is_ok());
         assert!(matches!(
-            register_mechanism(&mut z, dummy()),
+            register_mechanism(&mut z, Owner(2), dummy()),
             Err(MechanismError::DuplicateId(_))
         ));
         assert!(matches!(
-            register_mechanism(&mut z, Mechanism::vie()),
+            register_mechanism(&mut z, Owner(2), Mechanism::vie()),
             Err(MechanismError::DuplicateId(_))
         ));
         let named_like_opensec = Mechanism::new(
@@ -735,12 +731,30 @@ mod tests {
         )
         .expect("a valid description");
         assert!(matches!(
-            register_mechanism(&mut z, named_like_opensec),
+            register_mechanism(&mut z, Owner(2), named_like_opensec),
             Err(MechanismError::DuplicateDisplayName(_))
         ));
         // The one that was accepted is the only one the zone has.
         let mut t = SubspaceTransport::new(&mut z);
         assert_eq!(t.offer(&DUMMY_HELLO), Some("dummy"));
+    }
+
+    /// A module's mechanism leaves with the module: unloaded, it is gone from
+    /// the lines; loaded again, it registers again rather than clashing with
+    /// itself.
+    #[test]
+    fn a_module_can_be_unloaded_and_loaded_again() {
+        let mut z = zone_with_dummy("");
+        crate::module::unload(&mut z, "dummy").expect("unload");
+        assert_eq!(
+            lines(&mut z)[0],
+            "Mechanisms supported: None, Subspace, OpenSecurity"
+        );
+        crate::module::load(&mut z, "dummy").expect("load again");
+        assert_eq!(
+            lines(&mut z)[0],
+            "Mechanisms supported: None, Subspace, Dummy, OpenSecurity"
+        );
     }
 
     /// Which acceptor takes a datagram: the first in `chain` that accepts it,
@@ -776,7 +790,7 @@ mod tests {
     fn the_asking_order_cannot_change_which_acceptor_takes_a_datagram() {
         let conf = "[ Security ]\nAllowUnencrypted = 1\n";
         let mut z = zone_with_dummy(conf);
-        let (registry, policy) = zone_mechanisms(&mut z, true).expect("mechanisms");
+        let (registry, policy) = zone_mechanisms(&mut z).expect("mechanisms");
         let order: Vec<&str> = policy.order().iter().map(MechanismId::as_str).collect();
         assert_eq!(order, ["opensec", "dummy@example.org", "vie"]);
         let deliberate: Vec<&str> = policy

@@ -160,13 +160,14 @@ built-in ones. `[OpenSec] Enabled = 0` leaves OpenSec out;
 
 The Continuum encryption and security checks are not part of this repository.
 They may be supplied by a private module, loaded like any other. In `load`, a
-module calls `transport::register_mechanism(zone, mechanism)` with an
+module calls `transport::register_mechanism(zone, me, mechanism)` with an
 `oss_net::Mechanism` whose server half is an `oss_net::Acceptor` that
 recognises the client's first datagram and returns its `oss_net::Cipher`. The
 mechanism takes its place by its strength, in the acceptor order and in both
 start-up lines; one that may only be asked for by name is listed but not
 served. Only modules loaded before the server starts count, and a name already
-taken is refused, which fails the module's load. The security checks are a
+taken is refused, which fails the module's load. The registration belongs to
+the module and is dropped when it unloads, so it can be loaded again. The security checks are a
 module handling the security packets (`clientset::ClientSettings::checksum`
 gives the settings checksum). No code here needs to change for either.
 

@@ -281,7 +281,7 @@ What you will be able to tell about an image you are running:
 | `1.2.3`, `1.2`, `latest` | the version, the line that moves with patches, and the newest release. Tags are for people — they can be re-pointed. |
 | `sha-<commit>` | the exact `oss-server` commit the image was built from. |
 | `@sha256:...` | the digest. This is the one to pin in a deployment; it cannot be re-pointed at anything else. |
-| `docker inspect` labels | the standard OCI set — source repository, revision, version, created time, `GPL-2.0-or-later`, and a link to this page — plus `net.opensubspace.oss-core.revision`, which names the oss-core commit compiled into it. The source label alone cannot say that, because the two repositories are separate. |
+| `docker inspect` labels | the standard OCI set — source repository, revision, version, created time, `GPL-2.0-or-later`, a link to this page, and the project's website (`https://osubspace.com`) — plus `com.osubspace.oss-core.revision`, which names the oss-core commit compiled into it. The source label alone cannot say that, because the two repositories are separate. |
 
 Each published image also carries a signed build-provenance attestation, so
 you can check that it came from this repository's workflow and not from

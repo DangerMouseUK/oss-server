@@ -670,7 +670,8 @@ jobs:
           labels: |
             org.opencontainers.image.licenses=GPL-2.0-or-later
             org.opencontainers.image.documentation=https://github.com/${{ github.repository }}/blob/main/docs/deployment.md
-            net.opensubspace.oss-core.revision=${{ steps.names.outputs.core }}
+            org.opencontainers.image.url=https://osubspace.com
+            com.osubspace.oss-core.revision=${{ steps.names.outputs.core }}
 
       - id: build
         uses: docker/build-push-action@v6

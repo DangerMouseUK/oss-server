@@ -23,7 +23,10 @@
 //! ([`Zone::set_text_player`]) and translated back to lines here, so other
 //! modules need no chat-protocol code. One incoming line is handled every
 //! `Net:ChatMessageDelay` ticks (default 20). It listens on `Net:ChatListen`
-//! (`port` or `ip:port`; default: the game port) once the server starts.
+//! (`port` or `ip:port`) once the server starts. Without it, chat takes the
+//! game socket's address and port, so a game port bound to `127.0.0.1` gives
+//! a chat port on `127.0.0.1` too; a bare `port` keeps the game socket's
+//! address. Only an `ip:port` setting puts chat on a different address.
 
 use std::collections::HashMap;
 use std::io::{ErrorKind, Read, Write};
@@ -211,16 +214,35 @@ pub fn local_addr(zone: &Zone) -> Option<SocketAddr> {
 }
 
 fn listen_addr(zone: &Zone) -> Option<SocketAddr> {
-    let g = zone.cfg.global();
-    // the game socket's port (as ASSS uses its first listen port)
-    let game_port = crate::net::Listeners::of(zone)
-        .first()
-        .map_or(5000, |l| l.addr.port());
-    match g.get("Net", "ChatListen").map(str::trim) {
-        None | Some("") => Some(SocketAddr::from(([0, 0, 0, 0], game_port))),
+    // the first game socket (as ASSS uses its first listen port): once the
+    // server runs this is what was actually bound, `--bind` included
+    let game = crate::net::Listeners::of(zone).first().map(|l| l.addr);
+    chat_listen_addr(game, zone.cfg.global().get("Net", "ChatListen"))
+}
+
+/// Where chatnet listens, given the first game socket's address and the
+/// `Net:ChatListen` setting.
+///
+/// The chat port follows the game socket's *address* as well as its port,
+/// so a zone whose game port is local-only gets a local-only chat port.
+/// ASSS binds every interface here unless `ChatListen` names an address;
+/// we don't, because that opens a TCP port to the network that the
+/// operator never asked for.
+///
+/// - unset or empty: the game socket's address and port;
+/// - `port`: that port, on the game socket's address;
+/// - `ip:port`: exactly that, so `0.0.0.0:5000` opens chat to the network
+///   on purpose.
+///
+/// With no game socket at all the address is loopback and the port 5000.
+/// `None` means the setting could not be read.
+fn chat_listen_addr(game: Option<SocketAddr>, spec: Option<&str>) -> Option<SocketAddr> {
+    let game = game.unwrap_or_else(|| SocketAddr::from(([127, 0, 0, 1], 5000)));
+    match spec.map(str::trim) {
+        None | Some("") => Some(game),
         Some(spec) => match spec.split_once(':') {
             Some((ip, port)) => Some(SocketAddr::new(ip.parse().ok()?, port.trim().parse().ok()?)),
-            None => Some(SocketAddr::from(([0, 0, 0, 0], spec.parse().ok()?))),
+            None => Some(SocketAddr::new(game.ip(), spec.parse().ok()?)),
         },
     }
 }
@@ -775,5 +797,46 @@ mod tests {
         assert_eq!(msg_type(chat_type::ENEMY_FREQ), Some("FREQ"));
         assert_eq!(msg_type(chat_type::CHANNEL), Some("CHAT"));
         assert_eq!(msg_type(200), None);
+    }
+
+    fn addr(s: &str) -> SocketAddr {
+        s.parse().expect("socket address")
+    }
+
+    #[test]
+    fn chat_follows_the_game_socket_unless_told_otherwise() {
+        let local = Some(addr("127.0.0.1:5300"));
+        let open = Some(addr("0.0.0.0:5000"));
+        // unset or empty: the game socket's address and port
+        assert_eq!(chat_listen_addr(local, None), local);
+        assert_eq!(chat_listen_addr(local, Some("  ")), local);
+        assert_eq!(chat_listen_addr(open, None), open);
+        // a bare port keeps the game socket's address
+        assert_eq!(
+            chat_listen_addr(local, Some("5400")),
+            Some(addr("127.0.0.1:5400"))
+        );
+        assert_eq!(
+            chat_listen_addr(open, Some("5400")),
+            Some(addr("0.0.0.0:5400"))
+        );
+        // an address is honoured as written, in either direction
+        assert_eq!(
+            chat_listen_addr(local, Some("0.0.0.0:5300")),
+            Some(addr("0.0.0.0:5300"))
+        );
+        assert_eq!(
+            chat_listen_addr(open, Some("127.0.0.1:5000")),
+            Some(addr("127.0.0.1:5000"))
+        );
+        // no game socket: loopback, never every interface
+        assert_eq!(chat_listen_addr(None, None), Some(addr("127.0.0.1:5000")));
+        assert_eq!(
+            chat_listen_addr(None, Some("5400")),
+            Some(addr("127.0.0.1:5400"))
+        );
+        // unreadable settings turn chat off rather than guessing
+        assert_eq!(chat_listen_addr(local, Some("nonsense")), None);
+        assert_eq!(chat_listen_addr(local, Some("localhost:5000")), None);
     }
 }

@@ -22,7 +22,7 @@ in it:
 | | |
 |---|---|
 | **Configuration files** | None at all with no `--zone` — the bundled copies are read from inside the binary. With `--zone <dir>`, **`conf/global.conf` is the one required file**: without it the server prints `config file not found: arena None, name "global.conf"` and exits, having bound nothing (measured against an empty directory). Everything else is optional and falls back to a built-in default: `conf/modules.conf`, `conf/passwd.conf`, `conf/staff.conf`, `arenas/<name>/arena.conf` and the `#include`s they pull in, read the way ASSS reads them. |
-| **Ports** | UDP **5000** is the game port. UDP **5001** is the ping/population port, and it is always the game port **+ 1** — it is not separately configurable. TCP **5000** is the text chat protocol (`chatnet`), on the *same number* as the game port. All three move together if you change `[Listen] Port` in `conf/global.conf` or pass `--bind`. |
+| **Ports** | UDP **5000** is the game port. UDP **5001** is the ping/population port, and it is always the game port **+ 1** — it is not separately configurable. TCP **5000** is the text chat protocol (`chatnet`), on the *same number* and the *same address* as the game port. All three move together if you change `[Listen] Port` or `BindAddress` in `conf/global.conf` or pass `--bind`. The bundled zone sets no address, so out of the box all three are on every interface. |
 | **Writable directories** | Only when running with `--zone <dir>`. The server creates `<zone>/data` for its SQLite databases (`oss.db` for scores and persisted state, `bans.db`) and for `opensec.key`, the zone's long-term server identity. `<zone>/tmp` appears if a staff member uploads a file. `conf/passwd.conf` is appended to when a player sets a password with `?passwd`, so `conf/` wants to be writable too. Running with the bundled zone writes nothing at all — the databases are held in memory and the key is new on every start. |
 | **Map and settings files** | Not needed to start. An operator can supply their own later by pointing `--zone` at an ASSS zone directory, or by starting from `oss-server --init-zone <dir>`, which writes the bundled zone out as an editable copy. |
 
@@ -126,12 +126,26 @@ goes to UDP 5001. And the TCP mapping on 5000 is a different mapping from the
 UDP one — Docker needs both spelled out.
 
 Publish all three unless you do not want the chat protocol. To turn that one
-off, drop `chatnet` from `conf/modules.conf`; to keep it but reachable only
-locally, set `Net:ChatListen = 127.0.0.1:5000` in `conf/global.conf`. Note
-that `--bind 127.0.0.1:5000` does **not** do that on its own: the chat
-listener takes only the *port* from the game socket and binds `0.0.0.0`
-regardless, so a server you believed was loopback-only still has a TCP port
-open on every interface.
+off, drop `chatnet` from `conf/modules.conf`.
+
+The chat listener takes its **address as well as its port** from the first
+game socket, so it is never more open than the game. `--bind 127.0.0.1:5000`,
+or `BindAddress = 127.0.0.1` under `[Listen]`, makes the game *and* chat
+loopback-only. `Net:ChatListen` in `conf/global.conf` changes that:
+
+| `Net:ChatListen` | chat listens on |
+|---|---|
+| not set (the bundled zone) | the game socket's address and port |
+| `5300` (a port alone) | that port, on the game socket's address |
+| `127.0.0.1:5000` | loopback only, whatever the game is on |
+| `0.0.0.0:5000` | every interface, whatever the game is on |
+
+So to keep the game local but let chat clients in from the network — a chat
+bot on another machine, say — set `ChatListen = 0.0.0.0:5000` on purpose.
+This differs from ASSS, which binds every interface unless `ChatListen`
+names an address. Before this change oss-server did the same, so a server
+started with `--bind 127.0.0.1:...` still had its chat port open on every
+interface.
 
 ## `install.sh`
 

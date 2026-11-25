@@ -18,7 +18,9 @@ struct Args {
     /// Write the bundled default zone to this directory and exit.
     #[arg(long, value_name = "DIR", conflicts_with = "zone")]
     init_zone: Option<PathBuf>,
-    /// Listen address for the game port (ping uses port + 1).
+    /// Listen address for the game port (ping uses port + 1). The chat
+    /// protocol's TCP port follows it, address and port, unless
+    /// Net:ChatListen in global.conf says otherwise.
     #[arg(long)]
     bind: Option<SocketAddr>,
     /// Shared password that lets any name log in. Without it, and without

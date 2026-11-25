@@ -1,4 +1,4 @@
-//! OpenSec for the server: the long-term key and the acceptor setup.
+//! OpenSec for the server: the long-term key and the mechanism built from it.
 //!
 //! OpenSec (oss-core `docs/protocol/opensec.md`) gives connections
 //! ChaCha20-Poly1305 encryption with forward secrecy, and lets clients
@@ -21,7 +21,8 @@
 
 use std::path::PathBuf;
 
-use oss_net::opensec::{Entropy, OpenSecAcceptor, ServerKey, os_entropy};
+use oss_net::mechanism::{Mechanism, OpenSecSetup};
+use oss_net::opensec::{Entropy, ServerKey, os_entropy};
 
 use crate::zone::Zone;
 
@@ -115,22 +116,35 @@ fn write_private(path: &std::path::Path, text: &str) -> std::io::Result<()> {
     f.write_all(text.as_bytes())
 }
 
-/// The OpenSec acceptor for this zone, or `None` if `[OpenSec] Enabled` is 0.
-/// Also records [`ServerPublicKey`].
-pub fn acceptor(zone: &mut Zone) -> Option<OpenSecAcceptor> {
-    if zone.cfg.global().get_int("OpenSec", "Enabled", 1) == 0 {
-        return None;
-    }
+/// Whether `[OpenSec] Enabled` is on (it is unless set to 0).
+pub fn enabled(zone: &Zone) -> bool {
+    zone.cfg.global().get_int("OpenSec", "Enabled", 1) != 0
+}
+
+/// The OpenSec mechanism for this zone, to register with the zone's others.
+///
+/// With `[OpenSec] Enabled` on, this loads the server key (creating and saving
+/// one if there is none), logs its public half, records [`ServerPublicKey`],
+/// and takes client identity keys unless `ClientIdentities` is 0.
+///
+/// With it off, the mechanism is still returned, because OpenSec is built into
+/// this program and the supported line says so, but it has no server key:
+/// nothing is read or written, no [`ServerPublicKey`] is recorded, and the
+/// zone's policy leaves the mechanism out, so it is never served.
+pub fn mechanism(zone: &mut Zone) -> Mechanism {
     let entropy = os_entropy();
+    if !enabled(zone) {
+        return Mechanism::opensec(OpenSecSetup::new(entropy));
+    }
     let key = load_or_create(zone, &entropy);
     let public = ServerPublicKey(key.public());
     tracing::info!(target: "opensec", public_key = %public.hex(), "OpenSec enabled");
     zone.res.insert(public);
-    let acceptor = OpenSecAcceptor::new(Some(key), entropy);
+    let setup = OpenSecSetup::new(entropy).server_key(key);
     if zone.cfg.global().get_int("OpenSec", "ClientIdentities", 1) != 0 {
-        Some(acceptor.with_client_identities())
+        Mechanism::opensec(setup.client_identities())
     } else {
-        Some(acceptor)
+        Mechanism::opensec(setup)
     }
 }
 

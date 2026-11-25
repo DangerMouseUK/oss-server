@@ -198,7 +198,7 @@ public and this repository does not carry it, which is deliberate rather than an
 The consequence is plain: a build of these repositories
 cannot *join* a zone that requires Continuum encryption, and a Continuum client can only play
 *here* if the cipher module is supplied separately. What this repository provides is the
-hook — register an `oss_net::Acceptor` and `oss_net::Cipher` from your own module and nothing
+hook — register an `oss_net::Mechanism`, with its `oss_net::Acceptor` and `oss_net::Cipher`, from your own module and nothing
 else needs to change. VIE encryption (the one that is public, and in ASSS) and
 [OpenSec](https://github.com/DangerMouseUK/oss-core/blob/main/docs/protocol/opensec.md) both
 work out of the box.

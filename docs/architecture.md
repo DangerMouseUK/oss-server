@@ -147,14 +147,28 @@ channel, clustering, big/sized transfers, VIE encryption). Tests use
 `net::Loopback`, which skips the network entirely: inject packets with
 `zone.handle_packet` and read what was sent from the loopback.
 
+Each security mechanism the zone can speak is described once, as an
+`oss_net::Mechanism` in an `oss_net::MechanismRegistry`: built in are `none`,
+`vie` (whose acceptor here does not answer Continuum clients) and `opensec`.
+Everything else is read from that registry: the start-up lines
+`Mechanisms supported: …` (what this program can speak) and
+`Mechanisms enabled on this zone: …` (what the operator switched on), and the
+acceptors a connection request is offered to. Those are asked strongest first,
+and each takes only its own opening, so the order decides nothing between the
+built-in ones. `[OpenSec] Enabled = 0` leaves OpenSec out;
+`Security:AllowUnencrypted` adds `none`, asked last.
+
 The Continuum encryption and security checks are not part of this repository.
-A private build registers them as ordinary modules. In `load`, a module calls
-`transport::register_acceptor(zone, Arc::new(MyAcceptor))` with an
-`oss_net::Acceptor` that recognises the client's first datagram (`00 11` for
-Continuum) and returns its `oss_net::Cipher`; registered acceptors are asked
-before the built-in VIE one. The security checks are a module handling the
-security packets (`clientset::ClientSettings::checksum` gives the settings
-checksum). No code here needs to change for either.
+They may be supplied by a private module, loaded like any other. In `load`, a
+module calls `transport::register_mechanism(zone, mechanism)` with an
+`oss_net::Mechanism` whose server half is an `oss_net::Acceptor` that
+recognises the client's first datagram and returns its `oss_net::Cipher`. The
+mechanism takes its place by its strength, in the acceptor order and in both
+start-up lines; one that may only be asked for by name is listed but not
+served. Only modules loaded before the server starts count, and a name already
+taken is refused, which fails the module's load. The security checks are a
+module handling the security packets (`clientset::ClientSettings::checksum`
+gives the settings checksum). No code here needs to change for either.
 
 Players on a `00 01` connection are VIE clients and on `00 11` Continuum
 clients, as in ASSS; this decides the expected login packet length.

@@ -6,7 +6,7 @@ take and a team to take them from. When the publisher walked away, the players k
 running themselves — and they still are, on a client called Continuum and on *zones*, the
 servers that host the arenas.
 
-**`oss-server` is a zone.** It is a from-scratch Rust implementation of a SubSpace/Continuum
+**`oss-server` is the Open SubSpace zone server.** It is a from-scratch Rust implementation of a SubSpace/Continuum
 server that follows ASSS — the server most zones have run for twenty years — closely enough
 to take an existing zone directory and run it unchanged: the same `.conf` files, the same
 `.lvl` maps, the same module names, the same `?commands`. A player who connects should not
@@ -241,6 +241,8 @@ place. The doc gate is not optional and the other three do not stand in for it.
 
 ## Licence
 
+Copyright (c) 2026 The Open SubSpace contributors.
+
 GPL-2.0-or-later (see [`LICENSE`](LICENSE)), so that this server and the game it serves stay
 open, and so does anything built from them. The split across the three repositories is
 deliberate: [oss-core](https://github.com/DangerMouseUK/oss-core) is MIT so that anyone's
@@ -260,5 +262,5 @@ otherwise; `zone/README.md` records every change and which files are this projec
 recorded from ASSS 1.4.4 modules compiled unmodified, and each one's header names the ASSS
 source file it came from.
 
-SubSpace and Continuum are the names of the original games; this project is an independent,
+SubSpace and Continuum are the names of the original games; Open SubSpace is an independent,
 compatible implementation and is not affiliated with their authors.

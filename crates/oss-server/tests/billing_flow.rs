@@ -872,8 +872,9 @@ fn a_23_character_name_sends_and_receives_remote_private_messages() {
 /// through a zone, because the zone's cleaning takes the others out first.
 ///
 /// That cleaning has a cost this test pins down: an existing account whose
-/// name has a colon (or a control character, a leading space or two spaces
-/// in a row) can no longer be reached through our zone. Its owner types the
+/// name has a colon (or a control character, a byte from 127 up, or two
+/// spaces in a row; the biller trims a name's ends, so no account starts
+/// with a space) can no longer be reached through our zone. Its owner types the
 /// name, the biller is sent it cleaned, and is asked whether to create that
 /// cleaned name as a new account.
 #[test]

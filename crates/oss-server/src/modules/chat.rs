@@ -406,7 +406,9 @@ fn route_chat(zone: &mut Zone, p: PlayerId, pkt: &[u8]) {
                 tracing::warn!(target: "chat", pid = p.0, "malformed remote private message");
                 return;
             };
-            let dest: String = dest.chars().take(20).collect();
+            // ASSS cuts the target to 20, its longest stored name; a name
+            // here can be as long as core's MAX_NAME
+            let dest: String = dest.chars().take(super::core::MAX_NAME).collect();
             let d = zone
                 .players
                 .find_by_name(&dest)

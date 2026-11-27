@@ -129,8 +129,8 @@ pub struct Player {
     pub status: PlayerStatus,
     /// Client type.
     pub kind: ClientKind,
-    /// The player's name (Latin-1 decoded). This is the name of record:
-    /// scores, bans, groups and every staff command use it.
+    /// The player's name (Latin-1 decoded), up to 23 characters. This is the
+    /// name of record: scores, bans, groups and every staff command use it.
     pub name: String,
     /// The name other clients are shown, which is normally [`Player::name`]
     /// (ASSS `AuthData::sendname`, copied into the player-data packet).

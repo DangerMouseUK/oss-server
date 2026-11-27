@@ -529,6 +529,8 @@ fn cache_done(zone: &mut Zone, p: PlayerId, result: CacheResult) {
     let ad = match result {
         CacheResult::Match => {
             let mut ad = AuthData::ok(&login.name);
+            // shown as 19, as the biller's own answer is below
+            ad.send_name = login.name.chars().take(19).collect();
             ad.authenticated = true;
             ad
         }

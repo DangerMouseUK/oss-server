@@ -136,6 +136,10 @@ pub struct LoginRequest {
     pub packet: Login,
 }
 
+/// The longest name kept for a player, in characters: the longest account
+/// the biller holds, and what SubSpace 1.34's name box takes.
+pub const MAX_NAME: usize = 23;
+
 /// An authentication result (ASSS `AuthData`).
 #[derive(Debug, Clone, Default)]
 pub struct AuthData {
@@ -145,7 +149,7 @@ pub struct AuthData {
     pub demo_data: bool,
     /// Password verified (enables staff groups by name).
     pub authenticated: bool,
-    /// Name to assign.
+    /// Name to assign (at most [`MAX_NAME`] characters are kept).
     pub name: String,
     /// Name shown to clients (at most 20 bytes).
     pub send_name: String,
@@ -342,8 +346,15 @@ pub fn auth_done(zone: &mut Zone, player: PlayerId, auth: AuthData) {
             .find_by_name(&name)
             .map(|p| p.id)
             .filter(|&o| o != player);
+        // ASSS keeps 20 characters of the name. Ours keeps 23, the longest
+        // account the biller holds, so that a player is known by their whole
+        // name: the biller routes a remote private message by the whole name,
+        // and the duplicate-login check above looks the whole name up. ASSS
+        // never meets a name over 19, because it cuts every login to 19
+        // first. The name clients are shown stays within the player-data
+        // packet's 20 bytes.
         if let Some(p) = zone.players.get_mut(player) {
-            p.name = truncate(&name, 20);
+            p.name = truncate(&name, MAX_NAME);
             p.send_name = truncate(&send_name, 20);
             p.squad = truncate(&squad, 20);
         }

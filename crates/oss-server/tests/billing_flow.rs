@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use oss_proto::Packet;
-use oss_proto::billing::{BillerToServer, ServerToBiller};
+use oss_proto::billing::{BillerLogin, BillerToServer, PlayerScore, ServerToBiller, login_result};
 use oss_proto::c2s::{self, GoArena, Login};
 use oss_proto::common::chat_type;
 use oss_proto::s2c::{self, ChatBody, LoginResponse, S2CChat};
@@ -669,6 +669,201 @@ fn the_biller_is_sent_the_cleaned_name_whole() {
             .collect();
         assert_eq!(names, vec![want.as_bytes().to_vec()], "typed {typed:?}");
     }
+}
+
+/// The scripted biller's answer to the login with connection id `cid`:
+/// accepted, as the account `name`.
+fn login_reply(cid: u32, name: &str) -> Vec<u8> {
+    BillerToServer::UserLogin(BillerLogin {
+        result: login_result::OK,
+        connection_id: cid,
+        name: FixedStr::new(name.as_bytes()),
+        user_id: 77,
+        score: Some(PlayerScore::default()),
+        ..BillerLogin::default()
+    })
+    .to_bytes()
+}
+
+/// A scripted biller with its link up, and `name` logged in through it.
+fn scripted_with(name: &str) -> (H, Arc<Mutex<Script>>, PlayerId) {
+    let (mut h, s) = scripted();
+    h.tick(10);
+    push(&s, LinkEvent::Connected);
+    h.tick(1);
+    push(&s, LinkEvent::Packet(vec![0x33, b'i', b'd']));
+    h.tick(1);
+    sent(&s);
+    let p = login_as(&mut h, &s, name);
+    (h, s, p)
+}
+
+/// Logs `name` in through the scripted biller, which accepts it as is.
+fn login_as(h: &mut H, s: &Arc<Mutex<Script>>, name: &str) -> PlayerId {
+    let p = h.start_login(name, "pw", false);
+    h.tick(1);
+    push(s, LinkEvent::Packet(login_reply(login_cid(s), name)));
+    h.tick(10);
+    p
+}
+
+/// The zone's own duplicate-login check finds the earlier copy of a
+/// 23-character player and puts it out. Our biller drops an account's older
+/// session itself, which would hide the zone's check, so this runs against
+/// a scripted biller that does not. The arena is still shown 19 characters
+/// of the name.
+#[test]
+fn a_second_login_with_a_23_character_name_replaces_the_first() {
+    let (mut h, s, first) = scripted_with(LONG);
+    assert_eq!(h.login_code(first), Some(0));
+    {
+        let pl = h.zone.players.get(first).expect("first");
+        assert_eq!(pl.name, LONG);
+        let shown = oss_server::modules::arenaman::player_data(pl).name;
+        assert_eq!(shown.as_bytes(), &LONG.as_bytes()[..19]);
+    }
+    let second = login_as(&mut h, &s, LONG);
+    for _ in 0..500 {
+        if h.zone.players.get(first).is_none() {
+            break;
+        }
+        h.tick(1);
+    }
+    assert!(
+        h.zone.players.get(first).is_none(),
+        "the first copy is put out"
+    );
+    assert_eq!(h.login_code(second), Some(0));
+    assert_eq!(
+        h.zone.players.get(second).map(|p| p.name.as_str()),
+        Some(LONG)
+    );
+}
+
+/// A remote private message to a 23-character player in the same zone is
+/// delivered by the zone, not handed to the biller: the typed target is cut
+/// no shorter than the name the zone keeps.
+#[test]
+fn a_23_character_name_is_found_in_the_same_zone() {
+    let (mut h, s, long) = scripted_with(LONG);
+    let other = login_as(&mut h, &s, "Other");
+    h.enter(long);
+    h.enter(other);
+    sent(&s);
+    h.chat(
+        other,
+        chat_type::REMOTE_PRIVATE,
+        0,
+        &format!(":{LONG}:psst"),
+    );
+    h.tick(5);
+    assert!(find_text(&h.take(long), "(Other)>psst"));
+    let to_biller = sent(&s)
+        .iter()
+        .filter(|d| {
+            matches!(
+                ServerToBiller::decode(d),
+                Ok(ServerToBiller::UserRemotePrivate { .. })
+            )
+        })
+        .count();
+    assert_eq!(to_biller, 0, "delivered here, not by way of the biller");
+}
+
+/// The zone and the biller are two zones and a biller apart here, so every
+/// step of a remote private message to and from a 23-character player is
+/// exercised: the biller routes on the whole name, so the zone has to know
+/// the player by the whole name too, in both directions.
+#[test]
+fn a_23_character_name_sends_and_receives_remote_private_messages() {
+    use oss_biller::{Biller, BillerConfig, BillerHandle, Registration, Store};
+    let biller = BillerHandle::spawn(
+        ([127, 0, 0, 1], 0).into(),
+        Biller::new(
+            Store::in_memory().expect("db"),
+            BillerConfig {
+                password: Some("secret".into()),
+                registration: Registration::Ask,
+                ..BillerConfig::default()
+            },
+        ),
+    )
+    .expect("biller");
+    let mut a = e2e_zone(biller.addr(), 1);
+    let mut b = e2e_zone(biller.addr(), 2);
+    let up = |hs: &mut [&mut H]| {
+        hs.iter()
+            .all(|h| oss_server::modules::billing_ssc::link_state(&h.zone) == LinkState::LoggedIn)
+    };
+    wait(&mut [&mut a, &mut b], up);
+
+    let long = a.start_login(LONG, "lpw", true);
+    let bob = b.start_login("bob", "bpw", true);
+    let (mut cl, mut cb) = (None, None);
+    wait(&mut [&mut a, &mut b], |hs| {
+        cl = cl.or_else(|| hs[0].login_code(long));
+        cb = cb.or_else(|| hs[1].login_code(bob));
+        cl.is_some() && cb.is_some()
+    });
+    assert_eq!((cl, cb), (Some(0), Some(0)));
+    a.enter(long);
+    b.enter(bob);
+    {
+        let pl = a.zone.players.get(long).expect("long");
+        assert_eq!(pl.name, LONG, "the zone knows the player by the whole name");
+        assert_eq!(
+            pl.send_name,
+            &LONG[..19],
+            "the arena is shown 19 characters"
+        );
+    }
+
+    // into the long-named player's zone, addressed by the whole name
+    b.chat(bob, chat_type::REMOTE_PRIVATE, 0, &format!(":{LONG}:psst"));
+    let mut ga = Vec::new();
+    wait(&mut [&mut a, &mut b], |hs| {
+        ga.extend(hs[0].take(long));
+        find_text(&ga, "(bob)>psst")
+    });
+
+    // out of it, and the reply goes back to the name the receiver was shown
+    a.chat(long, chat_type::REMOTE_PRIVATE, 0, ":bob:hello");
+    let mut gb = Vec::new();
+    let mut sender = None;
+    wait(&mut [&mut a, &mut b], |hs| {
+        gb.extend(hs[1].take(bob));
+        sender = chats(&gb).iter().find_map(|(_, t)| {
+            t.strip_prefix('(')
+                .and_then(|r| r.strip_suffix(")>hello"))
+                .map(str::to_owned)
+        });
+        sender.is_some()
+    });
+    let sender = sender.expect("sender");
+    assert_eq!(
+        sender, LONG,
+        "the sender's name in (sender)> is the whole name"
+    );
+    b.chat(
+        bob,
+        chat_type::REMOTE_PRIVATE,
+        0,
+        &format!(":{sender}:back"),
+    );
+    let mut ga = Vec::new();
+    wait(&mut [&mut a, &mut b], |hs| {
+        ga.extend(hs[0].take(long));
+        find_text(&ga, "(bob)>back")
+    });
+
+    // and the biller can find them to say a name is not online
+    a.chat(long, chat_type::REMOTE_PRIVATE, 0, ":nobody:psst");
+    let mut ga = Vec::new();
+    wait(&mut [&mut a, &mut b], |hs| {
+        ga.extend(hs[0].take(long));
+        find_text(&ga, "nobody is not online.")
+    });
+    biller.stop();
 }
 
 /// What a logoff actually carries, and when.

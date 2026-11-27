@@ -499,6 +499,15 @@ fn on_login(zone: &mut Zone, player: PlayerId, pkt: &[u8]) {
         tracing::warn!(target: "core", pid = player.0, "undecodable login packet");
         return;
     };
+    // The name exactly as the client sent it, escapes and all, before any
+    // check here can refuse it: what a client lets a player type can be
+    // read off the log, including names this zone then turns away.
+    tracing::debug!(
+        target: "core",
+        pid = player.0,
+        typed = ?latin1(cstr(login.name.as_bytes(), 32)),
+        "login packet"
+    );
     if kind == ClientKind::Vie && login.client_version != VIE_CLIENT_VERSION {
         fail_login(
             zone,
@@ -573,15 +582,7 @@ fn on_login(zone: &mut Zone, player: PlayerId, pkt: &[u8]) {
         };
         p.status = PlayerStatus::NeedAuth;
     }
-    // `typed` is the name exactly as the client sent it, escapes and all,
-    // so what a client lets a player type can be read off the log
-    tracing::debug!(
-        target: "core",
-        pid = player.0,
-        name = %req.name,
-        typed = ?latin1(cstr(req.packet.name.as_bytes(), 32)),
-        "login request"
-    );
+    tracing::debug!(target: "core", pid = player.0, name = %req.name, "login request");
     if let Some(d) = data(zone, player) {
         d.login = Some(req);
     }

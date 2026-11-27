@@ -415,7 +415,12 @@ fn truncate(s: &str, max_bytes: usize) -> String {
 
 /// ASSS name sanitising: printable ASCII except `:`, runs of spaces
 /// collapsed, leading spaces removed.
-fn clean_name(raw: &[u8]) -> Vec<u8> {
+///
+/// That is what ASSS's loop does, not quite what its comment says: the
+/// comment promises trailing spaces go too, but a single trailing space
+/// survives, and so it does here. Every byte outside 32 to 126 is dropped,
+/// so a Latin-1 letter such as `é` is lost rather than kept.
+pub(crate) fn clean_name(raw: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(raw.len());
     let mut last = b' ';
     for &c in raw {

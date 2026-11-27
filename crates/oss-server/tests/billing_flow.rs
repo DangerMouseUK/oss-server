@@ -635,6 +635,42 @@ fn two_zones_through_oss_biller() {
     biller.stop();
 }
 
+/// A 23-character account name: SubSpace 1.34's name box takes 23, and so
+/// does the biller's login reply.
+const LONG: &str = "Abcdefghijklmnopqrs1234";
+
+/// The biller is sent the name cleaned as ASSS cleans it -- printable ASCII
+/// but `:`, no leading space, no run of spaces, a single trailing space left
+/// alone -- but not cut to 19 as ASSS also does: a cut would log a player in
+/// as another account, so a name too long for the biller is the biller's to
+/// refuse.
+#[test]
+fn the_biller_is_sent_the_cleaned_name_whole() {
+    let (mut h, s) = scripted();
+    h.tick(10);
+    push(&s, LinkEvent::Connected);
+    h.tick(1);
+    push(&s, LinkEvent::Packet(vec![0x33, b'i', b'd']));
+    h.tick(1);
+    sent(&s);
+    for (typed, want) in [
+        ("  Ab:c\u{1}  d\u{e9}e ", "Abc de "),
+        (LONG, LONG),
+        ("Abcdefghijklmnopqrs12345678", "Abcdefghijklmnopqrs12345678"),
+    ] {
+        h.start_login(typed, "pw", false);
+        h.tick(1);
+        let names: Vec<Vec<u8>> = sent(&s)
+            .iter()
+            .filter_map(|d| match ServerToBiller::decode(d) {
+                Ok(ServerToBiller::UserLogin(l)) => Some(l.name.as_bytes().to_vec()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(names, vec![want.as_bytes().to_vec()], "typed {typed:?}");
+    }
+}
+
 /// What a logoff actually carries, and when.
 ///
 /// `billing_ssc` sends the player's score at logoff only when it differs

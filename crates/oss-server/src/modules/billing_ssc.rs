@@ -551,7 +551,13 @@ struct BillingAuth;
 impl Auth for BillingAuth {
     fn authenticate(&self, zone: &mut Zone, p: PlayerId, login: &LoginRequest) {
         let lp = &login.packet;
-        let name = latin1(lp.name.as_bytes());
+        // ASSS cleans the name before its biller sees it, as core does for
+        // every login. ASSS also cuts it to 19 characters first; that is not
+        // done here, because the biller keeps accounts of up to 23 and refuses
+        // a longer name itself, where a cut would log the player in as the
+        // owner of a different account.
+        let clean = super::core::clean_name(lp.name.as_bytes());
+        let name = latin1(&clean);
         let password = latin1(lp.password.as_bytes());
         let cache = zone.iface::<dyn PasswordCache>();
         let Some(d) = pdata(zone, p) else { return };
@@ -580,7 +586,7 @@ impl Auth for BillingAuth {
                 let pkt = ServerToBiller::UserLogin(UserLogin {
                     make_new: lp.flags,
                     ip,
-                    name: fixed(lp.name.as_bytes()),
+                    name: fixed(&clean),
                     password: fixed(lp.password.as_bytes()),
                     connection_id,
                     machine_id: lp.machine_id,

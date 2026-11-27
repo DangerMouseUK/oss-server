@@ -431,7 +431,7 @@ fn truncate(s: &str, max_bytes: usize) -> String {
 /// comment promises trailing spaces go too, but a single trailing space
 /// survives, and so it does here. Every byte outside 32 to 126 is dropped,
 /// so a Latin-1 letter such as `é` is lost rather than kept.
-pub(crate) fn clean_name(raw: &[u8]) -> Vec<u8> {
+fn clean_name(raw: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(raw.len());
     let mut last = b' ';
     for &c in raw {
@@ -573,7 +573,15 @@ fn on_login(zone: &mut Zone, player: PlayerId, pkt: &[u8]) {
         };
         p.status = PlayerStatus::NeedAuth;
     }
-    tracing::debug!(target: "core", pid = player.0, name = %req.name, "login request");
+    // `typed` is the name exactly as the client sent it, escapes and all,
+    // so what a client lets a player type can be read off the log
+    tracing::debug!(
+        target: "core",
+        pid = player.0,
+        name = %req.name,
+        typed = ?latin1(cstr(req.packet.name.as_bytes(), 32)),
+        "login request"
+    );
     if let Some(d) = data(zone, player) {
         d.login = Some(req);
     }

@@ -553,13 +553,16 @@ struct BillingAuth;
 impl Auth for BillingAuth {
     fn authenticate(&self, zone: &mut Zone, p: PlayerId, login: &LoginRequest) {
         let lp = &login.packet;
-        // ASSS cleans the name before its biller sees it, as core does for
-        // every login. ASSS also cuts it to 19 characters first; that is not
-        // done here, because the biller keeps accounts of up to 23 and refuses
-        // a longer name itself, where a cut would log the player in as the
-        // owner of a different account.
-        let clean = super::core::clean_name(lp.name.as_bytes());
-        let name = latin1(&clean);
+        // The biller is sent the name as the client typed it, so that any
+        // account a client could have made can log in. ASSS cleans the name
+        // first and cuts it to 19 characters; neither is done here. The
+        // original clients are the rule for what a name may hold, and a
+        // cleaned or cut name is a different account: someone whose name
+        // the cleaning changed would be offered a new one, or checked
+        // against a stranger's password. SubSpace 1.34 already refuses a
+        // colon and a leading symbol itself, and the biller decides the rest.
+        let typed = lp.name.as_bytes();
+        let name = latin1(typed);
         let password = latin1(lp.password.as_bytes());
         let cache = zone.iface::<dyn PasswordCache>();
         let Some(d) = pdata(zone, p) else { return };
@@ -588,7 +591,7 @@ impl Auth for BillingAuth {
                 let pkt = ServerToBiller::UserLogin(UserLogin {
                     make_new: lp.flags,
                     ip,
-                    name: fixed(&clean),
+                    name: fixed(typed),
                     password: fixed(lp.password.as_bytes()),
                     connection_id,
                     machine_id: lp.machine_id,

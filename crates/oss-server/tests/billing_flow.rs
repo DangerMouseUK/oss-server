@@ -639,13 +639,12 @@ fn two_zones_through_oss_biller() {
 /// does the biller's login reply.
 const LONG: &str = "Abcdefghijklmnopqrs1234";
 
-/// The biller is sent the name cleaned as ASSS cleans it -- printable ASCII
-/// but `:`, no leading space, no run of spaces, a single trailing space left
-/// alone -- but not cut to 19 as ASSS also does: a cut would log a player in
-/// as another account, so a name too long for the biller is the biller's to
-/// refuse.
+/// The biller is sent the name exactly as the client typed it: not cleaned
+/// and not cut to 19, both of which ASSS does. A cleaned or cut name is a
+/// different account, so either would keep someone out of their own. What a
+/// name may hold is the biller's to decide.
 #[test]
-fn the_biller_is_sent_the_cleaned_name_whole() {
+fn the_biller_is_sent_the_name_as_typed() {
     let (mut h, s) = scripted();
     h.tick(10);
     push(&s, LinkEvent::Connected);
@@ -654,7 +653,7 @@ fn the_biller_is_sent_the_cleaned_name_whole() {
     h.tick(1);
     sent(&s);
     for (typed, want) in [
-        ("  Ab:c\u{1}  d\u{e9}e ", "Abc de "),
+        ("  Ab:c\u{1}  d\u{e9}e ", "  Ab:c\u{1}  d\u{e9}e "),
         (LONG, LONG),
         ("Abcdefghijklmnopqrs12345678", "Abcdefghijklmnopqrs12345678"),
     ] {
@@ -868,15 +867,9 @@ fn a_23_character_name_sends_and_receives_remote_private_messages() {
 
 /// oss-biller refuses a new account whose name has `%`, `,`, `:` or a
 /// character outside printable ASCII, as SSBilling2 does; an account that
-/// already has such a name still logs in. Only `%` and `,` can be shown
-/// through a zone, because the zone's cleaning takes the others out first.
-///
-/// That cleaning has a cost this test pins down: an existing account whose
-/// name has a colon (or a control character, a byte from 127 up, or two
-/// spaces in a row; the biller trims a name's ends, so no account starts
-/// with a space) can no longer be reached through our zone. Its owner types the
-/// name, the biller is sent it cleaned, and is asked whether to create that
-/// cleaned name as a new account.
+/// already has such a name still logs in, through a zone too, because the
+/// zone sends the biller the name as typed. An existing name with a colon
+/// is the case that shows it.
 #[test]
 fn the_biller_refuses_new_names_with_percent_or_comma() {
     use oss_biller::{Biller, BillerConfig, BillerHandle, Registration, Store};
@@ -923,9 +916,9 @@ fn the_biller_refuses_new_names_with_percent_or_comma() {
         "an existing account logs in as before"
     );
     assert_eq!(
-        code_for("Ab:cd", "xpw", false).0,
-        Some(auth_code::NEW_NAME),
-        "the zone sent Abcd, which is not an account"
+        code_for("Ab:cd", "xpw", false),
+        (Some(0), Some("Ab:cd".to_owned())),
+        "an existing account with a colon logs in too"
     );
     biller.stop();
 }

@@ -429,7 +429,7 @@ jobs:
           # The download-artifact step above runs from the workspace root.
           cp "../notices-download/${{ matrix.platform }}/THIRD-PARTY-NOTICES.txt" "dist/${name}/"
           {
-            echo "OSS Server ${version} -- open flavour."
+            echo "Open SubSpace zone server ${version} -- open flavour."
             echo
             echo "Speaks SubSpace (VIE) and OpenSec. Fully open source under"
             echo "GPL-2.0-or-later (LICENSE). Source: https://github.com/${GITHUB_REPOSITORY}"

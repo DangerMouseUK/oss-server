@@ -865,18 +865,18 @@ fn a_23_character_name_sends_and_receives_remote_private_messages() {
     biller.stop();
 }
 
-/// oss-biller refuses a new account whose name has `%`, `,`, `:` or a
-/// character outside printable ASCII, as SSBilling2 does; an account that
-/// already has such a name still logs in, through a zone too, because the
-/// zone sends the biller the name as typed. An existing name with a colon
-/// is the case that shows it.
+/// oss-biller refuses a new account whose name has a colon or a control
+/// character, and nothing else past the first character: `%` and `,` are
+/// allowed, because the original clients show no rule against them. An
+/// account that already has a refused name still logs in, through a zone
+/// too, because the zone sends the biller the name as typed.
 #[test]
-fn the_biller_refuses_new_names_with_percent_or_comma() {
+fn the_biller_refuses_a_new_name_with_a_colon_or_a_control_character() {
     use oss_biller::{Biller, BillerConfig, BillerHandle, Registration, Store};
     use oss_server::modules::core::auth_code;
     let store = Store::in_memory().expect("db");
-    store.create_user("Old%Name", "opw", 0).expect("old");
     store.create_user("Ab:cd", "xpw", 0).expect("colon");
+    store.create_user("Ef\u{1}gh", "ypw", 0).expect("control");
     let biller = BillerHandle::spawn(
         ([127, 0, 0, 1], 0).into(),
         Biller::new(
@@ -902,24 +902,27 @@ fn the_biller_refuses_new_names_with_percent_or_comma() {
         });
         (code, a.zone.players.get(p).map(|x| x.name.clone()))
     };
-    assert_eq!(
-        code_for("New%Name", "pw", true).0,
-        Some(auth_code::BAD_NAME)
-    );
-    assert_eq!(
-        code_for("New,Name", "pw", true).0,
-        Some(auth_code::BAD_NAME)
-    );
-    assert_eq!(
-        code_for("Old%Name", "opw", false),
-        (Some(0), Some("Old%Name".to_owned())),
-        "an existing account logs in as before"
-    );
-    assert_eq!(
-        code_for("Ab:cd", "xpw", false),
-        (Some(0), Some("Ab:cd".to_owned())),
-        "an existing account with a colon logs in too"
-    );
+    for name in ["New%Name", "New,Name"] {
+        assert_eq!(
+            code_for(name, "pw", true),
+            (Some(0), Some(name.to_owned())),
+            "{name:?} is created"
+        );
+    }
+    for name in ["New:Name", "New\u{1}Name"] {
+        assert_eq!(
+            code_for(name, "pw", true).0,
+            Some(auth_code::BAD_NAME),
+            "{name:?} is refused"
+        );
+    }
+    for (name, pw) in [("Ab:cd", "xpw"), ("Ef\u{1}gh", "ypw")] {
+        assert_eq!(
+            code_for(name, pw, false),
+            (Some(0), Some(name.to_owned())),
+            "the existing account {name:?} logs in"
+        );
+    }
     biller.stop();
 }
 

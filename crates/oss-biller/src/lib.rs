@@ -110,17 +110,18 @@ fn to_latin1(s: &str) -> Vec<u8> {
 }
 
 /// Whether a new account may not have `name`, past the first character
-/// (which the login checks first): a character outside printable ASCII, or
-/// `:`, `%` or `,` anywhere.
+/// (which the login checks first): a colon or a control character anywhere.
 ///
-/// This is SSBilling2's rule. The colon matters most, because `:name:` is
-/// how a remote private message is addressed. SSBilling2 lets DEL (127)
-/// through, because it compares a signed `char` against 127; it is refused
-/// here as the control character it is, and a zone that cleans names as
-/// ASSS does never sends it.
+/// What a name may hold follows what the original clients let a player
+/// type. SubSpace 1.34's own name box refuses a colon, and with reason:
+/// `:name:` is how a remote private message is addressed, so a name with a
+/// colon in it cannot be sent one. A control character is refused because
+/// it can be neither seen nor typed as part of an address. Nothing else is:
+/// SSBilling2 also refuses `%`, `,` and every byte from 128 up, but the
+/// original clients show no such rule, so a name like `Zoé` or `Mr,Ed` is
+/// allowed.
 fn new_name_refused(name: &str) -> bool {
-    name.chars()
-        .any(|c| !(' '..='~').contains(&c) || matches!(c, ':' | '%' | ','))
+    name.chars().any(|c| c == ':' || c.is_control())
 }
 
 fn fixed<const N: usize>(s: &str) -> FixedStr<N> {
@@ -436,7 +437,7 @@ impl Biller {
             })
         };
         if name.is_empty()
-            || name.len() > 23
+            || name.chars().count() > 23
             || name.starts_with(|c: char| !c.is_ascii_alphanumeric())
         {
             self.send(addr, &deny(login_result::BAD_NAME));
@@ -452,7 +453,7 @@ impl Biller {
                     tracing::warn!(
                         target: "biller",
                         "account {:?} ({}) has a name a new account may not have \
-                         (a character outside printable ASCII, or : % ,); it logs in as before",
+                         (a colon or a control character); it logs in as before",
                         u.name,
                         u.id
                     );
@@ -989,20 +990,22 @@ impl Drop for BillerHandle {
 mod tests {
     use super::*;
 
-    /// SSBilling2's rule for a new account's name, past its first character.
+    /// What a new account's name may not hold, past its first character.
     #[test]
     fn names_a_new_account_may_not_have() {
         for ok in [
             "Alice",
             "Abcdefghijklmnopqrs1234",
             "a b",
-            "a~!#$&()*+-./;<=>?@[]^_`{|}",
+            "a  b ",
+            "a%b",
+            "a,b",
+            "Zo\u{e9}",
+            "a~!#$%&()*+,-./;<=>?@[]^_`{|}",
         ] {
             assert!(!new_name_refused(ok), "{ok:?} is allowed");
         }
-        for bad in [
-            "a:b", "a%b", "a,b", "a\u{1}b", "a\u{7f}b", "a\u{e9}b", "ab\t",
-        ] {
+        for bad in ["a:b", "a\u{1}b", "a\u{7f}b", "ab\t", "a\u{85}b"] {
             assert!(new_name_refused(bad), "{bad:?} is refused");
         }
     }

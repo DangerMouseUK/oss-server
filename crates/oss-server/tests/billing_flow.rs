@@ -866,6 +866,69 @@ fn a_23_character_name_sends_and_receives_remote_private_messages() {
     biller.stop();
 }
 
+/// oss-biller refuses a new account whose name has `%`, `,`, `:` or a
+/// character outside printable ASCII, as SSBilling2 does; an account that
+/// already has such a name still logs in. Only `%` and `,` can be shown
+/// through a zone, because the zone's cleaning takes the others out first.
+///
+/// That cleaning has a cost this test pins down: an existing account whose
+/// name has a colon (or a control character, a leading space or two spaces
+/// in a row) can no longer be reached through our zone. Its owner types the
+/// name, the biller is sent it cleaned, and is asked whether to create that
+/// cleaned name as a new account.
+#[test]
+fn the_biller_refuses_new_names_with_percent_or_comma() {
+    use oss_biller::{Biller, BillerConfig, BillerHandle, Registration, Store};
+    use oss_server::modules::core::auth_code;
+    let store = Store::in_memory().expect("db");
+    store.create_user("Old%Name", "opw", 0).expect("old");
+    store.create_user("Ab:cd", "xpw", 0).expect("colon");
+    let biller = BillerHandle::spawn(
+        ([127, 0, 0, 1], 0).into(),
+        Biller::new(
+            store,
+            BillerConfig {
+                password: Some("secret".into()),
+                registration: Registration::Ask,
+                ..BillerConfig::default()
+            },
+        ),
+    )
+    .expect("biller");
+    let mut a = e2e_zone(biller.addr(), 1);
+    wait(&mut [&mut a], |hs| {
+        oss_server::modules::billing_ssc::link_state(&hs[0].zone) == LinkState::LoggedIn
+    });
+    let mut code_for = |name: &str, pw: &str, new_user: bool| {
+        let p = a.start_login(name, pw, new_user);
+        let mut code = None;
+        wait(&mut [&mut a], |hs| {
+            code = hs[0].login_code(p);
+            code.is_some()
+        });
+        (code, a.zone.players.get(p).map(|x| x.name.clone()))
+    };
+    assert_eq!(
+        code_for("New%Name", "pw", true).0,
+        Some(auth_code::BAD_NAME)
+    );
+    assert_eq!(
+        code_for("New,Name", "pw", true).0,
+        Some(auth_code::BAD_NAME)
+    );
+    assert_eq!(
+        code_for("Old%Name", "opw", false),
+        (Some(0), Some("Old%Name".to_owned())),
+        "an existing account logs in as before"
+    );
+    assert_eq!(
+        code_for("Ab:cd", "xpw", false).0,
+        Some(auth_code::NEW_NAME),
+        "the zone sent Abcd, which is not an account"
+    );
+    biller.stop();
+}
+
 /// What a logoff actually carries, and when.
 ///
 /// `billing_ssc` sends the player's score at logoff only when it differs

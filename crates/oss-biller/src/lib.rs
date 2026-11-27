@@ -109,6 +109,20 @@ fn to_latin1(s: &str) -> Vec<u8> {
         .collect()
 }
 
+/// Whether a new account may not have `name`, past the first character
+/// (which the login checks first): a character outside printable ASCII, or
+/// `:`, `%` or `,` anywhere.
+///
+/// This is SSBilling2's rule. The colon matters most, because `:name:` is
+/// how a remote private message is addressed. SSBilling2 lets DEL (127)
+/// through, because it compares a signed `char` against 127; it is refused
+/// here as the control character it is, and a zone that cleans names as
+/// ASSS does never sends it.
+fn new_name_refused(name: &str) -> bool {
+    name.chars()
+        .any(|c| !(' '..='~').contains(&c) || matches!(c, ':' | '%' | ','))
+}
+
 fn fixed<const N: usize>(s: &str) -> FixedStr<N> {
     let b = to_latin1(s);
     FixedStr::new(&b[..b.len().min(N - 1)])
@@ -431,6 +445,18 @@ impl Biller {
         let now = unix_now();
         let user = match self.store.user(&name) {
             Ok(Some(u)) => {
+                // SSBilling2 refuses such a name at every login. Here only a
+                // new account is refused, so nobody who already has one is
+                // locked out; the operator is told each time it is used.
+                if new_name_refused(&u.name) {
+                    tracing::warn!(
+                        target: "biller",
+                        "account {:?} ({}) has a name a new account may not have \
+                         (a character outside printable ASCII, or : % ,); it logs in as before",
+                        u.name,
+                        u.id
+                    );
+                }
                 if u.banned {
                     self.send(addr, &deny(login_result::BANNED));
                     return;
@@ -442,6 +468,10 @@ impl Biller {
                 u
             }
             Ok(None) => {
+                if new_name_refused(&name) {
+                    self.send(addr, &deny(login_result::BAD_NAME));
+                    return;
+                }
                 let create = match self.cfg.registration {
                     Registration::Auto => true,
                     Registration::Ask => l.make_new != 0,
@@ -958,6 +988,24 @@ impl Drop for BillerHandle {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// SSBilling2's rule for a new account's name, past its first character.
+    #[test]
+    fn names_a_new_account_may_not_have() {
+        for ok in [
+            "Alice",
+            "Abcdefghijklmnopqrs1234",
+            "a b",
+            "a~!#$&()*+-./;<=>?@[]^_`{|}",
+        ] {
+            assert!(!new_name_refused(ok), "{ok:?} is allowed");
+        }
+        for bad in [
+            "a:b", "a%b", "a,b", "a\u{1}b", "a\u{7f}b", "a\u{e9}b", "ab\t",
+        ] {
+            assert!(new_name_refused(bad), "{bad:?} is refused");
+        }
+    }
 
     #[test]
     fn channels() {

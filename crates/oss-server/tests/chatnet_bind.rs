@@ -11,7 +11,7 @@ use oss_server::net::{ListenSpec, Listeners};
 use oss_server::runtime::ServerBuilder;
 use oss_server::zone::{Zone, ZoneStarted};
 
-fn zone(global: &str) -> Zone {
+fn builder(global: &str) -> ServerBuilder {
     let src = MemSource::new([
         ("conf/global.conf", global),
         ("conf/passwd.conf", "[General]\nAllowUnknown = yes\n"),
@@ -23,10 +23,11 @@ fn zone(global: &str) -> Zone {
         .map(|s| (*s).to_owned())
         .collect();
     modules.push("chatnet".into());
-    ServerBuilder::with_source(src)
-        .modules(modules)
-        .build_zone()
-        .expect("zone")
+    ServerBuilder::with_source(src).modules(modules)
+}
+
+fn zone(global: &str) -> Zone {
+    builder(global).build_zone().expect("zone")
 }
 
 fn chat_addr(zone: &Zone) -> SocketAddr {
@@ -64,6 +65,39 @@ fn chat_follows_the_bound_game_socket_not_the_file() {
     assert!(
         addr.ip().is_loopback(),
         "chat listens on {addr}, not on loopback"
+    );
+}
+
+/// The whole `--bind` path, as the binary takes it: a file that says every
+/// interface, [`ServerBuilder::bind`] with a loopback address, and a real
+/// [`ServerBuilder::start`]. The test above stands in for the runtime by
+/// inserting `Listeners` itself; this one leaves that to the runtime, so it
+/// fails if `--bind` ever stops reaching chat.
+///
+/// `ChatListen = 0` asks for a port the system picks. With no setting at all
+/// chat would take the game's port number over TCP, which another process
+/// may already hold; the address rule being tested is the same either way.
+#[test]
+fn bind_on_a_started_server_puts_chat_on_the_same_address() {
+    let server = builder("[Listen]\nPort = 5000\n[Net]\nChatListen = 0\n")
+        .bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+        .start()
+        .expect("server starts");
+    let game = server.game_addr();
+    let (tx, rx) = std::sync::mpsc::channel();
+    assert!(server.handle().run(move |z| {
+        let _ = tx.send(oss_server::modules::chatnet::local_addr(z));
+    }));
+    let chat = rx.recv_timeout(std::time::Duration::from_secs(10));
+    server.stop();
+    let chat = chat
+        .expect("the game thread answered")
+        .expect("chat is listening");
+    assert!(game.ip().is_loopback(), "--bind was not applied: {game}");
+    assert_eq!(
+        chat.ip(),
+        game.ip(),
+        "chat listens on {chat}, the game on {game}"
     );
 }
 

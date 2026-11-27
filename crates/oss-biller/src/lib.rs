@@ -115,13 +115,15 @@ fn to_latin1(s: &str) -> Vec<u8> {
 /// What a name may hold follows what the original clients let a player
 /// type. SubSpace 1.34's own name box refuses a colon, and with reason:
 /// `:name:` is how a remote private message is addressed, so a name with a
-/// colon in it cannot be sent one. A control character is refused because
-/// it can be neither seen nor typed as part of an address. Nothing else is:
-/// SSBilling2 also refuses `%`, `,` and every byte from 128 up, but the
-/// original clients show no such rule, so a name like `Zoé` or `Mr,Ed` is
-/// allowed.
+/// colon in it cannot be sent one. An ASCII control character (below 32,
+/// or 127) is refused because it can be neither seen nor typed as part of
+/// an address. Nothing else is: SSBilling2 also refuses `%`, `,` and every
+/// byte from 128 up, but the original clients show no such rule, so a name
+/// like `Zoé` or `Mr,Ed` is allowed. Bytes 128 to 159 are allowed too: the
+/// original clients are Windows programs, and in the Windows character set
+/// those bytes are letters such as `Š`, `Œ` and `Ž`, not control characters.
 fn new_name_refused(name: &str) -> bool {
-    name.chars().any(|c| c == ':' || c.is_control())
+    name.chars().any(|c| c == ':' || c.is_ascii_control())
 }
 
 fn fixed<const N: usize>(s: &str) -> FixedStr<N> {
@@ -1001,11 +1003,12 @@ mod tests {
             "a%b",
             "a,b",
             "Zo\u{e9}",
+            "\u{8a}koda",
             "a~!#$%&()*+,-./;<=>?@[]^_`{|}",
         ] {
             assert!(!new_name_refused(ok), "{ok:?} is allowed");
         }
-        for bad in ["a:b", "a\u{1}b", "a\u{7f}b", "ab\t", "a\u{85}b"] {
+        for bad in ["a:b", "a\u{1}b", "a\u{7f}b", "ab\t"] {
             assert!(new_name_refused(bad), "{bad:?} is refused");
         }
     }
